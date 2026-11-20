@@ -115,10 +115,10 @@ Start rules (from the gate 1 probes; the parts that are not probed are marked):
   The app stores the ID when it gets it, not at the end of the turn.
 - **Explicit permission mode.** The app always gives the permission mode. With no flag, Claude takes the mode from the user settings of the operator.
 - **First message.** Each session start has a first message. The app gives it as the `[PROMPT]` argument of the CLI, not by typing
-  (behaviour with startup dialogs NOT TRACED, item N13). If the operator starts a session with no text, the app uses a short default message of the role.
+  (PROBED at step 0 for both CLIs: the prompt runs after the operator answers a startup dialog). If the operator starts a session with no text, the app uses a short default message of the role.
 - **Startup dialogs.** A dialog at start (folder trust, Codex "Hooks need review", Codex "Update available") blocks the session, and no hook fires before it.
   Claude shows no trust dialog in a git worktree of a trusted repository. Codex gets `-c 'projects={"<path>"={trust_level="trusted"}}'`
-  (PROBED) and `-c check_for_update_on_startup=false` (NOT TRACED, item N13). The app never types into a session that is in `starting`.
+  (PROBED) and `-c check_for_update_on_startup=false` (PROBED at step 0: with the flag, no update dialog shows). The app never types into a session that is in `starting`.
   A session that stays in `starting` for more than 20 s gets the status `question`, so the operator looks at its tab.
 - **Codex daemon.** The app starts Codex with `--no-daemon` (PROBED: it works). A shared daemon of a different version (0.171.0) runs on this machine. If the TUI uses it without the flag, and if `-c` settings apply there, is NOT TRACED.
 - **Codex hook trust.** Codex asks the operator to trust each hook command one time. The trust is lost if the command text changes.
@@ -157,13 +157,20 @@ Special cases:
 - **Codex start.** A Codex session leaves `starting` only on its first hook event. Screen output is not a signal, because a startup dialog
   also draws output and then waits. A paste into such a dialog selects its default option (for example "Update now"). So a Codex session
   with no prompt yet never gets a paste; its first message is the `[PROMPT]` argument.
-- **Claude interrupt.** Esc fires no hook (PROBED). The app sees the keys of the operator. Design rule, not probed: Esc or Ctrl-C in a `working` session, then 2 s with no PTY output, gives `idle` (item N11).
+- **Claude interrupt.** Esc fires no hook (PROBED). The app sees the keys of the operator. Rule (PROBED at step 0): Esc or Ctrl-C in a `working` or `question` session, then no hook event and 2 s with no PTY output, gives `idle`. The output stopped 0.03 to 0.14 s after the key in each probe; a second Ctrl-C adds one redraw at 0.8 s. Two Ctrl-C at the idle prompt in 0.8 s end the process, and `SessionEnd` gives `stopped`.
 - **Claude queued turn (PROBED).** A message that is submitted during a turn starts a second turn after the `Stop`, with no event at its start.
   Claude adapter rule: a `UserPromptSubmit` that comes while the status is `working` sets a "queued turn" mark. The next `Stop` keeps `working` and clears the mark. The `Stop` after it gives `idle`.
 - **`Notification` (Claude).** Used only when `notification_type` is `permission_prompt`, as a backup for `PermissionRequest` (it comes 6 s later, PROBED),
   and only if `PreToolUse` is still the last event of the session. Thus a late notification cannot set `question` again after the operator answered. The type `idle_prompt` is ignored.
 - **`SubagentStop` (Claude)** is ignored. It fires for internal agents on most turns.
-- **Permission denied.** How `question` ends after the operator denies a prompt is NOT TRACED (item N11). Until then: any later event ends `question`.
+- **Permission denied (PROBED at step 0).**
+    - Codex: a deny (the "No" option or Esc) fires `Interrupt` in less than 0.1 s. `Interrupt` gives `idle`. No other rule is necessary.
+    - Claude: a deny fires no hook. No `Stop` comes, and the late `Notification` is cancelled. The turn ends and the CLI waits for the operator.
+      Rule: in `question`, an operator key starts a watch. If a hook event comes (`PostToolUse` or `PreToolUse` after an approval), that event sets the status.
+      If no hook event comes and the PTY has no output for 2 s, the status becomes `idle`.
+      This works because the permission prompt draws output each 0.6 s, a working turn each 0.1 s, and the idle prompt draws nothing.
+- **Startup dialogs have unsafe defaults (PROBED at step 0).** Enter on the Claude trust dialog selects "No, exit". Enter on the Codex update dialog selects "Update now".
+  This is one more reason for the rule that the app never types into `starting`.
 - **Stop that the app blocked (M2).** When the Stop hook of the app returns `block` to deliver messages (4.5), the turn continues with no new event. That `Stop` keeps `working`. The next `Stop` gives `idle`.
 - The facts about `SubagentStop`, `Notification` timing and the Codex `Interrupt` event are PROBED.
 
@@ -439,9 +446,9 @@ Placeholder art is used in M1 to M3. The visual work (M4) can move earlier if th
 | N8 | `rmcp` crate as the MCP server | NOT TRACED. Version 3.11.0 has an HTTP server feature. Plan B in 4.4. Close at the start of M2 |
 | N9 | Long blocking `wait` | WORKS up to about 60 s in Claude. `wait` is limited to 50 s (4.4) |
 | N10 | Codex access to the reports folder outside a worktree | NOT TRACED. Depends on O7. Close at the start of M2 |
-| N11 | How `question` ends when the operator denies a prompt, both CLIs. Claude Ctrl-C and the 2 s quiet rule | NOT TRACED. Close in M1 |
+| N11 | How `question` ends when the operator denies a prompt, both CLIs. Claude Ctrl-C and the 2 s quiet rule | PROBED at step 0 (4.3). Evidence in `probes/step0/` |
 | N12 | Claude permission mode and tool rules for `read_only` and `edit_in_worktree` | NOT TRACED. Close at the start of M3 |
-| N13 | First message as the `[PROMPT]` argument when a startup dialog shows. Codex `check_for_update_on_startup=false`. Codex daemon behaviour without `--no-daemon` | NOT TRACED. Close in M1 |
+| N13 | First message as the `[PROMPT]` argument when a startup dialog shows. Codex `check_for_update_on_startup=false` | WORKS, PROBED at step 0 (4.2). Not traced: Codex without `--no-daemon`, and the Codex option "Continue without trusting" hooks |
 | N14 | A Codex agent acts on a message that the Stop hook delivers, when the role instructions explain it | NOT TRACED. Close at the start of M2 |
 | N15 | Nested worktrees: parent `CLAUDE.md` loading, test runners that collect `.swarm/worktrees/` | NOT TRACED. Close at the start of M3 |
 
