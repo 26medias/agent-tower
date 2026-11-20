@@ -1,0 +1,107 @@
+{
+ "hooks": {
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl SessionStart"
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl UserPromptSubmit"
+     }
+    ]
+   }
+  ],
+  "PreToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl PreToolUse"
+     }
+    ],
+    "matcher": "*"
+   }
+  ],
+  "PostToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl PostToolUse"
+     }
+    ],
+    "matcher": "*"
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl PermissionRequest"
+     }
+    ],
+    "matcher": "*"
+   }
+  ],
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl Notification"
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/stopinject.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl"
+     }
+    ]
+   }
+  ],
+  "SubagentStop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl SubagentStop"
+     }
+    ]
+   }
+  ],
+  "SessionEnd": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl SessionEnd"
+     }
+    ]
+   }
+  ],
+  "PreCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 /tmp/agent-tower-probes/hooklog.py /tmp/agent-tower-probes/logs/claude-hooks.jsonl PreCompact"
+     }
+    ]
+   }
+  ]
+ }
+}

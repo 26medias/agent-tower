@@ -1,0 +1,1 @@
+{"mcpServers":{"tower":{"type":"stdio","command":"python3","args":["/tmp/agent-tower-probes/mini_mcp.py","stdio","emp=lee"],"env":{"AT_TOKEN":"tok-lee-stdio"}}}}
