@@ -1,4 +1,5 @@
-// Types copied from docs/ipc-m1.md ("Types" and "Events") and docs/ipc-visuals-init.md (section 3).
+// Types copied from docs/ipc-m1.md ("Types" and "Events"), docs/ipc-visuals-init.md (section 3)
+// and docs/ipc-settings.md (section 3).
 // Keep in step with those files.
 
 export type Status = "starting" | "working" | "idle" | "question" | "done" | "stopped";
@@ -33,6 +34,14 @@ export interface SessionView {
     canResume: boolean; // stopped, and a CLI session ID is stored
 }
 
+/** `[defaults]` of `floor.toml`. A null field is not in the file. */
+export interface FloorDefaults {
+    cli: CliKind | null;
+    model: string | null;
+    effort: string | null;
+    policy: Policy | null;
+}
+
 export interface FloorView {
     path: string;
     name: string;
@@ -45,6 +54,7 @@ export interface FloorView {
     logoBusy: boolean; // a logo generation runs now for this floor
     logoError: string | null; // the error text of the last failed generation (in memory only)
     setupSessionId: string | null; // the live setup session, if one runs
+    defaults: FloorDefaults; // [defaults] of floor.toml
 }
 
 /** `SessionView.slug` of the setup session. The slug is reserved: `employee_save` refuses it. */
@@ -55,6 +65,24 @@ export interface Settings {
     openaiKeySource: "config" | "env" | null;
     imageModel: string;
 }
+
+export interface ModelOption {
+    id: string; // the value that goes to the CLI
+    label: string; // text for the list
+    efforts: string[]; // empty for an image model
+    defaultEffort: string | null;
+    custom: boolean; // from the [models] table of the app config
+}
+
+export interface ModelCatalog {
+    claude: ModelOption[];
+    codex: ModelOption[];
+    image: ModelOption[];
+    codexSource: "cache" | "builtin";
+}
+
+/** The lists that take custom models. */
+export type ModelKind = "claude" | "codex" | "image";
 
 export interface Programs {
     claude: string | null;

@@ -13,8 +13,8 @@
 //!   so the last size wins). It is one ioctl.
 
 use crate::views::{
-    AttachResult, Cli, Employee, FloorEntry, FloorView, OutputMessage, Programs, SessionView,
-    Settings,
+    AttachResult, Cli, Employee, FloorDefaults, FloorEntry, FloorView, ModelCatalog, OutputMessage,
+    Programs, SessionView, Settings,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -241,6 +241,39 @@ pub async fn settings_set(
 ) -> Result<Settings, String> {
     blocking(&tower, move |t| {
         t.settings_set(openai_key, image_model).map(Settings::from)
+    })
+    .await
+}
+
+/// The model lists. The Codex file is read again on each call.
+#[tauri::command]
+pub async fn models_get(tower: State<'_, Shared>) -> Result<ModelCatalog, String> {
+    blocking(&tower, |t| Ok(ModelCatalog::from(t.models_get()))).await
+}
+
+/// `kind` is `claude`, `codex` or `image`. It replaces the custom models of that kind.
+#[tauri::command]
+pub async fn models_set_custom(
+    tower: State<'_, Shared>,
+    kind: String,
+    models: Vec<String>,
+) -> Result<ModelCatalog, String> {
+    blocking(&tower, move |t| {
+        t.models_set_custom(&kind, &models).map(ModelCatalog::from)
+    })
+    .await
+}
+
+/// Write `[defaults]` of `floor.toml`.
+#[tauri::command]
+pub async fn floor_defaults_set(
+    tower: State<'_, Shared>,
+    path: String,
+    defaults: FloorDefaults,
+) -> Result<FloorView, String> {
+    blocking(&tower, move |t| {
+        t.floor_defaults_set(&path_of(&path), defaults.into())
+            .map(FloorView::from)
     })
     .await
 }

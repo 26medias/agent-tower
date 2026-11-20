@@ -580,6 +580,24 @@ impl FloorStore {
         Ok(())
     }
 
+    /// Write the `[defaults]` table of `floor.toml`. The rest of the file stays (see `set_brand`).
+    /// A field that is `None` is removed from the file. Empty defaults remove the table.
+    pub fn set_defaults(&mut self, defaults: FloorDefaults) -> Result<(), StoreError> {
+        let path = self.swarm_dir().join(FLOOR_FILE);
+        let text = read_text(&path)?;
+        let mut table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;
+        if defaults == FloorDefaults::default() {
+            table.remove("defaults");
+        } else {
+            let value = toml::Value::try_from(&defaults).map_err(|e| invalid(&path, e))?;
+            table.insert("defaults".to_owned(), value);
+        }
+        let text = toml::to_string(&table).map_err(|e| invalid(&path, e))?;
+        write_atomic(&path, text.as_bytes())?;
+        self.floor.defaults = defaults;
+        Ok(())
+    }
+
     fn employees_dir(&self) -> PathBuf {
         self.swarm_dir().join("employees")
     }

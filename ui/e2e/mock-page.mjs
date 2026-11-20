@@ -2,14 +2,18 @@
 // Usage: pnpm dev (in another shell), then: pnpm e2e
 // Env: E2E_URL (default http://127.0.0.1:1420), E2E_SHOT (screenshot path; the 5 and 13 employee
 //      screenshots go next to it with the suffixes -5 and -13),
-//      E2E_CHROME (path of a chromium or chrome binary; default: the Playwright cache).
+//      E2E_CHROME (path of a chromium or chrome binary; default: the Playwright cache),
+//      E2E_SETTINGS_SHOTS (folder for the screenshots of the settings panel and the employee
+//      form; default /tmp/agent-tower-review/settings).
 import { chromium } from "playwright-core";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const url = process.env.E2E_URL ?? "http://127.0.0.1:1420";
 const shot = process.env.E2E_SHOT ?? "mock-page.png";
+const settingsShots = process.env.E2E_SETTINGS_SHOTS ?? "/tmp/agent-tower-review/settings";
+mkdirSync(settingsShots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -448,11 +452,62 @@ try {
     await page.click(".bar button.add");
     await page.fill('input[name="name"]', "Zed Zebra");
     check("slug is made from the name", (await page.locator(".slug code").innerText()) === "zed-zebra");
+    // The model select shows the list of the selected CLI, and the effort select the efforts of
+    // the selected model (docs/ipc-settings.md, section 6).
+    const opts = (sel) => page.$$eval(`${sel} option`, (os) => os.map((o) => o.textContent.trim()));
+    const val = (sel) => page.locator(sel).inputValue();
+    check(
+        "the model select of a Claude employee lists the 4 Claude models after the floor default",
+        JSON.stringify(await opts('select[name="model"]')) ===
+            JSON.stringify(["floor default (CLI default)", "Fable (fable)", "Opus (opus)", "Sonnet (sonnet)", "Haiku (haiku)"]),
+        JSON.stringify(await opts('select[name="model"]')),
+    );
+    check(
+        "the effort select with the floor default model is default + the 5 standard efforts",
+        JSON.stringify(await opts('select[name="effort"]')) === JSON.stringify(["default", "low", "medium", "high", "xhigh", "max"]),
+    );
+    await page.selectOption('select[name="model"]', "haiku");
     await page.selectOption('select[name="cli"]', "codex");
     check(
-        "model placeholder follows the CLI",
-        (await page.locator('input[name="model"]').getAttribute("placeholder")) === "gpt-6-luna",
+        "a change of CLI resets a model of the other CLI to the floor default",
+        (await val('select[name="model"]')) === "" && (await page.locator('select[name="model"] option:checked').innerText()) === "floor default (CLI default)",
     );
+    check(
+        "the model select shows the model list of the selected CLI (Codex, from the catalog)",
+        JSON.stringify(await opts('select[name="model"]')) ===
+            JSON.stringify([
+                "floor default (CLI default)",
+                "GPT-6.2-Sol (gpt-6.2-sol)",
+                "GPT-6-Astra (gpt-6-astra)",
+                "GPT-6-Luna (gpt-6-luna)",
+                "GPT-5.6-Luna (gpt-5.6-luna)",
+            ]),
+        JSON.stringify(await opts('select[name="model"]')),
+    );
+    check(
+        "a Codex model without ultra has no ultra in the effort list",
+        !(await opts('select[name="effort"]')).includes("ultra"),
+    );
+    await page.selectOption('select[name="model"]', "gpt-6.2-sol");
+    check(
+        "the effort select shows the efforts of the selected model (ultra for gpt-6.2-sol)",
+        JSON.stringify(await opts('select[name="effort"]')) === JSON.stringify(["default", "low", "medium", "high", "xhigh", "max", "ultra"]),
+    );
+    await page.selectOption('select[name="effort"]', "ultra");
+    await page.selectOption('select[name="cli"]', "claude");
+    check(
+        "a change of CLI also resets an effort that the new model does not have",
+        (await val('select[name="model"]')) === "" && (await val('select[name="effort"]')) === "",
+    );
+    await page.selectOption('select[name="cli"]', "codex");
+    await page.selectOption('select[name="model"]', "gpt-6.2-sol");
+    await page.selectOption('select[name="effort"]', "ultra");
+    await page.selectOption('select[name="model"]', "gpt-6-luna");
+    check(
+        "a change of model resets an effort that the new model does not have",
+        (await val('select[name="effort"]')) === "",
+    );
+    await page.selectOption('select[name="model"]', "");
     await page.click('form[aria-label="Add employee"] button.primary');
     await page.waitForSelector('.emp[data-slug="zed-zebra"]');
     check(
@@ -677,6 +732,263 @@ try {
     await page.waitForSelector('.storey.on[data-path="/home/demo/tower"]');
     await page.waitForSelector(".tab");
     await page.waitForTimeout(600);
+
+    // 15. The settings panel, the model lists and the floor defaults.
+    const dialog = page.locator('[role="dialog"][aria-label="Settings"]');
+    const openSettings = async () => {
+        await page.click("button.settings");
+        await dialog.waitFor();
+    };
+    const closeSettings = async () => {
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "detached" });
+    };
+    const since = async (command, n) => (await calls(command)).slice(n);
+    const count = async (command) => (await calls(command)).length;
+
+    // A close that does not work is a failed check, not a time-out: the helper then closes the panel
+    // with the close button so that the next checks can run.
+    const gone = async () => {
+        await dialog.waitFor({ state: "detached", timeout: 1500 }).catch(() => {});
+        const closed = (await dialog.count()) === 0;
+        if (!closed) await page.click('button[aria-label="Close settings"]');
+        return closed;
+    };
+    await page.click("button.settings");
+    const opened = await dialog.waitFor({ timeout: 3000 }).then(() => true, () => false);
+    check("the Settings button opens the settings panel", opened);
+    if (!opened) throw new Error("the settings panel did not open");
+    check(
+        "the settings panel has the 5 sections",
+        JSON.stringify(await page.$$eval('[role="dialog"] section', (s) => s.map((x) => x.dataset.section))) ===
+            JSON.stringify(["keys", "image", "models", "defaults", "programs"]),
+    );
+    await page.keyboard.press("Escape");
+    check("Escape closes the settings panel", await gone());
+    await openSettings();
+    await page.mouse.click(4, 4);
+    check("a click on the backdrop closes the settings panel", await gone());
+    await openSettings();
+    await page.click('button[aria-label="Close settings"]');
+    check("the close button closes the settings panel", await gone());
+    check("the programs panel is not in the building column any more", (await page.locator("aside .programs").count()) === 0);
+
+    // API keys. A key was saved in the "New logo" flow above.
+    await openSettings();
+    check("the key state says set (app config)", (await dialog.locator(".state").innerText()) === "set (app config)");
+    const setsBefore = await count("settings_set");
+    await dialog.locator("button.remove-key").click();
+    await page.waitForFunction(() => document.querySelector('[role="dialog"] .state')?.textContent === "not set");
+    const removeCall = (await since("settings_set", setsBefore))[0];
+    check(
+        "remove sends an empty key and no model change, and the state is not set",
+        removeCall.args.openaiKey === "" && removeCall.args.imageModel === null && (await dialog.locator("button.remove-key").count()) === 0,
+        JSON.stringify(removeCall.args),
+    );
+    check("the key field is a password field", (await dialog.locator("#settings-openai-key").getAttribute("type")) === "password");
+    await dialog.locator("#settings-openai-key").fill("sk-panel-secret-1");
+    await dialog.locator(".keyform button.primary").click();
+    await page.waitForFunction(() => document.querySelector('[role="dialog"] .state')?.textContent === "set (app config)");
+    check(
+        "after set the panel shows no key text and the field is empty",
+        !(await dialog.innerText()).includes("sk-panel-secret-1") &&
+            (await dialog.locator("#settings-openai-key").inputValue()) === "" &&
+            (await dialog.locator("button.remove-key").count()) === 1,
+    );
+
+    // The logo image model.
+    check(
+        "the image model select lists the 2 built-in image models",
+        JSON.stringify(await opts('select[name="imageModel"]')) === JSON.stringify(["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]),
+    );
+    const imagesBefore = await count("settings_set");
+    await page.selectOption('select[name="imageModel"]', "gpt-image-2.6-flare");
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "settings_set").length > n, imagesBefore);
+    const imageCall = (await since("settings_set", imagesBefore))[0];
+    check(
+        "a change of the image model sends settings_set with the model and no key",
+        imageCall.args.imageModel === "gpt-image-2.6-flare" && imageCall.args.openaiKey === null,
+        JSON.stringify(imageCall.args),
+    );
+    await page.selectOption('select[name="imageModel"]', "gpt-image-2.6-sunburst");
+
+    // The model lists and the custom models.
+    const codexList = dialog.locator('.list[data-kind="codex"]');
+    const codexInput = codexList.locator("input");
+    check("the Codex list shows 4 models and where the list comes from", (await codexList.locator("li").count()) === 4 && (await codexList.locator(".note").innerText()).includes("models_cache.json"));
+    check("each model shows its label and its ID", (await codexList.locator('li[data-model="gpt-6-luna"] .text').innerText()) === "GPT-6-Luna (gpt-6-luna)");
+    await codexInput.fill("--foo");
+    check(
+        "a name that starts with a dash cannot be added (the button is off, the reason shows)",
+        (await codexList.locator("button.add").isDisabled()) && (await codexList.locator(".problem").count()) === 1,
+    );
+    await codexInput.fill("gpt-6-luna");
+    check("a name that is in the list already cannot be added", await codexList.locator("button.add").isDisabled());
+    const customBefore = await count("models_set_custom");
+    await codexInput.fill("my-custom-1");
+    await codexList.locator("button.add").click();
+    await codexList.locator('li[data-model="my-custom-1"]').waitFor();
+    const addCall = (await since("models_set_custom", customBefore))[0];
+    check(
+        "a custom model is added to the Codex list after the others, with a custom tag and a remove button",
+        JSON.stringify(addCall.args) === JSON.stringify({ kind: "codex", models: ["my-custom-1"] }) &&
+            (await codexList.locator("li").last().getAttribute("data-model")) === "my-custom-1" &&
+            (await codexList.locator('li[data-model="my-custom-1"] .tag').innerText()) === "custom" &&
+            (await codexInput.inputValue()) === "",
+        JSON.stringify(addCall.args),
+    );
+    check("the built-in models have no remove button", (await codexList.locator("button.remove").count()) === 1);
+    await codexList.locator('li[data-model="my-custom-1"] button.remove').click();
+    await codexList.locator('li[data-model="my-custom-1"]').waitFor({ state: "detached" });
+    const removeModelCall = (await since("models_set_custom", customBefore)).at(-1);
+    check(
+        "a custom model can be removed (models_set_custom with an empty list)",
+        JSON.stringify(removeModelCall.args) === JSON.stringify({ kind: "codex", models: [] }) && (await codexList.locator("li").count()) === 4,
+        JSON.stringify(removeModelCall.args),
+    );
+    const imageList = dialog.locator('.list[data-kind="image"]');
+    await imageList.locator("input").fill("img-x");
+    await imageList.locator("button.add").click();
+    await imageList.locator('li[data-model="img-x"]').waitFor();
+    check(
+        "an image model can be added in its own list, and then the image select offers it",
+        (await opts('select[name="imageModel"]')).includes("img-x"),
+    );
+    await imageList.locator('li[data-model="img-x"] button.remove').click();
+    await imageList.locator('li[data-model="img-x"]').waitFor({ state: "detached" });
+
+    // Programs moved into the panel.
+    check("the programs paths are in the settings panel", (await dialog.locator('.programs [data-program="claude"]').count()) === 1);
+
+    // Floor defaults.
+    const defaults = dialog.locator('section[data-section="defaults"]');
+    const dsel = (name) => defaults.locator(`select[name="${name}"]`);
+    check(
+        "the floor defaults start as (not set), and the model and effort selects are off with no CLI",
+        (await dsel("defaultCli").inputValue()) === "" && (await dsel("defaultModel").isDisabled()) && (await dsel("defaultEffort").isDisabled()),
+    );
+    await dsel("defaultCli").selectOption("codex");
+    check("with a CLI the model select lists that CLI", (await dsel("defaultModel").isEnabled()) && (await defaults.locator('select[name="defaultModel"] option').count()) === 5);
+    await dsel("defaultModel").selectOption("gpt-6.2-sol");
+    await dsel("defaultEffort").selectOption("ultra");
+    await dsel("defaultCli").selectOption("claude");
+    check(
+        "a change of the default CLI resets a model of the other CLI and its effort",
+        (await dsel("defaultModel").inputValue()) === "" && (await dsel("defaultEffort").inputValue()) === "",
+    );
+    await dsel("defaultCli").selectOption("codex");
+    await dsel("defaultModel").selectOption("gpt-6-luna");
+    await dsel("defaultEffort").selectOption("high");
+    await dsel("defaultPolicy").selectOption("ask_always");
+    const defaultsBefore = await count("floor_defaults_set");
+    await defaults.locator("button.primary").click();
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "floor_defaults_set").length > n, defaultsBefore);
+    await page.waitForFunction(() => document.querySelector('[role="dialog"] section[data-section="defaults"] button.primary')?.disabled === true);
+    const saveCall = (await since("floor_defaults_set", defaultsBefore))[0];
+    check(
+        "save sends floor_defaults_set with the path and the four fields",
+        JSON.stringify(saveCall.args) ===
+            JSON.stringify({ path: "/home/demo/tower", defaults: { cli: "codex", model: "gpt-6-luna", effort: "high", policy: "ask_always" } }),
+        JSON.stringify(saveCall.args),
+    );
+    // Screenshots: the top of the panel, and the whole panel (tall window) with one custom model.
+    const claudeList = dialog.locator('.list[data-kind="claude"]');
+    await claudeList.locator("input").fill("claude-opus-4-1[1m]");
+    await claudeList.locator("button.add").click();
+    await claudeList.locator('li[data-model="claude-opus-4-1[1m]"]').waitFor();
+    await dialog.evaluate((el) => (el.scrollTop = 0));
+    await page.screenshot({ path: join(settingsShots, "settings-panel.png") });
+    await page.setViewportSize({ width: 1280, height: 1700 });
+    await page.waitForTimeout(150);
+    await dialog.screenshot({ path: join(settingsShots, "settings-panel-full.png") });
+    await page.setViewportSize({ width: 1024, height: 700 });
+    await page.waitForTimeout(150);
+    await page.screenshot({ path: join(settingsShots, "settings-panel-1024.png") });
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await claudeList.locator('li[data-model="claude-opus-4-1[1m]"] button.remove').click();
+    await claudeList.locator('li[data-model="claude-opus-4-1[1m]"]').waitFor({ state: "detached" });
+    await closeSettings();
+
+    // The saved default shows in the employee form: "floor default (X)" follows the CLI rule.
+    await page.click(".bar button.add");
+    check(
+        "the Claude form shows floor default (CLI default) when the floor default CLI is codex",
+        (await page.locator('select[name="model"] option').first().innerText()) === "floor default (CLI default)",
+    );
+    await page.selectOption('select[name="cli"]', "codex");
+    check(
+        "the Codex form shows the saved default model in the floor default option",
+        (await page.locator('select[name="model"] option').first().innerText()) === "floor default (gpt-6-luna)",
+    );
+    await page.keyboard.press("Escape");
+    await openSettings();
+    await dsel("defaultCli").selectOption("");
+    check("with the CLI set back to (not set) the model and effort selects are off and empty", (await dsel("defaultModel").isDisabled()) && (await dsel("defaultModel").inputValue()) === "" && (await dsel("defaultEffort").inputValue()) === "");
+    await defaults.locator("button.primary").click();
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "floor_defaults_set").length > n, defaultsBefore + 1);
+    const clearCall = (await since("floor_defaults_set", defaultsBefore)).at(-1);
+    check(
+        "the CLI (not set) sends null for the model and the effort too (the policy stays)",
+        JSON.stringify(clearCall.args.defaults) === JSON.stringify({ cli: null, model: null, effort: null, policy: "ask_always" }),
+        JSON.stringify(clearCall.args.defaults),
+    );
+    await dsel("defaultPolicy").selectOption("");
+    await defaults.locator("button.primary").click();
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "floor_defaults_set").length > n, defaultsBefore + 2);
+    await closeSettings();
+
+    // A stored model that is not in the list stays selected with "(not in the list)".
+    await openSettings();
+    await codexList.locator("input").fill("my-custom-2");
+    await codexList.locator("button.add").click();
+    await codexList.locator('li[data-model="my-custom-2"]').waitFor();
+    await closeSettings();
+    await page.click(".bar button.add");
+    await page.fill('input[name="name"]', "Temp Tmp");
+    await page.selectOption('select[name="cli"]', "codex");
+    check("a custom model is in the model select of the employee form", (await opts('select[name="model"]')).includes("my-custom-2"));
+    await page.selectOption('select[name="model"]', "my-custom-2");
+    check(
+        "a custom model has the 5 standard efforts",
+        JSON.stringify(await opts('select[name="effort"]')) === JSON.stringify(["default", "low", "medium", "high", "xhigh", "max"]),
+    );
+    await page.selectOption('select[name="effort"]', "max");
+    await page.screenshot({ path: join(settingsShots, "employee-form.png") });
+    await page.click('form[aria-label="Add employee"] button.primary');
+    await page.waitForSelector('.emp[data-slug="temp-tmp"]');
+    await openSettings();
+    await codexList.locator('li[data-model="my-custom-2"] button.remove').click();
+    await codexList.locator('li[data-model="my-custom-2"]').waitFor({ state: "detached" });
+    await closeSettings();
+    await selectEmp("temp-tmp");
+    await bar.locator("button.edit").click();
+    await page.waitForSelector('form[aria-label="Edit employee"]');
+    check(
+        "a stored model that left the list stays selected, with the text (not in the list)",
+        (await val('select[name="model"]')) === "my-custom-2" &&
+            (await page.locator('select[name="model"] option:checked').innerText()) === "my-custom-2 (not in the list)",
+    );
+    check("the stored effort stays selected", (await val('select[name="effort"]')) === "max");
+    const savesBefore = await count("employee_save");
+    await page.click('form[aria-label="Edit employee"] button.primary');
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "employee_save").length > n, savesBefore);
+    const keepCall = (await since("employee_save", savesBefore))[0];
+    check(
+        "a save does not change the stored model or effort",
+        keepCall.args.employee.model === "my-custom-2" && keepCall.args.employee.effort === "max",
+        JSON.stringify(keepCall.args.employee),
+    );
+    await selectEmp("temp-tmp");
+    await bar.locator("button.edit").click();
+    await page.waitForSelector('form[aria-label="Edit employee"]');
+    await page.selectOption('select[name="cli"]', "claude");
+    check("a stored unknown model goes to the floor default when the CLI changes", (await val('select[name="model"]')) === "");
+    await page.keyboard.press("Escape");
+    await bar.locator("button.remove").click();
+    await bar.locator("button.remove").click();
+    await page.waitForSelector('.emp[data-slug="temp-tmp"]', { state: "detached" });
+    check("the temporary employee is removed again", (await page.locator(".emp").count()) === 4);
+
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);
 } catch (e) {

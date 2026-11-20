@@ -11,8 +11,7 @@
     }
 </script>
 
-<details class="programs">
-    <summary>Programs</summary>
+<div class="programs">
     {#if store.programs}
         {#each names as name (name)}
             <div class="row" data-program={name}>
@@ -42,24 +41,19 @@
     {:else}
         <p class="dim">Loading...</p>
     {/if}
-</details>
+</div>
 
 <style>
     .programs {
-        border-top: 1px solid var(--line);
-        padding: 6px 0 0;
         font-size: 12px;
-    }
-
-    summary {
-        cursor: pointer;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        color: var(--dim);
     }
 
     .row {
         margin-top: 6px;
+    }
+
+    .row:first-child {
+        margin-top: 0;
     }
 
     .head,

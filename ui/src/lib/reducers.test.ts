@@ -112,6 +112,7 @@ describe("floor view and tabs", () => {
         logoBusy: false,
         logoError: null,
         setupSessionId: null,
+        defaults: { cli: null, model: null, effort: null, policy: null },
     });
 
     it("replaces the sessions of the floor and keeps the other floors", () => {

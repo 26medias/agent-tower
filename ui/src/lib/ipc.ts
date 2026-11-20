@@ -7,9 +7,12 @@ import type {
     AttachResult,
     CliKind,
     FloorChangedPayload,
+    FloorDefaults,
     FloorEntry,
     FloorView,
     Employee,
+    ModelCatalog,
+    ModelKind,
     OutputMessage,
     ProgramName,
     Programs,
@@ -148,6 +151,19 @@ export const settingsGet = () => call<Settings>("settings_get");
 /** A null argument means "no change". An empty `openaiKey` removes the key from the app config. */
 export const settingsSet = (openaiKey: string | null, imageModel: string | null) =>
     call<Settings>("settings_set", { openaiKey, imageModel });
+
+// ---- Commands (docs/ipc-settings.md, section 4) ----
+
+/** The Rust side reads the Codex file again on each call. */
+export const modelsGet = () => call<ModelCatalog>("models_get");
+
+/** Replaces the custom models of one kind. Rejects with a text for a bad name. */
+export const modelsSetCustom = (kind: ModelKind, models: string[]) =>
+    call<ModelCatalog>("models_set_custom", { kind, models });
+
+/** Writes `[defaults]` of `floor.toml`. A null field goes out of the file. */
+export const floorDefaultsSet = (path: string, defaults: FloorDefaults) =>
+    call<FloorView>("floor_defaults_set", { path, defaults });
 
 // ---- Events (docs/ipc-m1.md, "Events") ----
 

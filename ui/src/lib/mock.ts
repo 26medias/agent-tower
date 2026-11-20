@@ -3,11 +3,16 @@
 // same error texts.
 import { base64ToBytes, bytesToBase64, concatBytes } from "./codec";
 import type { Backend, Unlisten } from "./ipc";
+import { STANDARD_EFFORTS, isValidEffort, isValidModelName } from "./models";
 import type {
     AttachResult,
     Employee,
+    FloorDefaults,
     FloorEntry,
     FloorView,
+    ModelCatalog,
+    ModelKind,
+    ModelOption,
     OutputMessage,
     ProgramName,
     Programs,
@@ -29,6 +34,7 @@ interface MockFloor {
     logoVersion: number | null;
     logoBusy: boolean;
     logoError: string | null;
+    defaults: FloorDefaults;
 }
 
 interface MockSession {
@@ -92,6 +98,30 @@ function employee(slug: string, name: string, role: string, manager: string | nu
     };
 }
 
+const noDefaults = (): FloorDefaults => ({ cli: null, model: null, effort: null, policy: null });
+
+function modelOption(id: string, label: string, efforts: readonly string[], defaultEffort: string | null): ModelOption {
+    return { id, label, efforts: [...efforts], defaultEffort, custom: false };
+}
+
+/** The lists that the mock starts with. They look like the real ones (the Codex file has "ultra"). */
+const CLAUDE_MODELS = [
+    modelOption("fable", "Fable", STANDARD_EFFORTS, null),
+    modelOption("opus", "Opus", STANDARD_EFFORTS, null),
+    modelOption("sonnet", "Sonnet", STANDARD_EFFORTS, null),
+    modelOption("haiku", "Haiku", STANDARD_EFFORTS, null),
+];
+const CODEX_MODELS = [
+    modelOption("gpt-6.2-sol", "GPT-6.2-Sol", [...STANDARD_EFFORTS, "ultra"], "low"),
+    modelOption("gpt-6-astra", "GPT-6-Astra", [...STANDARD_EFFORTS, "ultra"], "medium"),
+    modelOption("gpt-6-luna", "GPT-6-Luna", STANDARD_EFFORTS, "medium"),
+    modelOption("gpt-5.6-luna", "GPT-5.6-Luna", STANDARD_EFFORTS, "medium"),
+];
+const IMAGE_MODELS = [
+    modelOption("gpt-image-2.6-sunburst", "gpt-image-2.6-sunburst", [], null),
+    modelOption("gpt-image-2.6-flare", "gpt-image-2.6-flare", [], null),
+];
+
 /** Paths that the mock turns into other paths, like a symlink does. */
 const ALIASES: Record<string, string> = { "/home/demo/link": "/home/demo/tower" };
 
@@ -128,6 +158,37 @@ export function createMockBackend(): Backend {
     const failOnce = new Set(["start:eng-sam", "resume:pm"]);
 
     const settings: Settings = { openaiKeySet: false, openaiKeySource: null, imageModel: "gpt-image-2.6-sunburst" };
+    // The custom models of the app config (`[models]`).
+    const custom: Record<ModelKind, string[]> = { claude: [], codex: [], image: [] };
+
+    function catalog(): ModelCatalog {
+        const build = (base: ModelOption[], kind: ModelKind): ModelOption[] => {
+            const list = base.map((m) => ({ ...m, efforts: [...m.efforts] }));
+            for (const id of custom[kind]) {
+                if (list.some((m) => m.id === id)) continue;
+                list.push({
+                    id,
+                    label: id,
+                    efforts: kind === "image" ? [] : [...STANDARD_EFFORTS],
+                    defaultEffort: null,
+                    custom: true,
+                });
+            }
+            return list;
+        };
+        return {
+            claude: build(CLAUDE_MODELS, "claude"),
+            codex: build(CODEX_MODELS, "codex"),
+            image: build(IMAGE_MODELS, "image"),
+            codexSource: "cache",
+        };
+    }
+
+    /** Like the Rust side: a model or an effort that is not valid is refused. */
+    function checkModelAndEffort(what: string, model: string | null, effort: string | null): void {
+        if (model && !isValidModelName(model)) throw `the ${what} model ${JSON.stringify(model)} is not a valid model name.`;
+        if (effort && !isValidEffort(effort)) throw `the ${what} effort ${JSON.stringify(effort)} is not a valid effort.`;
+    }
     const LOGO_MS = 1500;
 
     function addFloor(path: string, name: string, employees: Employee[]): MockFloor {
@@ -142,6 +203,7 @@ export function createMockBackend(): Backend {
             logoVersion: null,
             logoBusy: false,
             logoError: null,
+            defaults: noDefaults(),
         };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
@@ -217,6 +279,7 @@ export function createMockBackend(): Backend {
             logoBusy: floor.logoBusy,
             logoError: floor.logoError,
             setupSessionId: setup ? setup.sessionId : null,
+            defaults: { ...floor.defaults },
         };
     }
 
@@ -456,6 +519,7 @@ export function createMockBackend(): Backend {
                 const floor = floorOf(path);
                 if (emp.slug === SETUP_SLUG) throw `the slug "${SETUP_SLUG}" is reserved`;
                 if (!/^[a-z0-9][a-z0-9-]*$/.test(emp.slug)) throw `bad slug "${emp.slug}"`;
+                checkModelAndEffort(`employee ${emp.slug}`, emp.model, emp.effort);
                 const i = floor.employees.findIndex((e) => e.slug === emp.slug);
                 if (i >= 0) floor.employees[i] = structuredClone(emp);
                 else floor.employees.push(structuredClone(emp));
@@ -627,8 +691,45 @@ export function createMockBackend(): Backend {
                         }
                     }
                 }
-                if (a.imageModel !== null && a.imageModel.trim() !== "") settings.imageModel = a.imageModel.trim();
+                if (a.imageModel !== null) {
+                    const model = a.imageModel.trim();
+                    if (model !== "" && !isValidModelName(model)) {
+                        throw `the image model ${JSON.stringify(model)} is not a valid model name.`;
+                    }
+                    // An empty text resets the model, like the real app.
+                    settings.imageModel = model !== "" ? model : "gpt-image-2.6-sunburst";
+                }
                 return { ...settings };
+            }
+            case "models_get": {
+                args(raw, []);
+                return catalog();
+            }
+            case "models_set_custom": {
+                const a = args<{ kind: string; models: string[] }>(raw, ["kind", "models"]);
+                if (a.kind !== "claude" && a.kind !== "codex" && a.kind !== "image") {
+                    throw `unknown model list ${JSON.stringify(a.kind)} (use claude, codex or image)`;
+                }
+                const names = a.models.map((m) => m.trim());
+                for (const name of names) {
+                    if (!isValidModelName(name)) throw `the model name ${JSON.stringify(name)} is not a valid model name.`;
+                }
+                const base = catalog()[a.kind].filter((m) => !m.custom).map((m) => m.id);
+                custom[a.kind] = names.filter((n, i) => !base.includes(n) && names.indexOf(n) === i);
+                return catalog();
+            }
+            case "floor_defaults_set": {
+                const a = args<{ path: string; defaults: FloorDefaults }>(raw, ["path", "defaults"]);
+                const floor = floorOf(a.path);
+                checkModelAndEffort("default", a.defaults.model, a.defaults.effort);
+                floor.defaults = {
+                    cli: a.defaults.cli ?? null,
+                    model: a.defaults.model ?? null,
+                    effort: a.defaults.effort ?? null,
+                    policy: a.defaults.policy ?? null,
+                };
+                emit("floor-changed", { path: a.path });
+                return viewOf(floor);
             }
             case "programs_get": {
                 args(raw, []);

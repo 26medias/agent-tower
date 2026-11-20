@@ -34,7 +34,7 @@ impl<R: Runtime> Observer for TauriObserver<R> {
     }
 }
 
-/// Register the commands of `docs/ipc-m1.md` and `docs/ipc-visuals-init.md` on a builder. Public for the tests of the shell.
+/// Register the commands of `docs/ipc-m1.md`, `docs/ipc-visuals-init.md` and `docs/ipc-settings.md` on a builder. Public for the tests of the shell.
 #[doc(hidden)]
 pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
@@ -59,6 +59,9 @@ pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         commands::setup_start,
         commands::settings_get,
         commands::settings_set,
+        commands::models_get,
+        commands::models_set_custom,
+        commands::floor_defaults_set,
     ])
 }
 

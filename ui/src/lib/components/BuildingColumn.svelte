@@ -1,11 +1,11 @@
 <script lang="ts">
     // The left column: the building at the bottom, and a small toolbar under it with
-    // "open folder", "create", the list of floors (with "forget") and the programs panel.
+    // "open folder", "create" and the list of floors (with "forget"). The "Settings" button in the
+    // header opens the settings panel (it has the programs paths).
     import { tick } from "svelte";
     import { store } from "$lib/store.svelte";
     import Building from "./Building.svelte";
     import ConfirmButton from "./ConfirmButton.svelte";
-    import ProgramsPanel from "./ProgramsPanel.svelte";
 
     let pathInput = $state("");
     let createName = $state("");
@@ -44,9 +44,30 @@
 <aside class="column">
     <header>
         <h1 class="logo">Agent Tower</h1>
-        {#if store.backend === "mock"}
-            <span class="mock" title="No Tauri found: the page uses the in-memory mock backend">mock</span>
-        {/if}
+        <div class="tools">
+            {#if store.backend === "mock"}
+                <span class="mock" title="No Tauri found: the page uses the in-memory mock backend">mock</span>
+            {/if}
+            <button
+                type="button"
+                class="ghost settings"
+                title="Settings"
+                aria-label="Settings"
+                onclick={() => (store.settingsOpen = true)}
+            >
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                    <path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linejoin="round"
+                        d="M10.3 2.5h3.4l.5 2.6 1.9.8 2.2-1.5 2.4 2.4-1.5 2.2.8 1.9 2.6.5v3.4l-2.6.5-.8 1.9 1.5 2.2-2.4 2.4-2.2-1.5-1.9.8-.5 2.6h-3.4l-.5-2.6-1.9-.8-2.2 1.5-2.4-2.4 1.5-2.2-.8-1.9-2.6-.5v-3.4l2.6-.5.8-1.9-1.5-2.2 2.4-2.4 2.2 1.5 1.9-.8z"
+                    />
+                    <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2" />
+                </svg>
+                <span>Settings</span>
+            </button>
+        </div>
     </header>
 
     <div class="scroll" bind:this={scroller}>
@@ -120,7 +141,6 @@
             </ul>
         </details>
 
-        <ProgramsPanel />
     </div>
 </aside>
 
@@ -136,14 +156,29 @@
 
     header {
         display: flex;
+        flex-wrap: wrap;
         justify-content: space-between;
         align-items: center;
+        gap: 4px 8px;
         padding: 10px 12px 4px;
     }
 
     .logo {
         color: var(--accent);
         font-size: 14px;
+    }
+
+    .tools {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    button.settings {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 6px;
     }
 
     .mock {

@@ -1,5 +1,15 @@
 <script lang="ts">
-    import { untrack } from "svelte";
+    import { onMount, untrack } from "svelte";
+    import {
+        afterCliChange,
+        afterModelChange,
+        defaultModelFor,
+        effortChoices,
+        effortList,
+        floorDefaultLabel,
+        listFor,
+        modelChoices,
+    } from "$lib/models";
     import { isValidSlug, slugify, uniqueSlug } from "$lib/slug";
     import { store } from "$lib/store.svelte";
     import type { CliKind, Employee, Policy } from "$lib/types";
@@ -24,7 +34,31 @@
     // A new employee gets the slug from the name. An existing slug never changes.
     const slug = $derived(editing ? initial.slug : uniqueSlug(slugify(name), taken));
     const managers = $derived((store.floorView?.employees ?? []).filter((e) => e.slug !== slug));
-    const modelHint = $derived(cli === "claude" ? "haiku" : "gpt-6-luna");
+    // The model select shows the list of the selected CLI. The effort select shows the efforts of
+    // the selected model, or of the floor default model when the model is "floor default".
+    const defaults = $derived(store.floorView?.defaults ?? null);
+    const list = $derived(listFor(store.models, cli));
+    const fallbackModel = $derived(defaultModelFor(defaults, cli));
+    const modelOptions = $derived(modelChoices(list, model));
+    const effortOptions = $derived(effortChoices(effortList(list, model, fallbackModel), effort));
+
+    onMount(() => {
+        // The Codex file can change while the app runs: read the lists again.
+        void store.loadModels();
+    });
+
+    function changeCli(value: CliKind): void {
+        cli = value;
+        const next = defaultModelFor(defaults, value);
+        const fixed = afterCliChange(listFor(store.models, value), model, effort, next);
+        model = fixed.model;
+        effort = fixed.effort;
+    }
+
+    function changeModel(value: string): void {
+        model = value;
+        effort = afterModelChange(list, value, effort, fallbackModel);
+    }
     const valid = $derived(name.trim() !== "" && role.trim() !== "" && isValidSlug(slug));
 
     async function submit(): Promise<void> {
@@ -36,8 +70,8 @@
             role: role.trim(),
             manager: manager === "" ? null : manager,
             cli,
-            model: model.trim() === "" ? null : model.trim(),
-            effort: effort.trim() === "" ? null : effort.trim(),
+            model: model === "" ? null : model,
+            effort: effort === "" ? null : effort,
             policy,
             roleText,
         });
@@ -84,7 +118,7 @@
         <div class="two">
             <label>
                 <span>CLI</span>
-                <select name="cli" bind:value={cli}>
+                <select name="cli" value={cli} onchange={(e) => changeCli(e.currentTarget.value as CliKind)}>
                     <option value="claude">claude</option>
                     <option value="codex">codex</option>
                 </select>
@@ -102,11 +136,21 @@
         <div class="two">
             <label>
                 <span>Model</span>
-                <input type="text" name="model" placeholder={modelHint} autocomplete="off" bind:value={model} />
+                <select name="model" value={model} onchange={(e) => changeModel(e.currentTarget.value)}>
+                    <option value="">{floorDefaultLabel(defaults, cli)}</option>
+                    {#each modelOptions as choice (choice.value)}
+                        <option value={choice.value}>{choice.label}</option>
+                    {/each}
+                </select>
             </label>
             <label>
                 <span>Effort</span>
-                <input type="text" name="effort" placeholder="medium" autocomplete="off" bind:value={effort} />
+                <select name="effort" value={effort} onchange={(e) => (effort = e.currentTarget.value)}>
+                    <option value="">default</option>
+                    {#each effortOptions as choice (choice.value)}
+                        <option value={choice.value}>{choice.label}</option>
+                    {/each}
+                </select>
             </label>
         </div>
 

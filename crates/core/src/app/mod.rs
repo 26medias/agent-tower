@@ -35,6 +35,7 @@
 
 mod live;
 mod logo_run;
+mod models;
 mod settings;
 mod tools;
 
@@ -44,7 +45,7 @@ use crate::adapter::{
 use crate::env::{EnvMap, current_env};
 use crate::hookrx::HookReceiver;
 use crate::logo::{DEFAULT_API_BASE, REQUEST_TIMEOUT};
-use crate::model::{CliKind, Employee, PermissionPolicy, SessionRecord};
+use crate::model::{CliKind, Employee, FloorDefaults, PermissionPolicy, SessionRecord};
 use crate::programs::Resolver;
 use crate::pty::LogConfig;
 use crate::session::{HookRouter, PasteRefused, Session};
@@ -64,6 +65,10 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub use live::SCROLLBACK_LIMIT;
+pub use models::{
+    CodexSource, ModelCatalog, ModelKind, ModelOption, STANDARD_EFFORTS, is_valid_effort,
+    is_valid_model_name,
+};
 pub use settings::{KeySource, SettingsView};
 pub use tools::{FAILURE_TTL, hook_candidates, locate_hook_program, workspace_root};
 
@@ -165,6 +170,8 @@ pub struct FloorView {
     pub logo_error: Option<String>,
     /// The ID of the live setup session, if one runs.
     pub setup_session_id: Option<String>,
+    /// `[defaults]` of `floor.toml`.
+    pub defaults: FloorDefaults,
 }
 
 /// `FloorEntry` of the contract.
@@ -243,6 +250,9 @@ pub struct TowerConfig {
     pub image_api_base: String,
     /// The time limit of one logo request.
     pub logo_timeout: Duration,
+    /// The Codex home folder. The app reads `models_cache.json` from it and writes nothing there.
+    /// `None`: `$CODEX_HOME` of `parent_env`, then `$HOME/.codex`. Tests give a temp folder.
+    pub codex_home: Option<PathBuf>,
     /// Test only. Runs in `session_attach` inside the critical section of the output buffer,
     /// after the scrollback was copied and before the sink is installed. A correct build holds
     /// the output thread during the call; a build with a gap or a duplicate does not.
@@ -261,6 +271,7 @@ impl TowerConfig {
             log_limit: LOG_LIMIT_BYTES,
             image_api_base: DEFAULT_API_BASE.to_owned(),
             logo_timeout: REQUEST_TIMEOUT,
+            codex_home: None,
             attach_pause: None,
         }
     }
@@ -349,6 +360,8 @@ pub struct Tower {
     parent_env: EnvMap,
     log_limit: u64,
     logo_env: Arc<LogoEnv>,
+    /// The Codex home folder, or `None` when it is not known (the built-in Codex list is used).
+    codex_home: Option<PathBuf>,
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
     closed: Arc<AtomicBool>,
 }
@@ -363,6 +376,18 @@ fn reload(floor: &FloorHandle) -> Result<()> {
     let mut store = locked(&floor.store);
     *store = FloorStore::open(&floor.path)?;
     Ok(())
+}
+
+/// The Codex home folder: `$CODEX_HOME`, or `$HOME/.codex`. `None` when neither is set.
+fn default_codex_home(env: &EnvMap) -> Option<PathBuf> {
+    let var = |name: &str| {
+        env.get(std::ffi::OsStr::new(name))
+            .filter(|value| !value.is_empty())
+    };
+    match var("CODEX_HOME") {
+        Some(home) => Some(PathBuf::from(home)),
+        None => var("HOME").map(|home| PathBuf::from(home).join(".codex")),
+    }
 }
 
 fn io_message(what: &str, error: io::Error) -> TowerError {
@@ -393,6 +418,9 @@ impl Tower {
             api_base: config.image_api_base,
             timeout: config.logo_timeout,
         });
+        let codex_home = config
+            .codex_home
+            .or_else(|| default_codex_home(&config.parent_env));
         Ok(Tower {
             floor_list: FloorList::new(&config.config_dir),
             socket: hookrx.path().to_path_buf(),
@@ -408,6 +436,7 @@ impl Tower {
             parent_env: config.parent_env,
             log_limit: config.log_limit,
             logo_env,
+            codex_home,
             attach_pause: config.attach_pause,
             closed: Arc::new(AtomicBool::new(false)),
         })
@@ -505,6 +534,9 @@ impl Tower {
                 "the slug \"{SETUP_SLUG}\" is reserved for the setup agent. Use another slug."
             )));
         }
+        // The model goes to the CLI as an argument. A bad name is refused before it is stored.
+        models::check_model("model", employee.model.as_deref()).map_err(other)?;
+        models::check_effort("effort", employee.effort.as_deref()).map_err(other)?;
         let floor = self.floor_handle(path)?;
         locked(&floor.store).write_employee(&employee)?;
         self.notifier.floor_changed(&floor.path);
@@ -520,6 +552,17 @@ impl Tower {
             });
         }
         locked(&floor.store).remove_employee(slug)?;
+        self.notifier.floor_changed(&floor.path);
+        self.floor_view(&floor)
+    }
+
+    /// Write `[defaults]` of `floor.toml`. A `None` field goes out of the file. The model and the
+    /// effort are checked like those of an employee. The observer gets `floor_changed`.
+    pub fn floor_defaults_set(&self, path: &Path, defaults: FloorDefaults) -> Result<FloorView> {
+        models::check_model("default model", defaults.model.as_deref()).map_err(other)?;
+        models::check_effort("default effort", defaults.effort.as_deref()).map_err(other)?;
+        let floor = self.floor_handle(path)?;
+        locked(&floor.store).set_defaults(defaults)?;
         self.notifier.floor_changed(&floor.path);
         self.floor_view(&floor)
     }
@@ -543,7 +586,7 @@ impl Tower {
     }
 
     fn floor_view(&self, floor: &FloorHandle) -> Result<FloorView> {
-        let (name, brand, loaded, records, setup_record) = {
+        let (name, brand, defaults, loaded, records, setup_record) = {
             let store = locked(&floor.store);
             let mut loaded = store.read_employees()?;
             // The slug `setup` is reserved. A file with that slug is an error, not an employee.
@@ -577,6 +620,7 @@ impl Tower {
             (
                 store.floor().name.clone(),
                 store.floor().brand.clone(),
+                store.floor().defaults.clone(),
                 loaded,
                 records,
                 setup_record,
@@ -653,6 +697,7 @@ impl Tower {
             logo_busy,
             logo_error,
             setup_session_id,
+            defaults,
         })
     }
 
@@ -700,10 +745,9 @@ impl Tower {
                 "the key has a space or a character that a key cannot have",
             ));
         }
-        if let Some(model) = &image_model
-            && model.trim().chars().any(|c| c.is_control())
-        {
-            return Err(other("the image model has a control character"));
+        if let Some(model) = &image_model {
+            // An empty text removes the stored model. Any other text must be a valid name.
+            models::check_model("image model", Some(model.trim())).map_err(other)?;
         }
         if openai_key.is_some() || image_model.is_some() {
             settings::update(&self.logo_env.config_file, |table| {
@@ -717,6 +761,25 @@ impl Tower {
             .map_err(|e| io_message("cannot write the app config", e))?;
         }
         Ok(self.settings_get())
+    }
+
+    /// The model lists. It reads the Codex file and the app config again on each call.
+    pub fn models_get(&self) -> ModelCatalog {
+        models::catalog(&self.logo_env.config_file, self.codex_home.as_deref())
+    }
+
+    /// Replace the custom models of one kind (`claude`, `codex` or `image`). A bad name refuses
+    /// the whole call. A duplicate, and a name that is already in the list, is dropped.
+    pub fn models_set_custom(&self, kind: &str, names: &[String]) -> Result<ModelCatalog> {
+        let kind = ModelKind::parse(kind).map_err(other)?;
+        models::set_custom(
+            &self.logo_env.config_file,
+            self.codex_home.as_deref(),
+            kind,
+            names,
+        )
+        .map_err(other)?;
+        Ok(self.models_get())
     }
 
     // ---- sessions ----
@@ -811,14 +874,30 @@ impl Tower {
                     .find(|e| e.slug == slug)
                     .ok_or_else(|| StoreError::EmployeeNotFound(slug.to_owned()))?,
             };
-            // The defaults of `floor.toml` fill what the employee leaves empty.
+            // The defaults of `floor.toml` fill what the employee leaves empty. They apply only
+            // when the floor has no default CLI, or its default CLI is the CLI of the employee:
+            // a Claude model name must not go to Codex (`docs/ipc-settings.md`, section 5).
             let defaults = &store.floor().defaults;
-            if employee.model.as_deref().is_none_or(str::is_empty) {
-                employee.model = defaults.model.clone();
+            if defaults.cli.is_none_or(|cli| cli == employee.cli) {
+                if employee.model.as_deref().is_none_or(str::is_empty) {
+                    employee.model = defaults.model.clone();
+                }
+                if employee.effort.as_deref().is_none_or(str::is_empty) {
+                    employee.effort = defaults.effort.clone();
+                }
             }
-            if employee.effort.as_deref().is_none_or(str::is_empty) {
-                employee.effort = defaults.effort.clone();
-            }
+            // A hand-written employee file or `floor.toml` has no check. The model and the effort
+            // go to the CLI as arguments, so a bad one is refused here, before the process starts.
+            models::check_model(
+                &format!("model of {}", employee.name),
+                employee.model.as_deref(),
+            )
+            .map_err(other)?;
+            models::check_effort(
+                &format!("effort of {}", employee.name),
+                employee.effort.as_deref(),
+            )
+            .map_err(other)?;
             let previous = if resume {
                 match store
                     .db()

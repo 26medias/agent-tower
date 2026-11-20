@@ -4,6 +4,7 @@
     import BuildingColumn from "$lib/components/BuildingColumn.svelte";
     import EmployeeForm from "$lib/components/EmployeeForm.svelte";
     import Office from "$lib/components/Office.svelte";
+    import SettingsPanel from "$lib/components/SettingsPanel.svelte";
     import Tabs from "$lib/components/Tabs.svelte";
     import TerminalArea from "$lib/components/TerminalArea.svelte";
     import Toasts from "$lib/components/Toasts.svelte";
@@ -34,6 +35,10 @@
         <DebugPaste />
     </main>
 </div>
+
+{#if store.settingsOpen}
+    <SettingsPanel onclose={() => (store.settingsOpen = false)} />
+{/if}
 
 {#if form !== undefined}
     {#key form?.slug ?? "new"}

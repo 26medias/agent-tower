@@ -4,7 +4,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tower_core::app;
-use tower_core::model::{CliKind, Employee as CoreEmployee, PermissionPolicy};
+use tower_core::model::{
+    CliKind, Employee as CoreEmployee, FloorDefaults as CoreDefaults, PermissionPolicy,
+};
 use tower_core::status::Status;
 
 fn text(path: &Path) -> String {
@@ -181,6 +183,95 @@ pub struct FloorView {
     pub logo_busy: bool,
     pub logo_error: Option<String>,
     pub setup_session_id: Option<String>,
+    /// `[defaults]` of `floor.toml`.
+    pub defaults: FloorDefaults,
+}
+
+/// `FloorDefaults`: the `[defaults]` of `floor.toml`. It goes in both directions. A missing field
+/// and a null are both `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FloorDefaults {
+    #[serde(default)]
+    pub cli: Option<Cli>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub policy: Option<Policy>,
+}
+
+impl From<CoreDefaults> for FloorDefaults {
+    fn from(d: CoreDefaults) -> FloorDefaults {
+        FloorDefaults {
+            cli: d.cli.map(Cli::from),
+            model: d.model,
+            effort: d.effort,
+            policy: d.permission.map(Policy::from),
+        }
+    }
+}
+
+impl From<FloorDefaults> for CoreDefaults {
+    fn from(d: FloorDefaults) -> CoreDefaults {
+        CoreDefaults {
+            cli: d.cli.map(CliKind::from),
+            model: d.model,
+            effort: d.effort,
+            permission: d.policy.map(PermissionPolicy::from),
+        }
+    }
+}
+
+/// `ModelOption`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    pub id: String,
+    pub label: String,
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+    pub custom: bool,
+}
+
+impl From<app::ModelOption> for ModelOption {
+    fn from(m: app::ModelOption) -> ModelOption {
+        ModelOption {
+            id: m.id,
+            label: m.label,
+            efforts: m.efforts,
+            default_effort: m.default_effort,
+            custom: m.custom,
+        }
+    }
+}
+
+/// `ModelCatalog`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    pub claude: Vec<ModelOption>,
+    pub codex: Vec<ModelOption>,
+    pub image: Vec<ModelOption>,
+    /// `"cache"` or `"builtin"`.
+    pub codex_source: String,
+}
+
+impl From<app::ModelCatalog> for ModelCatalog {
+    fn from(c: app::ModelCatalog) -> ModelCatalog {
+        let list =
+            |models: Vec<app::ModelOption>| models.into_iter().map(ModelOption::from).collect();
+        ModelCatalog {
+            claude: list(c.claude),
+            codex: list(c.codex),
+            image: list(c.image),
+            codex_source: match c.codex_source {
+                app::CodexSource::Cache => "cache".to_owned(),
+                app::CodexSource::Builtin => "builtin".to_owned(),
+            },
+        }
+    }
 }
 
 impl From<app::FloorView> for FloorView {
@@ -197,6 +288,7 @@ impl From<app::FloorView> for FloorView {
             logo_busy: view.logo_busy,
             logo_error: view.logo_error,
             setup_session_id: view.setup_session_id,
+            defaults: view.defaults.into(),
         }
     }
 }
@@ -394,6 +486,12 @@ mod tests {
             logo_busy: true,
             logo_error: Some("NO_KEY: x".into()),
             setup_session_id: None,
+            defaults: FloorDefaults {
+                cli: Some(Cli::Codex),
+                model: Some("gpt-6-luna".into()),
+                effort: None,
+                policy: Some(Policy::AskAlways),
+            },
         };
         assert_eq!(
             to_json(&floor),
@@ -402,7 +500,10 @@ mod tests {
                 "employeeErrors": ["bad.md"], "sessions": [session_json()],
                 "description": "A shop.", "logoPrompt": null,
                 "logoVersion": 1_700_000_000_000_i64, "logoBusy": true,
-                "logoError": "NO_KEY: x", "setupSessionId": null
+                "logoError": "NO_KEY: x", "setupSessionId": null,
+                "defaults": {
+                    "cli": "codex", "model": "gpt-6-luna", "effort": null, "policy": "ask_always"
+                }
             })
         );
         let entry = FloorEntry {
@@ -434,6 +535,58 @@ mod tests {
             json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m"})
         );
         assert_eq!(to_json(&KeySource::Config), json!("config"));
+    }
+
+    #[test]
+    fn floor_defaults_convert_both_ways_and_accept_missing_fields() {
+        let json_in =
+            json!({"cli": "claude", "model": "haiku", "effort": "low", "policy": "read_only"});
+        let defaults: FloorDefaults = serde_json::from_value(json_in.clone()).unwrap();
+        assert_eq!(to_json(&defaults), json_in);
+        let core: CoreDefaults = defaults.clone().into();
+        assert_eq!(core.cli, Some(CliKind::Claude));
+        assert_eq!(core.permission, Some(PermissionPolicy::ReadOnly));
+        assert_eq!(FloorDefaults::from(core), defaults);
+        let empty: FloorDefaults = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(empty, FloorDefaults::default());
+        let nulls: FloorDefaults = serde_json::from_value(
+            json!({"cli": null, "model": null, "effort": null, "policy": null}),
+        )
+        .unwrap();
+        assert_eq!(nulls, FloorDefaults::default());
+    }
+
+    #[test]
+    fn model_catalog_has_the_contract_fields() {
+        let catalog = ModelCatalog::from(app::ModelCatalog {
+            claude: vec![app::ModelOption {
+                id: "haiku".into(),
+                label: "Haiku".into(),
+                efforts: vec!["low".into()],
+                default_effort: Some("low".into()),
+                custom: false,
+            }],
+            codex: vec![],
+            image: vec![app::ModelOption {
+                id: "img".into(),
+                label: "img".into(),
+                efforts: vec![],
+                default_effort: None,
+                custom: true,
+            }],
+            codex_source: app::CodexSource::Cache,
+        });
+        assert_eq!(
+            to_json(&catalog),
+            json!({
+                "claude": [{"id": "haiku", "label": "Haiku", "efforts": ["low"],
+                    "defaultEffort": "low", "custom": false}],
+                "codex": [],
+                "image": [{"id": "img", "label": "img", "efforts": [],
+                    "defaultEffort": null, "custom": true}],
+                "codexSource": "cache"
+            })
+        );
     }
 
     #[test]

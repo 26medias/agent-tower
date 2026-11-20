@@ -115,6 +115,8 @@ fn app() -> App {
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .collect();
     config.adapters = Arc::new(|kind| Box::new(FakeAdapter(kind)));
+    // The Codex home is a folder of the test, never the real one.
+    config.codex_home = Some(base.join("codex-home"));
     // No test reaches the real image API, also not by mistake.
     config.image_api_base = "http://127.0.0.1:1".to_owned();
     let tower = Arc::new(Tower::new(config).unwrap());
@@ -506,5 +508,138 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
     app.wait_event("stopped", |e| {
         e["session"]["sessionId"] == json!(id) && e["session"]["status"] == "stopped"
     });
+    let _ = &app.dir;
+}
+
+#[test]
+fn the_model_and_defaults_commands_work_through_the_ipc_with_the_contract_shapes() {
+    let app = app();
+    let path = app.path();
+    let floor = app
+        .call("floor_create", json!({ "path": path, "name": "Acme" }))
+        .unwrap();
+    // `FloorView.defaults` is there, with four null fields.
+    assert_eq!(
+        floor["defaults"],
+        json!({ "cli": null, "model": null, "effort": null, "policy": null })
+    );
+
+    // `models_get`: the camelCase fields. The Codex home is a folder of the test (no file).
+    let catalog = app.call("models_get", json!({})).unwrap();
+    assert_eq!(catalog["codexSource"], "builtin");
+    assert_eq!(
+        catalog["claude"][3],
+        json!({
+            "id": "haiku", "label": "Haiku", "custom": false, "defaultEffort": null,
+            "efforts": ["low", "medium", "high", "xhigh", "max"]
+        })
+    );
+    assert_eq!(catalog["image"][0]["id"], "gpt-image-2.6-sunburst");
+    assert_eq!(catalog["image"][0]["efforts"], json!([]));
+
+    // The Codex file of the test Codex home is used, and read again on each call.
+    let home = app.dir.path().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("models_cache.json"),
+        r#"{"models": [{"slug": "gpt-t", "display_name": "GPT T", "visibility": "list",
+            "default_reasoning_level": "high", "supported_reasoning_levels": [{"effort": "high"}]}]}"#,
+    )
+    .unwrap();
+    let catalog = app.call("models_get", json!({})).unwrap();
+    assert_eq!(catalog["codexSource"], "cache");
+    assert_eq!(
+        catalog["codex"],
+        json!([{ "id": "gpt-t", "label": "GPT T", "efforts": ["high"],
+            "defaultEffort": "high", "custom": false }])
+    );
+
+    // `models_set_custom`: the argument names are `kind` and `models`.
+    let catalog = app
+        .call(
+            "models_set_custom",
+            json!({ "kind": "codex", "models": ["my-model", "gpt-t"] }),
+        )
+        .unwrap();
+    assert_eq!(catalog["codex"][1]["id"], "my-model");
+    assert_eq!(catalog["codex"][1]["custom"], json!(true));
+    assert_eq!(catalog["codex"].as_array().unwrap().len(), 2);
+    let error = app
+        .call(
+            "models_set_custom",
+            json!({ "kind": "claude", "models": ["--foo"] }),
+        )
+        .unwrap_err();
+    assert!(error.contains("not a valid model name"), "{error}");
+    let error = app
+        .call("models_set_custom", json!({ "kind": "bad", "models": [] }))
+        .unwrap_err();
+    assert!(error.contains("unknown model list"), "{error}");
+
+    // `floor_defaults_set`: the JSON of the contract, the policy in snake_case, and an event.
+    let before = app.events.lock().unwrap().len();
+    let view = app
+        .call(
+            "floor_defaults_set",
+            json!({ "path": path, "defaults": {
+                "cli": "codex", "model": "gpt-t", "effort": "high", "policy": "ask_always"
+            }}),
+        )
+        .unwrap();
+    assert_eq!(
+        view["defaults"],
+        json!({ "cli": "codex", "model": "gpt-t", "effort": "high", "policy": "ask_always" })
+    );
+    assert!(app.events.lock().unwrap().len() > before);
+    assert!(
+        app.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(name, payload)| name == "floor-changed" && payload == &json!({ "path": path }))
+    );
+    let floor = app.call("floor_open", json!({ "path": path })).unwrap();
+    assert_eq!(floor["defaults"]["model"], "gpt-t");
+    // A null field goes out of the file.
+    let view = app
+        .call(
+            "floor_defaults_set",
+            json!({ "path": path, "defaults": {
+                "cli": null, "model": null, "effort": null, "policy": null
+            }}),
+        )
+        .unwrap();
+    assert_eq!(view["defaults"]["cli"], Value::Null);
+    let text = std::fs::read_to_string(app.cwd.join(".swarm/floor.toml")).unwrap();
+    assert!(!text.contains("defaults"), "{text}");
+
+    // The model name check at the other doors, through the IPC.
+    let error = app
+        .call(
+            "floor_defaults_set",
+            json!({ "path": path, "defaults": {
+                "cli": null, "model": "--foo", "effort": null, "policy": null
+            }}),
+        )
+        .unwrap_err();
+    assert!(error.contains("not a valid model name"), "{error}");
+    let error = app
+        .call(
+            "employee_save",
+            json!({ "path": path, "employee": {
+                "slug": "bad", "name": "B", "role": "R", "manager": null,
+                "cli": "claude", "model": "--foo", "effort": null,
+                "policy": "read_only", "roleText": ""
+            }}),
+        )
+        .unwrap_err();
+    assert!(error.contains("not a valid model name"), "{error}");
+    let error = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": "--foo" }),
+        )
+        .unwrap_err();
+    assert!(error.contains("not a valid model name"), "{error}");
     let _ = &app.dir;
 }

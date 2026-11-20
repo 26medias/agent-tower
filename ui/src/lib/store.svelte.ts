@@ -19,8 +19,11 @@ import {
 import type {
     CliKind,
     Employee,
+    FloorDefaults,
     FloorEntry,
     FloorView,
+    ModelCatalog,
+    ModelKind,
     ProgramName,
     Programs,
     SessionView,
@@ -61,6 +64,10 @@ class Store {
     toasts = $state.raw<Toast[]>([]);
     programs = $state.raw<Programs | null>(null);
     settings = $state.raw<Settings | null>(null);
+    /** The model lists (docs/ipc-settings.md). Null until the first `models_get` answers. */
+    models = $state.raw<ModelCatalog | null>(null);
+    /** The settings panel is open. */
+    settingsOpen = $state(false);
     /** Logo of each floor as a `data:` URL, by floor path. A floor without a logo has no entry. */
     logos = $state.raw<Record<string, string>>({});
     /** The employee that the operator selected, by floor path. */
@@ -139,6 +146,7 @@ class Store {
         await this.loadFloors();
         void this.loadPrograms();
         void this.loadSettings();
+        void this.loadModels();
         const last = readLastFloor();
         const first = this.floors.find((f) => f.path === last && !f.missing) ?? this.floors.find((f) => !f.missing);
         if (first) await this.openFloor(first.path);
@@ -482,6 +490,65 @@ class Store {
             this.settings = await ipc.settingsGet();
         } catch (e) {
             this.fail(e);
+        }
+    }
+
+    // ---- settings panel, model lists, floor defaults (docs/ipc-settings.md) ----
+
+    /** Read the lists again. The Rust side reads the Codex file on each call. */
+    async loadModels(): Promise<void> {
+        try {
+            this.models = await ipc.modelsGet();
+        } catch (e) {
+            this.fail(e);
+        }
+    }
+
+    /** Replace the custom models of one kind. Returns true on success. */
+    async setCustomModels(kind: ModelKind, names: string[]): Promise<boolean> {
+        try {
+            this.models = await ipc.modelsSetCustom(kind, names);
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
+    }
+
+    /** Store the image model of the logo. Returns true on success. */
+    async setImageModel(model: string): Promise<boolean> {
+        try {
+            this.settings = await ipc.settingsSet(null, model);
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
+    }
+
+    /** Store the OpenAI key in the app config. An empty text removes it. Returns true on success. */
+    async setOpenaiKey(key: string): Promise<boolean> {
+        try {
+            this.settings = await ipc.settingsSet(key.trim(), null);
+            // A stored key makes an old `NO_KEY:` error out of date.
+            if (key.trim() !== "") this.clearLogoCallError();
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
+    }
+
+    /** Write the floor defaults of the open floor. Returns true on success. */
+    async setFloorDefaults(defaults: FloorDefaults): Promise<boolean> {
+        const path = this.openPath;
+        if (!path) return false;
+        try {
+            this.applyView(await ipc.floorDefaultsSet(path, defaults));
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
         }
     }
 

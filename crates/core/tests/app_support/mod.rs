@@ -372,6 +372,8 @@ impl Rig {
                 kind,
             })
         });
+        // The Codex home is a folder of the test, never the real one. It has no file at first.
+        cfg.codex_home = config.parent().map(|base| base.join("codex-home"));
         tweak(&mut cfg);
         let tower = Tower::new(cfg).expect("make the tower");
         for name in ["claude", "codex"] {
