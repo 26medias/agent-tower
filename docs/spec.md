@@ -99,7 +99,7 @@ An employee exists in the database when it has no session. A session is started 
 | Action | Who can do it | Result |
 |---|---|---|
 | Start | The manager of the employee (through an MCP tool), or the operator | A new CLI process starts in a PTY with the role instructions and the MCP configuration. |
-| Continue | The same | The message goes to the live session. If the session stopped, the app resumes it by its CLI session ID (`claude --resume <id>` VERIFIED flag; `codex resume <id>` VERIFIED subcommand). |
+| Continue | The same | The message goes to the live session. If the session stopped and had one turn or more, the app resumes it by its CLI session ID. A session with no turn cannot be resumed (the CLI has no conversation); the app starts a fresh one (`claude --resume <id>` VERIFIED flag; `codex resume <id>` VERIFIED subcommand). |
 | Stop | The manager, or the operator | The process stops. The transcript stays. |
 | Fresh start | The manager, or the operator | Stop, then start with a new CLI session and an empty context. |
 
@@ -244,9 +244,13 @@ That the role instructions change this is NOT TRACED (item N14). If they do not,
 1. The app never writes to a PTY in `question` or `starting`.
 2. One write lock for each PTY. The app reads the status again inside the lock, immediately before the write.
 3. `idle` permits a paste only if no `PreToolUse` or `PermissionRequest` came after the last turn end. A turn end is a `Stop`, a Codex `Interrupt`, or an `idle` from the 2 s quiet rule (deny, Esc, Ctrl-C).
-4. **Draft flag.** A printable key or a paste from the operator, typed while the status is `idle`, `done` or `working`, sets a `draft` flag for that session.
-   Keys typed during `question` or `starting` (answers to a dialog), and arrows, Enter and Esc, do not set it. `UserPromptSubmit` clears it.
-   The operator can also clear it with a click on the "message waiting" mark of the tab.
+4. **Draft flag.** A key from the operator that can put text into the input box of the CLI, typed while the status is `idle`, `done` or `working`,
+   sets a `draft` flag for that session. Such keys are printable text, a paste, and control keys that insert text: Ctrl+V (the CLI reads the clipboard itself),
+   Up arrow and Ctrl+P (history), Ctrl+R, Ctrl+Y, Tab and some others (the full table is in `crates/core/src/session.rs`).
+   Keys typed during `question` or `starting`, and Enter, Esc, Ctrl-C, Backspace and cursor keys, do not set it. When in doubt, a key sets the flag.
+   The flag ends in two ways only: a `UserPromptSubmit` event, or the operator's click on the "draft" or "message waiting" mark of the tab.
+   There is no automatic clear. Reason (PROBED in the M1 review): a slash command such as `/help` fires no hook and leaves a dialog open;
+   a paste into that dialog loses the message and can select an option.
    The app does not paste while the flag is set, because the draft and the message become one prompt (PROBED).
 5. The operator can type in a tab at any time. Operator input always has priority.
 
