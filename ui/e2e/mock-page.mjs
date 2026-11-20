@@ -56,6 +56,9 @@ try {
     await page.waitForSelector(".floors li.open");
     check("floor list shows the open floor", (await page.locator(".floors li.open").innerText()).includes("Demo Tower"));
     check("four employee cards", (await page.locator("article.card").count()) === 4);
+    const cardNames = () => page.locator("article.card .name").allInnerTexts();
+    const order1 = await cardNames();
+    check("cards are in hierarchy order (root, reports, depth first, ties by name)", order1.join(",") === "Ada,Maya,Lin,Sam", order1.join(","));
     check("mock badge shown", await page.locator(".mock").isVisible());
 
     // 2. Start Ada: tab and terminal.
@@ -94,7 +97,12 @@ try {
     const refusal = await page.locator(".debug .result").innerText();
     check("debug paste shows the refusal text", refusal === "REFUSED: draft", refusal);
     await page.waitForSelector(".tab.active .mark.waiting");
-    check('"message waiting" mark appears', true);
+    const waitTitle = (await page.locator(".tab.active .mark.waiting").getAttribute("title")) ?? "";
+    check(
+        '"message waiting" mark appears, with the agreed tooltip',
+        waitTitle === "A message waits. Click to clear your draft flag so it can be delivered.",
+        waitTitle,
+    );
     await page.click(".tab.active .mark.waiting");
     await page.waitForSelector(".tab.active .mark.waiting", { state: "detached" });
     check("click on the mark calls clear_draft (mark goes away, held message delivered)", true);
@@ -104,6 +112,18 @@ try {
     await page.waitForSelector(".debug .result.ok");
     await waitScreen("[paste] second paste");
     check("debug paste in a clean idle session goes through", true);
+
+    // The "draft" mark is clickable too (the flag can be wrong).
+    await page.locator(".pane:not(.hidden) .xterm-helper-textarea").focus();
+    await page.keyboard.type("zz");
+    await page.waitForSelector(".tab.active .mark.draft");
+    const draftTitle = (await page.locator(".tab.active .mark.draft").getAttribute("title")) ?? "";
+    check("draft mark has its own tooltip", draftTitle.includes("Click to clear the flag"), draftTitle);
+    const mark = await page.locator(".tab.active .mark.draft").evaluate((el) => el.tagName);
+    check("draft mark is a button", mark === "BUTTON");
+    await page.click(".tab.active .mark.draft");
+    await page.waitForSelector(".tab.active .mark.draft", { state: "detached" });
+    check("a click on the draft mark clears the flag (mark goes away on the event)", true);
 
     // 6. Second session; switching tabs loses no output.
     await page.locator('article.card[data-slug="pm"] button.primary').click();
@@ -147,10 +167,50 @@ try {
         Buffer.concat(writes).toString("utf8").includes("h\u00e9llo \u20ac\r"),
     );
 
+    // 7b. Layout: the toasts do not cover controls, the cards wrap, the terminal keeps its height.
+    // 7c. A start that is rejected: toast, no tab, card back to normal. Then it works.
+    const tabsBefore = await page.locator(".tab").count();
+    const panesBefore = await page.locator(".pane").count();
+    await page.locator('article.card[data-slug="eng-sam"] button.primary').click();
+    await page.waitForSelector(".toast");
+    const toastText = await page.locator(".toast .text").first().innerText();
+    check("a rejected start shows its error text in a toast", toastText.includes('cannot start eng-sam'), toastText);
+    const toastBox = await page.locator(".toast").first().boundingBox();
+    const debugBox = await page.locator(".debug").boundingBox();
+    const sendBox = await page.locator(".debug button[type=submit]").boundingBox();
+    check(
+        "the toast does not cover the debug paste bar",
+        toastBox.y + toastBox.height < debugBox.y && !(toastBox.y < sendBox.y + sendBox.height && toastBox.y + toastBox.height > sendBox.y),
+        `toast y=${toastBox.y} h=${toastBox.height}, debug y=${debugBox.y}`,
+    );
+    const sam = page.locator('article.card[data-slug="eng-sam"]');
+    check(
+        "after a rejected start: no new tab, no new terminal, no session state on the card",
+        (await page.locator(".tab").count()) === tabsBefore &&
+            (await page.locator(".pane").count()) === panesBefore &&
+            (await sam.locator(".state").innerText()) === "no session",
+    );
+    check("after a rejected start the start button is enabled again", await sam.locator("button.primary").isEnabled());
+    await sam.locator("button.primary").click();
+    await page.waitForSelector(".tab:has-text('Sam')");
+    check("the second start works and opens a tab", (await page.locator(".tab").count()) === tabsBefore + 1);
+    await page.locator(".tab", { hasText: "Ada" }).locator("button.main").click();
+    await waitScreen('you typed: "h\u00e9llo \u20ac"');
+
     // 8. Stop, tab stays (stopped), resume offered.
     await page.locator('article.card[data-slug="pm"] button.danger').click();
     await page.waitForSelector('article.card[data-slug="pm"] button:has-text("resume")');
     check("stopped employee offers resume", true);
+    const tabsBeforeResume = await page.locator(".tab").count();
+    await page.locator('article.card[data-slug="pm"] button:has-text("resume")').click();
+    await page.waitForFunction(() => [...document.querySelectorAll(".toast .text")].some((t) => t.textContent.includes("never had a turn")));
+    check("a rejected resume shows its error text in a toast", true);
+    check(
+        "after a rejected resume: same tabs, card still offers start and resume",
+        (await page.locator(".tab").count()) === tabsBeforeResume &&
+            (await page.locator('article.card[data-slug="pm"] button:has-text("resume")').isEnabled()) &&
+            (await page.locator('article.card[data-slug="pm"] button:has-text("start")').isEnabled()),
+    );
     await page.locator('article.card[data-slug="eng-lin"] button:has-text("resume")').click();
     await page.waitForSelector(".tab:has-text('Lin')");
     check("resume of a stopped employee opens a tab", true);
@@ -167,6 +227,19 @@ try {
     await page.click('form[aria-label="Add employee"] button.primary');
     await page.waitForSelector('article.card[data-slug="zed-zebra"]');
     check("new employee card appears", true);
+    const order2 = await cardNames();
+    check(
+        "adding an employee does not reorder the others",
+        order2.join(",") === "Ada,Maya,Lin,Sam,Zed Zebra",
+        order2.join(","),
+    );
+    const adaBox = await page.locator('article.card[data-slug="ceo"]').boundingBox();
+    const zedBox = await page.locator('article.card[data-slug="zed-zebra"]').boundingBox();
+    check("the fifth card wraps to a second row", zedBox.y > adaBox.y + adaBox.height / 2, `ada y=${adaBox.y} zed y=${zedBox.y}`);
+    const noSideScroll = await page.locator(".cards").evaluate((el) => el.scrollWidth <= el.clientWidth);
+    check("the card area has no sideways scroll", noSideScroll);
+    const paneBox = await page.locator(".pane:not(.hidden)").boundingBox();
+    check("the terminal keeps most of the height with two rows of cards", paneBox.height >= 350, `terminal height ${paneBox.height}`);
 
     // 10. NO_FLOOR flow.
     await page.fill("#floor-path", "/home/demo/new-project");
@@ -176,6 +249,37 @@ try {
     await page.click(".create button.primary");
     await page.waitForSelector('.floors li.open:has-text("new-project")');
     check("create opens the new floor with 2 employees", (await page.locator("article.card").count()) === 2);
+
+    // 10b. The floor is keyed by FloorView.path, not by the typed text.
+    await page.fill("#floor-path", "~/tower/../second/");
+    await page.click(".open button.primary");
+    await page.waitForSelector('.floors li.open[data-path="/home/demo/second"]');
+    check("a typed path with ~, .. and a trailing slash opens the canonical floor", true);
+    check(
+        "the floor list has no second entry for the typed text",
+        (await page.locator('.floors li[data-path="/home/demo/second"]').count()) === 1 &&
+            (await page.locator('.floors li[data-path~="~"]').count()) === 0,
+    );
+    await page.locator('article.card[data-slug="ceo"] button.primary').click();
+    await page.waitForSelector(".tab.active .dot[data-status=idle]");
+    check("session-changed events with the canonical path reach the open floor (tab dot goes to idle)", true);
+    const startCall = (await page.evaluate(() => window.__towerMockCalls.filter((c) => c.command === "session_start"))).pop();
+    check("session_start used the canonical path", startCall.args.path === "/home/demo/second", startCall.args.path);
+    const openCountBefore = await page.evaluate(() => window.__towerMockCalls.filter((c) => c.command === "floor_open").length);
+    await page.click("button.add");
+    await page.fill('input[name="name"]', "Cy");
+    await page.click('form[aria-label="Add employee"] button.primary');
+    await page.waitForSelector('article.card[data-slug="cy"]');
+    await page.waitForFunction(
+        (n) => window.__towerMockCalls.filter((c) => c.command === "floor_open").length > n,
+        openCountBefore,
+    );
+    check("floor-changed with the canonical path makes the UI reload the open floor", true);
+    await page.fill("#floor-path", "/home/demo/link");
+    await page.click(".open button.primary");
+    await page.waitForSelector('.floors li.open[data-path="/home/demo/tower"]');
+    check("a symlink path opens the real floor", true);
+    await page.waitForSelector(".tab:has-text('Ada')");
 
     // 11. Error toast, no dialog.
     await page.fill("#floor-path", "");

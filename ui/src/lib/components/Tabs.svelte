@@ -24,14 +24,22 @@
                 <button
                     type="button"
                     class="mark waiting"
-                    title="A message waits. Click to clear the draft."
-                    aria-label="Message waiting. Clear the draft."
+                    title="A message waits. Click to clear your draft flag so it can be delivered."
+                    aria-label="Message waiting. Clear the draft flag."
                     onclick={() => store.clearDraft(tab.sessionId)}
                 >
                     msg
                 </button>
             {:else if tab.draft}
-                <span class="mark draft" title="Unsent text in this terminal">draft</span>
+                <button
+                    type="button"
+                    class="mark draft"
+                    title="The app thinks that you have unsent text here. It holds messages while this flag is set. Click to clear the flag, for example when you deleted the text."
+                    aria-label="Draft flag set. Clear the draft flag."
+                    onclick={() => store.clearDraft(tab.sessionId)}
+                >
+                    draft
+                </button>
             {/if}
             {#if tab.status === "stopped"}
                 <button
@@ -108,8 +116,14 @@
     }
 
     .draft {
+        background: transparent;
         border: 1px dashed var(--dim);
         color: var(--dim);
+    }
+
+    .draft:hover {
+        color: var(--text);
+        border-color: var(--accent);
     }
 
     .close {

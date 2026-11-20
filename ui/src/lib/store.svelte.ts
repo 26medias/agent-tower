@@ -1,6 +1,7 @@
 // The one store of the UI: floors, the open floor, sessions by ID, the active tab, toasts.
 // Svelte 5 runes. The pure state changes live in ./reducers.ts.
 import * as ipc from "./ipc";
+import { orderEmployees } from "./order";
 import {
     applyFloorView,
     applySessionChanged,
@@ -60,6 +61,7 @@ class Store {
     pendingCreate = $state.raw<{ path: string; message: string } | null>(null);
     backend = $state<"tauri" | "mock" | "">("");
     ready = $state(false);
+    private busy = $state.raw<Record<string, true>>({});
 
     /** The size of the last terminal that fitted. New sessions start with it. */
     lastSize = { rows: 30, cols: 110 };
@@ -75,6 +77,12 @@ class Store {
             .sort((a, b) => this.employeeIndex(a.slug) - this.employeeIndex(b.slug));
     });
 
+    /** The employees of the open floor in the order of the hierarchy. Cards and tabs use it. */
+    orderedEmployees = $derived.by(() => {
+        const view = this.floorView;
+        return view ? orderEmployees(view.employees) : [];
+    });
+
     /** Sessions that need a terminal instance: every tab of every floor. */
     allTabSessions = $derived(tabSessions(this.sessionState));
 
@@ -87,7 +95,7 @@ class Store {
     activeSession = $derived(this.activeId ? (this.sessionState.byId[this.activeId] ?? null) : null);
 
     private employeeIndex(slug: string): number {
-        const i = this.floorView?.employees.findIndex((e) => e.slug === slug) ?? -1;
+        const i = this.orderedEmployees.findIndex((e) => e.slug === slug);
         return i < 0 ? Number.MAX_SAFE_INTEGER : i;
     }
 
@@ -264,33 +272,45 @@ class Store {
         this.sessionState = dismissTab(this.sessionState, sessionId);
     }
 
-    private adopt(session: SessionView): void {
-        const path = this.openPath;
-        if (!path) return;
+    private adopt(path: string, session: SessionView): void {
         this.sessionState = upsertSession(this.sessionState, path, session);
-        this.selectTab(session.sessionId);
+        // Show the new tab only when the operator still looks at the same floor.
+        if (this.openPath === path) this.selectTab(session.sessionId);
     }
 
-    async startSession(slug: string): Promise<void> {
+    /** True while a start or a resume of this employee is running. The card disables its buttons. */
+    isBusy(slug: string): boolean {
+        return this.busy[`${this.openPath}\u0000${slug}`] === true;
+    }
+
+    /**
+     * Run a start or a resume. On failure the error shows in a toast, and nothing else
+     * changes: no tab is made, and the card goes back to its normal state.
+     */
+    private async launch(slug: string, run: (path: string, rows: number, cols: number) => Promise<SessionView>): Promise<void> {
         const path = this.openPath;
         if (!path) return;
+        const key = `${path}\u0000${slug}`;
+        if (this.busy[key]) return;
+        this.busy = { ...this.busy, [key]: true };
         try {
             const { rows, cols } = this.lastSize;
-            this.adopt(await ipc.sessionStart(path, slug, null, rows, cols));
+            this.adopt(path, await run(path, rows, cols));
         } catch (e) {
             this.fail(e);
+        } finally {
+            const next = { ...this.busy };
+            delete next[key];
+            this.busy = next;
         }
     }
 
-    async resumeSession(slug: string): Promise<void> {
-        const path = this.openPath;
-        if (!path) return;
-        try {
-            const { rows, cols } = this.lastSize;
-            this.adopt(await ipc.sessionResume(path, slug, null, rows, cols));
-        } catch (e) {
-            this.fail(e);
-        }
+    startSession(slug: string): Promise<void> {
+        return this.launch(slug, (path, rows, cols) => ipc.sessionStart(path, slug, null, rows, cols));
+    }
+
+    resumeSession(slug: string): Promise<void> {
+        return this.launch(slug, (path, rows, cols) => ipc.sessionResume(path, slug, null, rows, cols));
     }
 
     async stopSession(sessionId: string): Promise<void> {

@@ -55,6 +55,26 @@ function employee(slug: string, name: string, role: string, manager: string | nu
     };
 }
 
+/** Paths that the mock turns into other paths, like a symlink does. */
+const ALIASES: Record<string, string> = { "/home/demo/link": "/home/demo/tower" };
+
+/**
+ * Like the Rust side: `FloorView.path` is a canonical path. A typed `~/x`, `a/../b`, a trailing
+ * slash or a symlink gives another text than the one that was typed.
+ */
+export function canonicalPath(typed: string): string {
+    let p = typed.trim();
+    if (p === "~" || p.startsWith("~/")) p = "/home/demo" + p.slice(1);
+    const parts: string[] = [];
+    for (const segment of p.split("/")) {
+        if (segment === "" || segment === ".") continue;
+        if (segment === "..") parts.pop();
+        else parts.push(segment);
+    }
+    const out = "/" + parts.join("/");
+    return ALIASES[out] ?? out;
+}
+
 export function createMockBackend(): Backend {
     const floors = new Map<string, MockFloor>();
     const known: string[] = [];
@@ -67,6 +87,8 @@ export function createMockBackend(): Backend {
         hook: "/opt/agent-tower/bin/tower-hook",
     };
     let counter = 0;
+    // Errors that the mock gives one time, to show what the UI does when a start fails.
+    const failOnce = new Set(["start:eng-sam", "resume:pm"]);
 
     function addFloor(path: string, name: string, employees: Employee[]): MockFloor {
         const floor = { path, name, employees, sessions: [] };
@@ -265,16 +287,17 @@ export function createMockBackend(): Backend {
             }
             case "floor_open": {
                 const { path } = args<{ path: string }>(raw, ["path"]);
-                const clean = path.trim();
-                if (clean === "") throw "the path is empty";
+                const typed = path.trim();
+                if (typed === "") throw "the path is empty";
+                const clean = canonicalPath(typed);
                 const floor = floors.get(clean);
-                if (!floor) throw `NO_FLOOR: ${clean} has no .swarm/ folder`;
+                if (!floor) throw `NO_FLOOR: ${typed} has no .swarm/ folder`;
                 if (!known.includes(clean)) known.push(clean);
                 return viewOf(floor);
             }
             case "floor_create": {
                 const { path, name } = args<{ path: string; name: string }>(raw, ["path", "name"]);
-                const clean = path.trim();
+                const clean = canonicalPath(path);
                 if (floors.has(clean)) throw `${clean} already has a .swarm/ folder`;
                 if (name.trim() === "") throw "the floor name is empty";
                 const floor = addFloor(clean, name.trim(), [
@@ -314,6 +337,9 @@ export function createMockBackend(): Backend {
                     raw,
                     ["path", "slug", "firstMessage", "rows", "cols"],
                 );
+                if (failOnce.delete(`start:${a.slug}`)) {
+                    throw `cannot start ${a.slug}: the program "codex" was not found. Set its path in Programs.`;
+                }
                 return startSession(a.path, a.slug);
             }
             case "session_resume": {
@@ -322,6 +348,9 @@ export function createMockBackend(): Backend {
                     ["path", "slug", "message", "rows", "cols"],
                 );
                 const old = floorOf(a.path).sessions.find((x) => x.slug === a.slug);
+                if (failOnce.delete(`resume:${a.slug}`)) {
+                    throw `cannot resume ${a.slug}: the session never had a turn, so it has nothing to resume. Start it again.`;
+                }
                 if (!old?.canResume) throw `employee ${a.slug} has no session to resume`;
                 return startSession(a.path, a.slug);
             }
@@ -373,12 +402,13 @@ export function createMockBackend(): Backend {
             case "clear_draft": {
                 const { sessionId } = args<{ sessionId: string }>(raw, ["sessionId"]);
                 const s = sessionById(sessionId);
+                // Like the Rust side: clears the draft flag and the "message waiting" flag, then
+                // sends session-changed. The mock also delivers a held message when it can.
                 s.view.draft = false;
-                // The mock delivers the waiting message when it can.
                 if (s.view.messageWaiting && (s.view.status === "idle" || s.view.status === "done")) {
-                    s.view.messageWaiting = false;
                     text(s, "\r\n\x1b[35m[held message delivered]\x1b[0m\r\n\x1b[32m$\x1b[0m ");
                 }
+                s.view.messageWaiting = false;
                 changed(s);
                 return null;
             }

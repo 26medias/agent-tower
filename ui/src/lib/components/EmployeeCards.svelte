@@ -10,9 +10,10 @@
 <div class="wrap">
 <section class="cards" aria-label="Employees">
     {#if store.floorView}
-        {#each store.floorView.employees as emp (emp.slug)}
+        {#each store.orderedEmployees as emp (emp.slug)}
             {@const session = store.sessionOfEmployee(emp.slug)}
             {@const live = store.isLive(session)}
+            {@const busy = store.isBusy(emp.slug)}
             <article class="card" class:live class:active={session && session.sessionId === store.activeId} data-slug={emp.slug}>
                 <button
                     type="button"
@@ -35,9 +36,9 @@
                     {#if live && session}
                         <button type="button" class="danger" onclick={() => store.stopSession(session.sessionId)}>stop</button>
                     {:else}
-                        <button type="button" class="primary" onclick={() => store.startSession(emp.slug)}>start</button>
+                        <button type="button" class="primary" disabled={busy} onclick={() => store.startSession(emp.slug)}>start</button>
                         {#if session?.canResume}
-                            <button type="button" onclick={() => store.resumeSession(emp.slug)}>resume</button>
+                            <button type="button" disabled={busy} onclick={() => store.resumeSession(emp.slug)}>resume</button>
                         {/if}
                     {/if}
                     <span class="spacer"></span>
@@ -77,9 +78,12 @@
 
     .cards {
         display: flex;
+        flex-wrap: wrap;
         gap: 8px;
         padding: 8px;
-        overflow-x: auto;
+        /* About two rows of cards. More cards scroll in this area, so the terminal keeps its height. */
+        max-height: 244px;
+        overflow-y: auto;
     }
 
     .card {
@@ -181,6 +185,7 @@
         flex: none;
         align-self: stretch;
         width: 84px;
+        min-height: 56px;
         border-style: dashed;
         color: var(--dim);
     }

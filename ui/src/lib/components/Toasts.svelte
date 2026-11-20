@@ -14,26 +14,27 @@
 </div>
 
 <style>
+    /* In the page flow, between the title and the cards: a toast never covers a control. */
     .toasts {
-        position: fixed;
-        right: 12px;
-        bottom: 12px;
-        z-index: 50;
         display: flex;
         flex-direction: column;
-        gap: 6px;
-        max-width: min(480px, 80vw);
+        gap: 4px;
+        padding: 0 8px;
+    }
+
+    .toasts:not(:empty) {
+        padding-top: 4px;
+        padding-bottom: 2px;
     }
 
     .toast {
         display: flex;
         align-items: flex-start;
         gap: 8px;
-        padding: 6px 8px;
+        padding: 4px 8px;
         background: #2a1620;
         border: 2px solid var(--danger);
         border-radius: 2px;
-        box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.5);
     }
 
     .text {
