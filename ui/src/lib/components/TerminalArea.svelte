@@ -15,7 +15,7 @@
         {#if !store.activeId}
             <div class="empty">
                 <p>No session open.</p>
-                <p class="dim">Press "start" on an employee card.</p>
+                <p class="dim">Click a character, then press "start".</p>
             </div>
         {/if}
     </div>

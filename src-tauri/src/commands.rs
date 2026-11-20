@@ -13,7 +13,8 @@
 //!   so the last size wins). It is one ioctl.
 
 use crate::views::{
-    AttachResult, Employee, FloorEntry, FloorView, OutputMessage, Programs, SessionView,
+    AttachResult, Cli, Employee, FloorEntry, FloorView, OutputMessage, Programs, SessionView,
+    Settings,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -188,6 +189,58 @@ pub async fn session_resume(
     blocking(&tower, move |t| {
         t.session_resume(&path_of(&path), &slug, message, rows, cols)
             .map(SessionView::from)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn setup_start(
+    tower: State<'_, Shared>,
+    path: String,
+    cli: Cli,
+    rows: u16,
+    cols: u16,
+) -> Result<SessionView, String> {
+    blocking(&tower, move |t| {
+        t.setup_start(&path_of(&path), cli.into(), rows, cols)
+            .map(SessionView::from)
+    })
+    .await
+}
+
+/// Base64 of `logo.png`, or `null` when there is no file.
+#[tauri::command]
+pub async fn floor_logo(tower: State<'_, Shared>, path: String) -> Result<Option<String>, String> {
+    blocking(&tower, move |t| {
+        Ok(t.floor_logo(&path_of(&path))?
+            .map(|bytes| STANDARD.encode(bytes)))
+    })
+    .await
+}
+
+/// Returns at once. The generation runs in the background (see `Tower::logo_generate`).
+#[tauri::command]
+pub async fn logo_generate(
+    tower: State<'_, Shared>,
+    path: String,
+    prompt: Option<String>,
+) -> Result<(), String> {
+    blocking(&tower, move |t| t.logo_generate(&path_of(&path), prompt)).await
+}
+
+#[tauri::command]
+pub async fn settings_get(tower: State<'_, Shared>) -> Result<Settings, String> {
+    blocking(&tower, |t| Ok(Settings::from(t.settings_get()))).await
+}
+
+#[tauri::command]
+pub async fn settings_set(
+    tower: State<'_, Shared>,
+    openai_key: Option<String>,
+    image_model: Option<String>,
+) -> Result<Settings, String> {
+    blocking(&tower, move |t| {
+        t.settings_set(openai_key, image_model).map(Settings::from)
     })
     .await
 }

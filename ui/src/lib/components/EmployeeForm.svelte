@@ -130,7 +130,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(8, 7, 14, 0.7);
+        background: rgba(6, 10, 18, 0.7);
     }
 
     .panel {
@@ -142,9 +142,9 @@
         gap: 8px;
         padding: 12px;
         background: var(--panel);
-        border: 2px solid var(--accent);
-        border-radius: 2px;
-        box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.6);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
     }
 
     h2 {

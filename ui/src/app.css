@@ -1,23 +1,27 @@
 :root {
-    --bg: #14121c;
-    --bg-deep: #0c0b12;
-    --panel: #1d1a2b;
-    --panel-2: #26223a;
-    --line: #3a3556;
-    --text: #e6e1f5;
-    --dim: #8f8aa8;
-    --accent: #ffcf5c;
-    --accent-ink: #1a1400;
-    --danger: #ff6b81;
-    --ok: #4ade80;
+    /* Night palette, matched to the art (docs: prototype/building.html). */
+    --bg: #101826;
+    --bg-deep: #0b111c;
+    --panel: #18233a;
+    --panel-2: #1f2d4a;
+    --line: #2b3a5c;
+    --text: #e6ecf8;
+    --dim: #93a2c2;
+    --accent: #5ee0c0;
+    --accent-ink: #06241c;
+    --danger: #ff7a90;
+    --ok: #6fd08c;
 
-    --st-starting: #8b8fa3;
-    --st-working: #4aa3ff;
-    --st-idle: #4ade80;
-    --st-question: #ffb020;
-    --st-done: #2dd4bf;
-    --st-stopped: #4a4a58;
+    /* Status colours. The same values are in src/lib/office-layout.ts (STATUS_COLOR). */
+    --st-starting: #93a2c2;
+    --st-working: #5aa9f2;
+    --st-idle: #6fd08c;
+    --st-question: #ffc56b;
+    --st-done: #5ee0c0;
+    --st-stopped: #6b7896;
 
+    --display: "Chakra Petch", "Trebuchet MS", "DejaVu Sans", system-ui, sans-serif;
+    --sans: system-ui, "Segoe UI", "DejaVu Sans", sans-serif;
     --mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
     color-scheme: dark;
 }
@@ -32,7 +36,7 @@ body {
     height: 100%;
     background: var(--bg);
     color: var(--text);
-    font-family: var(--mono);
+    font-family: var(--sans);
     font-size: 13px;
     line-height: 1.4;
     overflow: hidden;
@@ -42,9 +46,15 @@ h1,
 h2,
 h3 {
     margin: 0;
+    font-family: var(--display);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.12em;
+}
+
+code,
+.mono {
+    font-family: var(--mono);
 }
 
 button,
@@ -57,11 +67,10 @@ textarea {
 
 button {
     background: var(--panel-2);
-    border: 2px solid var(--line);
-    border-radius: 2px;
-    padding: 2px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 3px 9px;
     cursor: pointer;
-    text-transform: lowercase;
 }
 
 button:hover:not(:disabled) {
@@ -100,22 +109,27 @@ input,
 select,
 textarea {
     background: var(--bg-deep);
-    border: 2px solid var(--line);
-    border-radius: 2px;
-    padding: 3px 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 7px;
     min-width: 0;
 }
 
 input:focus,
 select:focus,
-textarea:focus,
-button:focus-visible {
+textarea:focus {
     outline: none;
     border-color: var(--accent);
 }
 
+button:focus-visible,
+summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
 ::placeholder {
-    color: #5d5878;
+    color: #5c6c90;
 }
 
 ::-webkit-scrollbar {
@@ -126,6 +140,7 @@ button:focus-visible {
 ::-webkit-scrollbar-thumb {
     background: var(--line);
     border: 2px solid var(--bg);
+    border-radius: 6px;
 }
 
 ::-webkit-scrollbar-track {

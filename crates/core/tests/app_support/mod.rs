@@ -14,7 +14,7 @@ use tower_core::app::{
     FloorView, Observer, OutputSink, SessionView, Tower, TowerConfig, TowerError,
 };
 use tower_core::env::{EnvMap, build_env};
-use tower_core::model::{CliKind, Employee};
+use tower_core::model::{CliKind, Employee, PermissionPolicy};
 use tower_core::programs::Resolver;
 use tower_core::pty::SpawnSpec;
 use tower_core::status::Status;
@@ -172,6 +172,7 @@ pub struct Call {
     pub slug: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub permission: PermissionPolicy,
     pub app_session_id: String,
     /// `Some(id)` for a resume.
     pub resume: Option<String>,
@@ -262,6 +263,7 @@ impl TestAdapter {
             slug: ctx.employee.slug.clone(),
             model: ctx.employee.model.clone(),
             effort: ctx.employee.effort.clone(),
+            permission: ctx.employee.permission,
             app_session_id: id.clone(),
             resume: resume.map(str::to_owned),
             args: args.clone(),

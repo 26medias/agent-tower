@@ -106,6 +106,12 @@ describe("floor view and tabs", () => {
         employees: [],
         employeeErrors: [],
         sessions,
+        description: null,
+        logoPrompt: null,
+        logoVersion: null,
+        logoBusy: false,
+        logoError: null,
+        setupSessionId: null,
     });
 
     it("replaces the sessions of the floor and keeps the other floors", () => {

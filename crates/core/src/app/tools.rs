@@ -102,16 +102,13 @@ impl ProgramBook {
                 .map_err(|error| TowerError::Other(error.to_string()))?;
             overrides.insert(name.to_owned(), path);
         }
-        if let Some(dir) = self.file.parent() {
-            fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
-        }
-        let text = toml::to_string(&OverridesFile {
-            programs: overrides.clone(),
+        // Only the `[programs]` table changes. The other tables of the file (`[openai]`) stay.
+        let value = toml::Value::try_from(&overrides)
+            .map_err(|e| TowerError::Other(format!("cannot write programs.toml: {e}")))?;
+        super::settings::update(&self.file, |table| {
+            table.insert("programs".to_owned(), value);
         })
-        .map_err(|e| TowerError::Other(format!("cannot write programs.toml: {e}")))?;
-        let temp = self.file.with_extension("toml.tmp");
-        fs::write(&temp, text).map_err(|e| io_error(&temp, e))?;
-        fs::rename(&temp, &self.file).map_err(|e| io_error(&self.file, e))?;
+        .map_err(|e| io_error(&self.file, e))?;
         self.overrides = overrides;
         self.cache.remove(name);
         Ok(())
@@ -182,7 +179,19 @@ pub fn locate_hook_program(
     exe: &Path,
     workspace_root: Option<&Path>,
 ) -> Result<PathBuf, TowerError> {
-    let candidates = hook_candidates(exe, workspace_root);
+    locate_hook_with(
+        exe,
+        workspace_root,
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )
+}
+
+fn locate_hook_with(
+    exe: &Path,
+    workspace_root: Option<&Path>,
+    cargo_target_dir: Option<&OsStr>,
+) -> Result<PathBuf, TowerError> {
+    let candidates = candidates_with(exe, workspace_root, cargo_target_dir);
     for candidate in &candidates {
         if crate::programs::is_executable_file(candidate) {
             return Ok(fs::canonicalize(candidate).unwrap_or_else(|_| candidate.clone()));
@@ -252,7 +261,8 @@ mod tests {
     #[test]
     fn missing_hook_error_lists_the_places() {
         let dir = tempfile::tempdir().unwrap();
-        let error = locate_hook_program(&dir.path().join("app"), Some(dir.path()))
+        // No `CARGO_TARGET_DIR`: the test must not depend on the environment of the build.
+        let error = locate_hook_with(&dir.path().join("app"), Some(dir.path()), None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(&format!("{}/tower-hook", dir.path().display())));

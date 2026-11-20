@@ -124,6 +124,9 @@ pub(crate) struct Live {
     notifier: Arc<Notifier>,
     /// Test only. Runs in `attach`, inside the critical section, after the copy of the ring.
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Setup session only. The status thread runs it after a turn ended (the status went from
+    /// `working` to `idle` or `done`) and after the stop, with no lock of the session held.
+    after_turn: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// What `Live::new` needs.
@@ -138,6 +141,8 @@ pub(crate) struct LiveParts {
     pub db: Database,
     pub notifier: Arc<Notifier>,
     pub attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Setup session only. See `Live::after_turn`.
+    pub after_turn: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Live {
@@ -160,6 +165,7 @@ impl Live {
             db: Mutex::new(parts.db),
             notifier: parts.notifier,
             attach_pause: parts.attach_pause,
+            after_turn: parts.after_turn,
         })
     }
 
@@ -186,7 +192,9 @@ impl Live {
             status: if stopped { Status::Stopped } else { status },
             draft,
             message_waiting,
-            can_resume: stopped
+            // The setup session never resumes.
+            can_resume: self.slug != super::SETUP_SLUG
+                && stopped
                 && self.had_turn.load(Ordering::SeqCst)
                 && self.cli_session_id().is_some(),
         }
@@ -201,6 +209,12 @@ impl Live {
         if last.as_ref() != Some(&view) {
             *last = Some(view.clone());
             self.notifier.session_changed(&self.path, &view);
+        }
+    }
+
+    fn run_after_turn(&self) {
+        if let Some(after_turn) = &self.after_turn {
+            after_turn();
         }
     }
 
@@ -333,6 +347,7 @@ fn run_hooks(
 }
 
 fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) {
+    let mut working = false;
     for change in status {
         live.record_status(change.new);
         if change.new == Status::Stopped {
@@ -346,13 +361,19 @@ fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) 
             live.refresh();
             // The process has ended. This frees the PTY handles and does not wait.
             live.release_process();
+            live.run_after_turn();
             return;
         }
         if change.new == Status::Working {
             live.had_turn.store(true, Ordering::SeqCst);
+            working = true;
         }
         *locked(&live.reported) = change.new;
         live.refresh();
+        if matches!(change.new, Status::Idle | Status::Done) && working {
+            working = false;
+            live.run_after_turn();
+        }
     }
 }
 

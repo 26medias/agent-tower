@@ -115,6 +115,8 @@ fn app() -> App {
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .collect();
     config.adapters = Arc::new(|kind| Box::new(FakeAdapter(kind)));
+    // No test reaches the real image API, also not by mistake.
+    config.image_api_base = "http://127.0.0.1:1".to_owned();
     let tower = Arc::new(Tower::new(config).unwrap());
     for name in ["claude", "codex"] {
         tower
@@ -228,7 +230,7 @@ fn every_command_works_through_the_ipc_with_the_contract_names() {
     let list = app.call("floor_list", json!({})).unwrap();
     assert_eq!(
         list,
-        json!([{ "path": path, "name": "Acme", "missing": false }])
+        json!([{ "path": path, "name": "Acme", "missing": false, "logoVersion": null }])
     );
 
     // Save an employee as the UI sends it (camelCase).
@@ -390,4 +392,119 @@ fn an_unknown_session_gives_a_text_error() {
         .call("session_stop", json!({ "sessionId": "nope" }))
         .unwrap_err();
     assert!(error.contains("no session"), "{error}");
+}
+
+#[test]
+fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_shapes() {
+    let app = app();
+    let path = app.path();
+    let floor = app
+        .call("floor_create", json!({ "path": path, "name": "Acme" }))
+        .unwrap();
+    // The new fields of `FloorView` and `FloorEntry`.
+    for (field, value) in [
+        ("description", Value::Null),
+        ("logoPrompt", Value::Null),
+        ("logoVersion", Value::Null),
+        ("logoBusy", json!(false)),
+        ("logoError", Value::Null),
+        ("setupSessionId", Value::Null),
+    ] {
+        assert_eq!(floor[field], value, "{field}");
+    }
+    let list = app.call("floor_list", json!({})).unwrap();
+    assert_eq!(list[0]["logoVersion"], Value::Null);
+    assert_eq!(
+        app.call("floor_logo", json!({ "path": path })).unwrap(),
+        Value::Null
+    );
+
+    // Settings. The arguments are camelCase, and a null is "no change".
+    assert_eq!(
+        app.call("settings_get", json!({})).unwrap(),
+        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst" })
+    );
+    let set = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": "model-y" }),
+        )
+        .unwrap();
+    assert_eq!(set["imageModel"], "model-y");
+    assert_eq!(set["openaiKeySet"], json!(false));
+    let set = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": "sk-test-1", "imageModel": null }),
+        )
+        .unwrap();
+    assert_eq!(
+        set,
+        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y" })
+    );
+    assert!(!set.to_string().contains("sk-test-1"));
+    let set = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": "", "imageModel": null }),
+        )
+        .unwrap();
+    assert_eq!(set["openaiKeySet"], json!(false));
+
+    // No key: the error starts with NO_KEY:, and the prompt is saved.
+    let error = app
+        .call("logo_generate", json!({ "path": path, "prompt": "A bee." }))
+        .unwrap_err();
+    assert!(error.starts_with("NO_KEY:"), "{error}");
+    let floor = app.call("floor_open", json!({ "path": path })).unwrap();
+    assert_eq!(floor["logoPrompt"], "A bee.");
+
+    // The slug `setup` is reserved.
+    let error = app
+        .call(
+            "employee_save",
+            json!({ "path": path, "employee": {
+                "slug": "setup", "name": "S", "role": "R", "manager": null,
+                "cli": "claude", "model": null, "effort": null,
+                "policy": "read_only", "roleText": ""
+            }}),
+        )
+        .unwrap_err();
+    assert!(error.contains("reserved"), "{error}");
+
+    // The setup session: slug `setup`, one at a time, and the live ID in the floor view.
+    let session = app
+        .call(
+            "setup_start",
+            json!({ "path": path, "cli": "claude", "rows": 24, "cols": 80 }),
+        )
+        .unwrap();
+    let id = session["sessionId"].as_str().unwrap().to_owned();
+    assert_eq!(session["slug"], "setup");
+    assert_eq!(session["status"], "starting");
+    let floor = app.call("floor_open", json!({ "path": path })).unwrap();
+    assert_eq!(floor["setupSessionId"], json!(id));
+    assert!(
+        floor["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["slug"] == "setup" && s["sessionId"] == json!(id))
+    );
+    let error = app
+        .call(
+            "setup_start",
+            json!({ "path": path, "cli": "codex", "rows": 24, "cols": 80 }),
+        )
+        .unwrap_err();
+    assert!(error.contains("already has a live session"), "{error}");
+    app.wait_event("idle after the first turn", |e| {
+        e["session"]["sessionId"] == json!(id) && e["session"]["status"] == "idle"
+    });
+    app.call("session_stop", json!({ "sessionId": id }))
+        .unwrap();
+    app.wait_event("stopped", |e| {
+        e["session"]["sessionId"] == json!(id) && e["session"]["status"] == "stopped"
+    });
+    let _ = &app.dir;
 }

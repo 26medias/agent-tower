@@ -5,6 +5,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
     AttachResult,
+    CliKind,
     FloorChangedPayload,
     FloorEntry,
     FloorView,
@@ -14,6 +15,7 @@ import type {
     Programs,
     SessionChangedPayload,
     SessionView,
+    Settings,
 } from "./types";
 
 export type Unlisten = () => void;
@@ -126,6 +128,26 @@ export const debugPaste = (sessionId: string, text: string) => call<void>("debug
 export const programsGet = () => call<Programs>("programs_get");
 
 export const programsSet = (name: ProgramName, path: string) => call<Programs>("programs_set", { name, path });
+
+// ---- Commands (docs/ipc-visuals-init.md, section 4) ----
+
+/** Base64 of `logo.png`, or null when the floor has no logo. */
+export const floorLogo = (path: string) => call<string | null>("floor_logo", { path });
+
+/**
+ * Returns at once. The generation runs in the background and `floor-changed` follows. A non-null
+ * `prompt` is stored as `[brand] logo_prompt` first. Rejects with `NO_KEY:` or `BUSY:` text.
+ */
+export const logoGenerate = (path: string, prompt: string | null) => call<void>("logo_generate", { path, prompt });
+
+export const setupStart = (path: string, cli: CliKind, rows: number, cols: number) =>
+    call<SessionView>("setup_start", { path, cli, rows, cols });
+
+export const settingsGet = () => call<Settings>("settings_get");
+
+/** A null argument means "no change". An empty `openaiKey` removes the key from the app config. */
+export const settingsSet = (openaiKey: string | null, imageModel: string | null) =>
+    call<Settings>("settings_set", { openaiKey, imageModel });
 
 // ---- Events (docs/ipc-m1.md, "Events") ----
 

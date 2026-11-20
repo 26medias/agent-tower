@@ -22,37 +22,52 @@
     }
 </script>
 
-<form
-    class="debug"
-    onsubmit={(e) => {
-        e.preventDefault();
-        void send();
-    }}
->
-    <label for="debug-paste">debug paste</label>
-    <input
-        id="debug-paste"
-        type="text"
-        autocomplete="off"
-        placeholder={session ? "Text for the active session" : "No active session"}
-        disabled={!session}
-        bind:value={text}
-        oninput={() => (result = null)}
-    />
-    <button type="submit" disabled={!session || text === "" || busy}>send</button>
-    {#if result}
-        <span class="result" class:ok={result.ok} class:refused={!result.ok} role="status">{result.text}</span>
-    {/if}
-</form>
+<details class="debug-area">
+    <summary>debug</summary>
+    <form
+        class="debug"
+        onsubmit={(e) => {
+            e.preventDefault();
+            void send();
+        }}
+    >
+        <label for="debug-paste">debug paste</label>
+        <input
+            id="debug-paste"
+            type="text"
+            autocomplete="off"
+            placeholder={session ? "Text for the active session" : "No active session"}
+            disabled={!session}
+            bind:value={text}
+            oninput={() => (result = null)}
+        />
+        <button type="submit" disabled={!session || text === "" || busy}>send</button>
+        {#if result}
+            <span class="result" class:ok={result.ok} class:refused={!result.ok} role="status">{result.text}</span>
+        {/if}
+    </form>
+</details>
 
 <style>
+    .debug-area {
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+    }
+
+    summary {
+        padding: 3px 8px;
+        cursor: pointer;
+        color: var(--dim);
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+    }
+
     .debug {
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 5px 8px;
-        background: var(--panel);
-        border-top: 2px solid var(--line);
+        padding: 0 8px 5px;
     }
 
     label {

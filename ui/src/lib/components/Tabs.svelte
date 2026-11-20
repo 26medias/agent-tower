@@ -1,8 +1,10 @@
 <script lang="ts">
     import { store } from "$lib/store.svelte";
+    import { SETUP_SLUG } from "$lib/types";
     import StatusDot from "./StatusDot.svelte";
 
     function nameOf(slug: string): string {
+        if (slug === SETUP_SLUG) return "Setup";
         return store.floorView?.employees.find((e) => e.slug === slug)?.name ?? slug;
     }
 </script>
@@ -67,7 +69,7 @@
         min-height: 30px;
         overflow-x: auto;
         background: var(--bg);
-        border-bottom: 2px solid var(--line);
+        border-bottom: 1px solid var(--line);
     }
 
     .tab {
@@ -76,9 +78,9 @@
         gap: 2px;
         padding-right: 4px;
         background: var(--panel);
-        border: 2px solid var(--line);
+        border: 1px solid var(--line);
         border-bottom: 0;
-        border-radius: 2px 2px 0 0;
+        border-radius: 6px 6px 0 0;
         margin-bottom: -2px;
     }
 
@@ -104,7 +106,7 @@
     .mark {
         padding: 0 4px;
         font-size: 11px;
-        border-radius: 2px;
+        border-radius: 6px;
         text-transform: uppercase;
     }
 

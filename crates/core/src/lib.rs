@@ -4,6 +4,7 @@ pub mod adapter;
 pub mod app;
 pub mod env;
 pub mod hookrx;
+pub mod logo;
 pub mod model;
 pub mod programs;
 pub mod pty;

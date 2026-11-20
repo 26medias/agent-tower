@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! {CWD}/.swarm/
-//!     floor.toml          version, name, defaults
+//!     floor.toml          version, name, defaults, brand
 //!     employees/<slug>.md front matter (TOML between `+++` lines) and the role text
 //!     assets/ reports/ state/ state/logs/
 //!     state/floor.db      SQLite: `sessions` and `status_events`
@@ -17,7 +17,9 @@
 //! Every write of a TOML or Markdown file is atomic: a temp file in the same folder, then a rename.
 //! The caller gives all times (Unix milliseconds). The store has no clock.
 
-use crate::model::{CliKind, Employee, Floor, FloorDefaults, PermissionPolicy, SessionRecord};
+use crate::model::{
+    Brand, CliKind, Employee, Floor, FloorDefaults, PermissionPolicy, SessionRecord,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -97,7 +99,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Write `bytes` to `path`: a temp file in the same folder, then a rename.
 /// A reader sees the old file or the new file, never a part of the new file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
@@ -145,6 +147,12 @@ struct FloorFile {
     name: String,
     #[serde(default)]
     defaults: FloorDefaults,
+    #[serde(default, skip_serializing_if = "brand_is_empty")]
+    brand: Brand,
+}
+
+fn brand_is_empty(brand: &Brand) -> bool {
+    *brand == Brand::default()
 }
 
 fn read_floor_file(path: &Path) -> Result<Floor, StoreError> {
@@ -161,6 +169,7 @@ fn read_floor_file(path: &Path) -> Result<Floor, StoreError> {
     Ok(Floor {
         name: file.name,
         defaults: file.defaults,
+        brand: file.brand,
     })
 }
 
@@ -169,6 +178,7 @@ fn write_floor_file(path: &Path, floor: &Floor) -> Result<(), StoreError> {
         version: FLOOR_FILE_VERSION,
         name: floor.name.clone(),
         defaults: floor.defaults.clone(),
+        brand: floor.brand.clone(),
     };
     let text = toml::to_string(&file).map_err(|e| invalid(path, e))?;
     write_atomic(path, text.as_bytes())
@@ -504,6 +514,7 @@ impl FloorStore {
         let floor = Floor {
             name: name.to_owned(),
             defaults: FloorDefaults::default(),
+            brand: Brand::default(),
         };
         write_floor_file(&swarm.join(FLOOR_FILE), &floor)?;
         write_atomic(&swarm.join(".gitignore"), GITIGNORE.as_bytes())?;
@@ -547,6 +558,26 @@ impl FloorStore {
 
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Write the `[brand]` table of `floor.toml`. The rest of the file stays: the name, the
+    /// defaults and any key that this build does not know. (Comments do not stay: the TOML
+    /// reader drops them.) A field that is `None` is removed from the file. An empty brand
+    /// removes the table.
+    pub fn set_brand(&mut self, brand: Brand) -> Result<(), StoreError> {
+        let path = self.swarm_dir().join(FLOOR_FILE);
+        let text = read_text(&path)?;
+        let mut table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;
+        if brand_is_empty(&brand) {
+            table.remove("brand");
+        } else {
+            let value = toml::Value::try_from(&brand).map_err(|e| invalid(&path, e))?;
+            table.insert("brand".to_owned(), value);
+        }
+        let text = toml::to_string(&table).map_err(|e| invalid(&path, e))?;
+        write_atomic(&path, text.as_bytes())?;
+        self.floor.brand = brand;
+        Ok(())
     }
 
     fn employees_dir(&self) -> PathBuf {
@@ -810,12 +841,76 @@ mod tests {
                 effort: None,
                 permission: Some(PermissionPolicy::EditInWorktree),
             },
+            brand: Brand::default(),
         };
         let path = dir.path().join(".swarm/floor.toml");
         write_floor_file(&path, &floor).unwrap();
         assert_eq!(read_floor_file(&path).unwrap(), floor);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("version = 1\n"), "{text}");
+    }
+
+    #[test]
+    fn a_floor_file_with_no_brand_loads_and_a_brand_round_trips_with_the_rest_kept() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".swarm/floor.toml");
+        FloorStore::create(dir.path(), "Acme").unwrap();
+        // An old file: no `[brand]`, a default, and a key that this build does not know.
+        fs::write(
+            &path,
+            "version = 1\nname = \"Acme\"\nfuture_key = 7\n[defaults]\nmodel = \"haiku\"\n",
+        )
+        .unwrap();
+        let mut store = FloorStore::open(dir.path()).unwrap();
+        assert_eq!(store.floor().brand, Brand::default());
+        assert_eq!(store.floor().defaults.model.as_deref(), Some("haiku"));
+
+        // Save a brand with a description only: the other keys stay, the empty field is absent.
+        let brand = Brand {
+            description: Some("A \"shop\" for candles.".to_owned()),
+            logo_prompt: None,
+        };
+        store.set_brand(brand.clone()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_key = 7"), "{text}");
+        assert!(
+            text.contains("[brand]") && !text.contains("logo_prompt"),
+            "{text}"
+        );
+        let reopened = FloorStore::open(dir.path()).unwrap();
+        assert_eq!(reopened.floor().brand, brand);
+        assert_eq!(reopened.floor().name, "Acme");
+        assert_eq!(reopened.floor().defaults.model.as_deref(), Some("haiku"));
+
+        // Both fields. Then an empty brand removes the table and keeps the rest.
+        let full = Brand {
+            description: Some("d".to_owned()),
+            logo_prompt: Some("A bee.".to_owned()),
+        };
+        store.set_brand(full.clone()).unwrap();
+        assert_eq!(FloorStore::open(dir.path()).unwrap().floor().brand, full);
+        store.set_brand(Brand::default()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("[brand]") && text.contains("future_key = 7"),
+            "{text}"
+        );
+        assert_eq!(
+            FloorStore::open(dir.path()).unwrap().floor().brand,
+            Brand::default()
+        );
+    }
+
+    #[test]
+    fn write_floor_file_keeps_the_brand_and_skips_an_empty_one() {
+        let dir = TempDir::new().unwrap();
+        FloorStore::create(dir.path(), "F").unwrap();
+        let path = dir.path().join(".swarm/floor.toml");
+        let mut floor = read_floor_file(&path).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("brand"));
+        floor.brand.logo_prompt = Some("A bee.".to_owned());
+        write_floor_file(&path, &floor).unwrap();
+        assert_eq!(read_floor_file(&path).unwrap(), floor);
     }
 
     #[test]

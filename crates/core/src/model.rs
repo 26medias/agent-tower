@@ -36,11 +36,24 @@ pub struct FloorDefaults {
     pub permission: Option<PermissionPolicy>,
 }
 
+/// The `[brand]` table of `floor.toml`. A field that is `None` is not in the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Brand {
+    /// One sentence that says what the project is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The subject of the logo, with no style words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo_prompt: Option<String>,
+}
+
 /// The data of `.swarm/floor.toml`, without the file version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Floor {
     pub name: String,
     pub defaults: FloorDefaults,
+    pub brand: Brand,
 }
 
 /// One employee. The file name `<slug>.md` gives the slug. The role text is the file body.

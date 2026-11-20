@@ -46,7 +46,7 @@
 
 <style>
     .programs {
-        border-top: 2px solid var(--line);
+        border-top: 1px solid var(--line);
         padding: 6px 0 0;
         font-size: 12px;
     }

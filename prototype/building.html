@@ -1,0 +1,277 @@
+<title>Agent Tower Building</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* Layout: the building stands on the left, as in the app; the floor list and the notes sit on the right. */
+:root {
+    color-scheme: dark;
+    --night: #101826;
+    --panel: #18233a;
+    --line: #2b3a5c;
+    --wall-left: #26365a;
+    --wall-right: #33487a;
+    --slab: #4a6199;
+    --glass: #ffc56b;
+    --glass-dim: #54658f;
+    --sign: #1b2742;
+    --text: #e6ecf8;
+    --muted: #93a2c2;
+    --select: #5ee0c0;
+    --display: "Chakra Petch", "Trebuchet MS", sans-serif;
+    --body: "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+body {
+    background: var(--night);
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 15px;
+    line-height: 1.5;
+    padding-block: 28px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.page { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+h1 { font-family: var(--display); font-size: 28px; font-weight: 700; margin: 0; text-wrap: balance; }
+.lede { color: var(--muted); max-width: 65ch; margin: 0; }
+.notice {
+    border: 1px dashed var(--glass);
+    color: var(--glass);
+    padding: 10px 14px;
+    border-radius: 6px;
+    max-width: 65ch;
+}
+.stage { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.tower { flex: 1 1 240px; min-width: 0; max-width: 330px; }
+.tower svg { width: 100%; height: auto; display: block; }
+.side { flex: 3 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+.floors { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.floors button {
+    width: 100%;
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    text-align: left;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 9px 12px;
+    font: inherit;
+    cursor: pointer;
+}
+.floors button:hover { border-color: var(--muted); }
+.floors button:focus-visible { outline: 2px solid var(--select); outline-offset: 2px; }
+.floors button[aria-pressed="true"] { border-color: var(--select); }
+.floors .num { font-family: var(--mono); color: var(--muted); font-size: 13px; }
+.floors .name { font-family: var(--display); font-weight: 500; }
+.floors .cwd { font-family: var(--mono); color: var(--muted); font-size: 12px; margin-left: auto; overflow-wrap: anywhere; }
+h2 { font-family: var(--display); font-size: 15px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.spec { margin: 0; padding-left: 18px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+.spec b { color: var(--text); font-weight: 500; }
+.floor-g { cursor: pointer; filter: brightness(0.5) saturate(0.7); outline: none; }
+.floor-g:hover { filter: brightness(0.75); }
+.floor-g.on { filter: none; }
+.floor-g:focus-visible { filter: brightness(0.9); }
+@media (prefers-reduced-motion: no-preference) {
+    .floor-g { transition: filter 0.15s; }
+}
+.styles { display: flex; gap: 6px; flex-wrap: wrap; }
+.styles button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer;
+}
+.styles button[aria-pressed="true"] { border-color: var(--select); color: var(--select); }
+.styles button:focus-visible { outline: 2px solid var(--select); outline-offset: 2px; }
+.office { background: #0b111c; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.office svg { width: 100%; height: auto; display: block; }
+.office-head { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.office-head img { width: 28px; height: 28px; object-fit: contain; }
+.office-head .name { font-family: var(--display); font-weight: 700; font-size: 17px; }
+.office-head .cwd { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: auto; overflow-wrap: anywhere; }
+.roster { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; }
+.roster li { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; min-width: 0; }
+.roster .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.roster .who { font-weight: 500; }
+.roster .role { color: var(--muted); font-size: 13px; }
+.roster .st { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.agent text { font-family: var(--display); font-weight: 700; }
+.agent.stopped image { filter: grayscale(1) brightness(0.55); }
+.tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tools button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+.tools button:disabled { opacity: 0.4; cursor: default; }
+.tools button:focus-visible { outline: 2px solid var(--select); outline-offset: 2px; }
+.tools span { color: var(--muted); font-family: var(--mono); font-size: 13px; }
+@media (prefers-reduced-motion: no-preference) {
+    .bubble.question { animation: hop 0.9s ease-in-out infinite; }
+    .bubble.working circle.d { animation: blink 1.2s infinite; }
+    .bubble.working circle.d2 { animation-delay: 0.2s; }
+    .bubble.working circle.d3 { animation-delay: 0.4s; }
+    .agent.working image { animation: bob 0.6s steps(2) infinite; }
+}
+@keyframes hop { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-12px); } }
+@keyframes blink { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+@keyframes bob { 0% { transform: translateY(0); } 100% { transform: translateY(-4px); } }
+</style>
+
+<div class="page">
+    <h1>The building and the selected floor</h1>
+    <p class="lede">Select a floor in the building. Its office opens on the right, with one desk and one pixel-art character for each employee. Add employees to see the office adapt.</p>
+
+    <div class="stage">
+        <div class="tower" id="tower"></div>
+        <div class="side">
+            <div class="office">
+                <div class="office-head" id="office-head"></div>
+                <div id="office"></div>
+            </div>
+            <div class="tools"><button type="button" id="hire">Add an employee</button><button type="button" id="fire">Remove one</button><span id="count"></span></div>
+            <ul class="roster" id="roster"></ul>
+            <ul class="spec">
+                <li><b>Room:</b> one generated image of an empty room, the same for all floors.</li>
+                <li><b>Desk:</b> one generated image. The page puts one desk on the floor for each employee.</li>
+                <li><b>Layout:</b> the page computes a grid on the floor. More employees give more and smaller desks, up to 20 in this prototype.</li>
+                <li><b>Agents and name tags:</b> each agent stands behind their desk and faces you. The page draws the tag with the name and the status.</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<script>
+const A = (name, role, sprite, status) => ({ name, role, sprite, status });
+const FLOORS = [
+    { name: "Hive Motors", cwd: "~/Projects/hive", staff: [A("Ada", "CEO", 0, "idle"), A("Mina", "Project Manager", 1, "working"), A("Kai", "Engineer", 2, "working"), A("Leo", "Engineer", 3, "question"), A("Noor", "Designer", 4, "done"), A("Sam", "Tester", 5, "stopped")] },
+    { name: "Candle Lab", cwd: "~/Projects/candles", staff: [A("Vera", "CEO", 0, "working"), A("Otto", "Project Manager", 1, "idle"), A("Jun", "Engineer", 2, "working"), A("Rhea", "Tester", 5, "done")] },
+    { name: "Orbit Post", cwd: "~/Projects/orbit", staff: [A("Nova", "CEO", 0, "question"), A("Pax", "Project Manager", 1, "working"), A("Iris", "Designer", 4, "idle")] },
+    { name: "Gear Shop", cwd: "~/Projects/gears", staff: [A("Finn", "CEO", 0, "idle"), A("Zoe", "Project Manager", 1, "working"), A("Tao", "Engineer", 3, "working"), A("Bea", "Engineer", 2, "done"), A("Ravi", "Tester", 5, "question")] },
+];
+const STATUS = {
+    working: { color: "#5aa9f2", label: "working" },
+    idle: { color: "#6fd08c", label: "idle" },
+    question: { color: "#ffc56b", label: "question" },
+    done: { color: "#5ee0c0", label: "done" },
+    stopped: { color: "#6b7896", label: "stopped" },
+};
+// Measured on the 1536 x 1024 images. T: the tower floor. SPOTS: feet positions beside the six desks.
+const T = { h: 300, slope: 0.404, cx: 1098, cy: 689, sw: 170 };
+// The floor of the empty room, as a diamond: back, right and left corners.
+const ROOM = { back: [768, 345], right: [1430, 645], left: [105, 645] };
+// Points on the 1024 x 1024 desk image: the centre of the desk, and where the agent stands (behind the desk).
+const DESK = { ax: 510, ay: 560, fx: 610, fy: 600, agent: 0.47 };
+const NS = "http://www.w3.org/2000/svg";
+const n = FLOORS.length;
+let selected = n - 1;
+
+function el(tag, attrs, parent, text) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+}
+
+function drawTower() {
+    const host = document.getElementById("tower");
+    host.textContent = "";
+    const svg = el("svg", { viewBox: `0 0 1536 ${1024 + (n - 1) * T.h}`, role: "group", "aria-label": "Isometric building with one floor for each project" }, host);
+    for (let i = 0; i < n; i++) {
+        const y = (n - 1 - i) * T.h;
+        const fg = el("g", { class: "floor-g" + (i === selected ? " on" : ""), tabindex: 0, role: "button", "aria-label": `Floor ${i + 1}, ${FLOORS[i].name}` }, svg);
+        el("image", { href: "web/floor-pixel.webp", x: 0, y, width: 1536, height: 1024 }, fg);
+        el("image", { href: `web/sticker-${i}.webp`, x: -T.sw / 2, y: -T.sw / 2, width: T.sw, height: T.sw, transform: `matrix(1 ${-T.slope} 0 1 ${T.cx} ${T.cy + y})` }, fg);
+        fg.addEventListener("click", () => select(i));
+        fg.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(i); } });
+    }
+}
+
+// Selects the grid (columns along the right wall, rows along the left wall) that gives the largest desks.
+function grid(count) {
+    let best = null;
+    for (let cols = 1; cols <= count; cols++) {
+        const rows = Math.ceil(count / cols);
+        const k = Math.min(0.92 / (1.2 * cols), 0.92 / (0.85 * rows), 0.36);
+        if (!best || k > best.k + 1e-9) best = { cols, rows, k };
+    }
+    return best;
+}
+function floorPoint(u, v) {
+    const { back, right, left } = ROOM;
+    return [back[0] + u * (right[0] - back[0]) + v * (left[0] - back[0]), back[1] + u * (right[1] - back[1]) + v * (left[1] - back[1])];
+}
+
+function tag(g, a, x, y, scale) {
+    const c = STATUS[a.status].color;
+    const w = 58 + a.name.length * 17;
+    const outer = el("g", { transform: `translate(${x} ${y}) scale(${scale})` }, g);
+    const b = el("g", { class: "bubble " + a.status }, outer);
+    el("polygon", { points: "-8,18 8,18 0,30", fill: "#0b111c" }, b);
+    el("rect", { x: -w / 2, y: -20, width: w, height: 40, rx: 10, fill: "#0b111c", stroke: c, "stroke-width": 4 }, b);
+    const gx = -w / 2 + 24;
+    if (a.status === "working") {
+        [-9, 0, 9].forEach((dx, i) => el("circle", { class: "d d" + (i + 1), cx: gx + dx, cy: 0, r: 3.5, fill: c }, b));
+    } else {
+        const glyph = { idle: "z", question: "?", done: "✓", stopped: "■" }[a.status];
+        el("text", { x: gx, y: 9, "text-anchor": "middle", "font-size": 26, fill: c }, b, glyph);
+    }
+    el("text", { x: gx + 20, y: 9, "font-size": 26, fill: "#e6ecf8" }, b, a.name);
+}
+
+function drawOffice() {
+    const f = FLOORS[selected];
+    const head = document.getElementById("office-head");
+    head.innerHTML = `<img alt="" src="web/sticker-${selected}.webp"><span class="name"></span><span class="cwd"></span>`;
+    head.querySelector(".name").textContent = f.name;
+    head.querySelector(".cwd").textContent = f.cwd;
+    const host = document.getElementById("office");
+    host.textContent = "";
+    const svg = el("svg", { viewBox: "0 0 1536 1024", role: "img", "aria-label": `Office of ${f.name} with ${f.staff.length} employees` }, host);
+    el("image", { href: "web/room-pixel.webp", x: 0, y: 0, width: 1536, height: 1024 }, svg);
+    const { cols, rows, k } = grid(Math.max(1, f.staff.length));
+    const D = 1024 * k;
+    const cells = f.staff.map((a, i) => {
+        const col = i % cols, row = Math.floor(i / cols);
+        return { a, u: 0.05 + (col + 0.5) / cols * 0.9, v: 0.04 + (row + 0.6) / rows * 0.94 };
+    }).sort((p, q) => (p.u + p.v) - (q.u + q.v));
+    const tags = el("g", {});
+    for (const { a, u, v } of cells) {
+        const [cx, cy] = floorPoint(u, v);
+        const x0 = cx - DESK.ax * k, y0 = cy - DESK.ay * k;
+        const fx = x0 + DESK.fx * k, fy = y0 + DESK.fy * k, ah = DESK.agent * D;
+        const g = el("g", { class: "agent " + a.status }, svg);
+        el("ellipse", { cx: fx, cy: fy - 3, rx: ah * 0.2, ry: ah * 0.065, fill: "#000", opacity: 0.35 }, g);
+        el("image", { href: `web/agent-${a.sprite}.webp`, x: fx - ah / 4, y: fy - ah, width: ah / 2, height: ah, preserveAspectRatio: "xMidYMax meet" }, g);
+        // The desk comes after the agent, so that it covers the legs.
+        el("image", { href: "web/desk-back.webp", x: x0, y: y0, width: D, height: D }, svg);
+        const ts = Math.max(0.72, Math.min(1, k / 0.3));
+        tag(tags, a, fx, fy - ah - 36 * ts, ts);
+    }
+    svg.appendChild(tags);
+    const ul = document.getElementById("roster");
+    ul.textContent = "";
+    for (const a of f.staff) {
+        const li = document.createElement("li");
+        li.innerHTML = `<span class="dot"></span><span class="who"></span><span class="role"></span><span class="st"></span>`;
+        li.querySelector(".dot").style.background = STATUS[a.status].color;
+        li.querySelector(".who").textContent = a.name;
+        li.querySelector(".role").textContent = a.role;
+        li.querySelector(".st").textContent = STATUS[a.status].label;
+        ul.appendChild(li);
+    }
+    document.getElementById("count").textContent = f.staff.length + " employees";
+    document.getElementById("fire").disabled = f.staff.length <= 1;
+    document.getElementById("hire").disabled = f.staff.length >= 20;
+}
+const NAMES = ["Ivy", "Max", "Uma", "Eli", "Gus", "Nia", "Ren", "Kit", "Lou", "Dex", "Pia", "Jax", "Mo", "Fay", "Ola", "Cy", "Wren"];
+const STATES = ["working", "idle", "working", "question", "done", "working", "stopped"];
+function hire() {
+    const s = FLOORS[selected].staff;
+    s.push(A(NAMES[s.length % NAMES.length], s.length % 3 === 2 ? "Tester" : "Engineer", 2 + s.length % 4, STATES[s.length % STATES.length]));
+    drawOffice();
+}
+function fire() { FLOORS[selected].staff.pop(); drawOffice(); }
+document.getElementById("hire").addEventListener("click", hire);
+document.getElementById("fire").addEventListener("click", fire);
+function select(i) { selected = i; drawTower(); drawOffice(); }
+drawTower();
+drawOffice();
+</script>

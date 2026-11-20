@@ -32,9 +32,9 @@
         align-items: flex-start;
         gap: 8px;
         padding: 4px 8px;
-        background: #2a1620;
-        border: 2px solid var(--danger);
-        border-radius: 2px;
+        background: #2a1a2c;
+        border: 1px solid var(--danger);
+        border-radius: 6px;
     }
 
     .text {

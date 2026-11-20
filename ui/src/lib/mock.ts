@@ -1,5 +1,6 @@
 // In-memory mock of the Rust side, for `pnpm dev` in a normal browser and for the e2e check.
-// It follows docs/ipc-m1.md: same command names, same argument names, same error texts.
+// It follows docs/ipc-m1.md and docs/ipc-visuals-init.md: same command names, same argument names,
+// same error texts.
 import { base64ToBytes, bytesToBase64, concatBytes } from "./codec";
 import type { Backend, Unlisten } from "./ipc";
 import type {
@@ -11,14 +12,23 @@ import type {
     ProgramName,
     Programs,
     SessionView,
+    Settings,
     Status,
 } from "./types";
+import { SETUP_SLUG } from "./types";
 
 interface MockFloor {
     path: string;
     name: string;
     employees: Employee[];
     sessions: SessionView[];
+    description: string | null;
+    logoPrompt: string | null;
+    /** Base64 PNG of the logo, null when the floor has no logo. */
+    logo: string | null;
+    logoVersion: number | null;
+    logoBusy: boolean;
+    logoError: string | null;
 }
 
 interface MockSession {
@@ -40,6 +50,33 @@ const NEXT: Record<string, [Status, number]> = {
     question: ["idle", 8000],
     done: ["idle", 6000],
 };
+
+// A 1 x 1 transparent PNG, for a place without a canvas (a test in Node).
+const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/** A small sticker-like PNG (base64) with one letter. It stands for the image of the OpenAI API. */
+function makeLogo(letter: string, hue: number): string {
+    if (typeof document === "undefined") return TINY_PNG;
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return TINY_PNG;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.roundRect(8, 8, 240, 240, 56);
+    ctx.fill();
+    ctx.fillStyle = `hsl(${hue} 65% 45%)`;
+    ctx.beginPath();
+    ctx.roundRect(28, 28, 200, 200, 44);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 130px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(letter, 128, 138);
+    return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+}
 
 function employee(slug: string, name: string, role: string, manager: string | null, cli: "claude" | "codex"): Employee {
     return {
@@ -90,8 +127,22 @@ export function createMockBackend(): Backend {
     // Errors that the mock gives one time, to show what the UI does when a start fails.
     const failOnce = new Set(["start:eng-sam", "resume:pm"]);
 
+    const settings: Settings = { openaiKeySet: false, openaiKeySource: null, imageModel: "gpt-image-2.6-sunburst" };
+    const LOGO_MS = 1500;
+
     function addFloor(path: string, name: string, employees: Employee[]): MockFloor {
-        const floor = { path, name, employees, sessions: [] };
+        const floor: MockFloor = {
+            path,
+            name,
+            employees,
+            sessions: [],
+            description: null,
+            logoPrompt: null,
+            logo: null,
+            logoVersion: null,
+            logoBusy: false,
+            logoError: null,
+        };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
         return floor;
@@ -103,6 +154,11 @@ export function createMockBackend(): Backend {
         employee("eng-sam", "Sam", "Engineer", "pm", "codex"),
         employee("eng-lin", "Lin", "Engineer", "pm", "claude"),
     ]);
+    // The first floor has a logo, a description and a logo prompt.
+    tower.description = "A demo project with a CEO, a project manager and two engineers.";
+    tower.logoPrompt = "A tall tower with a golden crown.";
+    tower.logo = makeLogo("D", 165);
+    tower.logoVersion = 1_700_000_000_000;
     // Lin has a stopped session from "an earlier run" that can resume.
     tower.sessions.push({
         sessionId: "s-old-lin",
@@ -112,7 +168,30 @@ export function createMockBackend(): Backend {
         messageWaiting: false,
         canResume: true,
     });
+    // The second floor has no logo: the building shows the placeholder sticker.
     addFloor("/home/demo/second", "Second Floor", [employee("ceo", "Bo", "CEO", null, "claude")]);
+    // A big office, to check the layout with 13 desks.
+    const big = addFloor("/home/demo/big", "Big Office", [
+        employee("ceo", "Eve", "CEO", null, "claude"),
+        employee("pm", "Pia", "Project Manager", "ceo", "claude"),
+        ...[
+            ["eng-1", "Kai", "Engineer"],
+            ["eng-2", "Leo", "Engineer"],
+            ["eng-3", "Mo", "Engineer"],
+            ["eng-4", "Nia", "Engineer"],
+            ["des-1", "Noor", "Designer"],
+            ["des-2", "Wolfeschlegel", "Designer"],
+            ["qa-1", "Sam", "Tester"],
+            ["qa-2", "Rhea", "Tester"],
+            ["doc-1", "Bartholomew", "Writer"],
+            ["ops-1", "Ola", "Support"],
+            ["ops-2", "Jun", "Support"],
+        ].map(([slug, name, role]) => employee(slug, name, role, "pm", slug.length % 2 === 0 ? "claude" : "codex")),
+    ]);
+    big.description = "An office with thirteen desks.";
+    big.logoPrompt = "A busy beehive.";
+    big.logo = makeLogo("B", 35);
+    big.logoVersion = 1_700_000_100_000;
     // A path in the list that does not exist any more.
     known.push("/home/demo/gone");
 
@@ -125,12 +204,19 @@ export function createMockBackend(): Backend {
     }
 
     function viewOf(floor: MockFloor): FloorView {
+        const setup = floor.sessions.find((x) => x.slug === SETUP_SLUG && x.status !== "stopped");
         return {
             path: floor.path,
             name: floor.name,
             employees: structuredClone(floor.employees),
             employeeErrors: [],
             sessions: structuredClone(floor.sessions),
+            description: floor.description,
+            logoPrompt: floor.logoPrompt,
+            logoVersion: floor.logoVersion,
+            logoBusy: floor.logoBusy,
+            logoError: floor.logoError,
+            setupSessionId: setup ? setup.sessionId : null,
         };
     }
 
@@ -163,15 +249,19 @@ export function createMockBackend(): Backend {
     function setStatus(s: MockSession, status: Status): void {
         if (s.view.status === status) return;
         s.view.status = status;
-        if (status === "stopped") s.view.canResume = true;
+        // The setup session cannot resume.
+        if (status === "stopped" && s.view.slug !== SETUP_SLUG) s.view.canResume = true;
         changed(s);
+        if (status === "stopped" && s.view.slug === SETUP_SLUG) emit("floor-changed", { path: s.path });
         schedule(s);
     }
 
     function schedule(s: MockSession): void {
         if (s.timer) clearTimeout(s.timer);
         s.timer = null;
-        const next = NEXT[s.view.status];
+        // The setup session goes to `working` and then waits for its own timer (see `startSetup`).
+        const next: [Status, number] | undefined =
+            s.view.slug === SETUP_SLUG ? (s.view.status === "starting" ? ["working", 1200] : undefined) : NEXT[s.view.status];
         if (!next) return;
         s.timer = setTimeout(() => setStatus(s, next[0]), next[1]);
     }
@@ -222,6 +312,50 @@ export function createMockBackend(): Backend {
         banner(s, emp);
         changed(s);
         schedule(s);
+        return { ...s.view };
+    }
+
+    /** The setup agent: prints a few lines, then adds one employee to the floor and ends its turn. */
+    function startSetup(path: string, cli: string): SessionView {
+        const floor = floorOf(path);
+        if (cli !== "claude" && cli !== "codex") throw `unknown cli ${cli}`;
+        const old = floor.sessions.find((x) => x.slug === SETUP_SLUG);
+        if (old && old.status !== "stopped") throw "a setup session is already live for this floor";
+        counter += 1;
+        const s: MockSession = {
+            view: {
+                sessionId: `s-${counter}`,
+                slug: SETUP_SLUG,
+                status: "starting",
+                draft: false,
+                messageWaiting: false,
+                canResume: false,
+            },
+            path,
+            log: new Uint8Array(0),
+            channel: null,
+            line: [],
+            timer: null,
+        };
+        sessions.set(s.view.sessionId, s);
+        text(s, `\x1b[1;36mAgent Tower mock setup agent\x1b[0m (${cli}) in \x1b[1m${floor.name}\x1b[0m\r\n`);
+        text(s, "Reading CLAUDE.md, README.md and the top-level layout...\r\n");
+        changed(s);
+        schedule(s);
+        setTimeout(() => {
+            if (s.view.status === "stopped") return;
+            text(s, "I propose one ceo, one pm and one tester.\r\n");
+            text(s, "Writing .swarm/employees/qa.md and the [brand] table...\r\n");
+            if (!floor.employees.some((e) => e.slug === "qa")) {
+                floor.employees.push(employee("qa", "Quinn", "Tester", "pm", cli));
+            }
+            floor.description ??= `The project in ${floor.name}.`;
+            floor.logoPrompt ??= `A friendly emblem for ${floor.name}.`;
+            text(s, "\x1b[32mThe setup is complete. You can stop this session.\x1b[0m\r\n");
+            showPrompt(s);
+            emit("floor-changed", { path });
+            setStatus(s, "idle");
+        }, 3500);
         return { ...s.view };
     }
 
@@ -282,7 +416,12 @@ export function createMockBackend(): Backend {
                 args(raw, []);
                 return known.map<FloorEntry>((path) => {
                     const floor = floors.get(path);
-                    return { path, name: floor ? floor.name : null, missing: !floor };
+                    return {
+                        path,
+                        name: floor ? floor.name : null,
+                        missing: !floor,
+                        logoVersion: floor ? floor.logoVersion : null,
+                    };
                 });
             }
             case "floor_open": {
@@ -315,6 +454,7 @@ export function createMockBackend(): Backend {
             case "employee_save": {
                 const { path, employee: emp } = args<{ path: string; employee: Employee }>(raw, ["path", "employee"]);
                 const floor = floorOf(path);
+                if (emp.slug === SETUP_SLUG) throw `the slug "${SETUP_SLUG}" is reserved`;
                 if (!/^[a-z0-9][a-z0-9-]*$/.test(emp.slug)) throw `bad slug "${emp.slug}"`;
                 const i = floor.employees.findIndex((e) => e.slug === emp.slug);
                 if (i >= 0) floor.employees[i] = structuredClone(emp);
@@ -431,6 +571,64 @@ export function createMockBackend(): Backend {
                 text(s, `\r\n\x1b[35m[paste]\x1b[0m ${pasted.replace(/\r?\n/g, "\r\n")}\r\n\x1b[32m$\x1b[0m `);
                 changed(s);
                 return null;
+            }
+            case "floor_logo": {
+                const { path } = args<{ path: string }>(raw, ["path"]);
+                return floorOf(path).logo;
+            }
+            case "logo_generate": {
+                const { path, prompt } = args<{ path: string; prompt: string | null }>(raw, ["path", "prompt"]);
+                const floor = floorOf(path);
+                if (floor.logoBusy) throw "BUSY: a logo generation already runs for this floor";
+                // An empty text removes the stored prompt (like the real app). A null keeps it.
+                if (prompt !== null) floor.logoPrompt = prompt.trim() === "" ? null : prompt.trim();
+                if (!settings.openaiKeySet) {
+                    // No key: the call fails at once with `NO_KEY:`, like the real app. Nothing runs.
+                    emit("floor-changed", { path });
+                    throw "NO_KEY: no OpenAI key is known. Enter a key, or set OPENAI_API_KEY.";
+                }
+                floor.logoBusy = true;
+                floor.logoError = null;
+                emit("floor-changed", { path });
+                setTimeout(() => {
+                    floor.logoBusy = false;
+                    floor.logoError = null;
+                    floor.logo = makeLogo((floor.name[0] ?? "?").toUpperCase(), (Date.now() / 7) % 360);
+                    floor.logoVersion = Date.now();
+                    emit("floor-changed", { path });
+                }, LOGO_MS);
+                return null;
+            }
+            case "setup_start": {
+                const a = args<{ path: string; cli: string; rows: number; cols: number }>(raw, [
+                    "path",
+                    "cli",
+                    "rows",
+                    "cols",
+                ]);
+                return startSetup(a.path, a.cli);
+            }
+            case "settings_get": {
+                args(raw, []);
+                return { ...settings };
+            }
+            case "settings_set": {
+                const a = args<{ openaiKey: string | null; imageModel: string | null }>(raw, ["openaiKey", "imageModel"]);
+                if (a.openaiKey !== null) {
+                    const key = a.openaiKey.trim();
+                    settings.openaiKeySet = key !== "";
+                    settings.openaiKeySource = key !== "" ? "config" : null;
+                    if (key !== "") {
+                        for (const floor of floors.values()) {
+                            if (floor.logoError?.startsWith("NO_KEY:")) {
+                                floor.logoError = null;
+                                emit("floor-changed", { path: floor.path });
+                            }
+                        }
+                    }
+                }
+                if (a.imageModel !== null && a.imageModel.trim() !== "") settings.imageModel = a.imageModel.trim();
+                return { ...settings };
             }
             case "programs_get": {
                 args(raw, []);

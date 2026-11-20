@@ -34,6 +34,8 @@
 //! from the output thread of the session, with no lock held.
 
 mod live;
+mod logo_run;
+mod settings;
 mod tools;
 
 use crate::adapter::{
@@ -41,6 +43,7 @@ use crate::adapter::{
 };
 use crate::env::{EnvMap, current_env};
 use crate::hookrx::HookReceiver;
+use crate::logo::{DEFAULT_API_BASE, REQUEST_TIMEOUT};
 use crate::model::{CliKind, Employee, PermissionPolicy, SessionRecord};
 use crate::programs::Resolver;
 use crate::pty::LogConfig;
@@ -48,6 +51,7 @@ use crate::session::{HookRouter, PasteRefused, Session};
 use crate::status::Status;
 use crate::store::{Database, FloorList, FloorStore, StoreError};
 use live::{Live, LiveParts, Notifier, locked, now_ms, read_log_tail, spawn_pumps};
+use logo_run::{LogoEnv, LogoState};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -60,10 +64,21 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub use live::SCROLLBACK_LIMIT;
+pub use settings::{KeySource, SettingsView};
 pub use tools::{FAILURE_TTL, hook_candidates, locate_hook_program, workspace_root};
 
 /// The size limit of the PTY log of one session (spec 4.9; the log keeps 4 to 8 MB).
 pub const LOG_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The reserved slug of the setup session. No employee can have it.
+pub const SETUP_SLUG: &str = "setup";
+
+/// The instructions of the setup agent (the "floor-init skill"). They go in through the same path
+/// as the role text of an employee.
+pub const FLOOR_INIT: &str = include_str!("floor_init.md");
+
+/// The first message of the setup session.
+pub const SETUP_FIRST_MESSAGE: &str = "Start the floor setup.";
 
 /// How long `shutdown` waits for the processes to end before it uses `SIGKILL`.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -135,8 +150,21 @@ pub struct FloorView {
     pub name: String,
     pub employees: Vec<Employee>,
     pub employee_errors: Vec<String>,
-    /// One for each employee that has a live or a last session.
+    /// One for each employee that has a live or a last session, and the setup session if there
+    /// is one (it has the slug `setup`).
     pub sessions: Vec<SessionView>,
+    /// `[brand] description`.
+    pub description: Option<String>,
+    /// `[brand] logo_prompt`.
+    pub logo_prompt: Option<String>,
+    /// The modification time of `logo.png` in Unix milliseconds. `None` when there is no file.
+    pub logo_version: Option<i64>,
+    /// A logo generation runs now for this floor.
+    pub logo_busy: bool,
+    /// The error text of the last failed generation (in memory only).
+    pub logo_error: Option<String>,
+    /// The ID of the live setup session, if one runs.
+    pub setup_session_id: Option<String>,
 }
 
 /// `FloorEntry` of the contract.
@@ -145,6 +173,8 @@ pub struct FloorEntryView {
     pub path: PathBuf,
     pub name: Option<String>,
     pub missing: bool,
+    /// The modification time of `logo.png` in Unix milliseconds. `None` when there is no file.
+    pub logo_version: Option<i64>,
 }
 
 /// `Programs` of the contract. `None` means "not found". `hook` is `None` when `tower-hook`
@@ -209,6 +239,10 @@ pub struct TowerConfig {
     pub parent_env: EnvMap,
     /// The size limit of each PTY log file.
     pub log_limit: u64,
+    /// The base URL of the image API. Tests give the URL of a local fake server.
+    pub image_api_base: String,
+    /// The time limit of one logo request.
+    pub logo_timeout: Duration,
     /// Test only. Runs in `session_attach` inside the critical section of the output buffer,
     /// after the scrollback was copied and before the sink is installed. A correct build holds
     /// the output thread during the call; a build with a gap or a duplicate does not.
@@ -225,6 +259,8 @@ impl TowerConfig {
             adapters: real_adapters(),
             parent_env: current_env(),
             log_limit: LOG_LIMIT_BYTES,
+            image_api_base: DEFAULT_API_BASE.to_owned(),
+            logo_timeout: REQUEST_TIMEOUT,
             attach_pause: None,
         }
     }
@@ -238,6 +274,8 @@ struct FloorHandle {
     /// The key: the real path of the working folder.
     path: PathBuf,
     store: Mutex<FloorStore>,
+    /// The state of the logo generations of this floor (memory only).
+    logo: Mutex<LogoState>,
 }
 
 impl FloorHandle {
@@ -275,6 +313,15 @@ impl Registry {
     }
 }
 
+/// What `launch` starts.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    /// The employee with this slug.
+    Employee(&'a str),
+    /// The setup session (the slug is `SETUP_SLUG`), with this CLI.
+    Setup(CliKind),
+}
+
 /// Removes the reservation of an employee when it goes out of scope.
 struct Reservation {
     registry: Arc<Mutex<Registry>>,
@@ -301,12 +348,21 @@ pub struct Tower {
     adapters: AdapterFactory,
     parent_env: EnvMap,
     log_limit: u64,
+    logo_env: Arc<LogoEnv>,
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
 }
 
 fn normalize(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Read `floor.toml` again (the name, the defaults and the brand), so that an edit on disk applies
+/// while the app runs. It opens the store again; the store lock is held for the swap.
+fn reload(floor: &FloorHandle) -> Result<()> {
+    let mut store = locked(&floor.store);
+    *store = FloorStore::open(&floor.path)?;
+    Ok(())
 }
 
 fn io_message(what: &str, error: io::Error) -> TowerError {
@@ -331,6 +387,12 @@ impl Tower {
             )
         })?;
         let router = Arc::new(HookRouter::start(messages));
+        let logo_env = Arc::new(LogoEnv {
+            config_file: config.config_dir.join("programs.toml"),
+            env: config.parent_env.clone(),
+            api_base: config.image_api_base,
+            timeout: config.logo_timeout,
+        });
         Ok(Tower {
             floor_list: FloorList::new(&config.config_dir),
             socket: hookrx.path().to_path_buf(),
@@ -345,8 +407,9 @@ impl Tower {
             adapters: config.adapters,
             parent_env: config.parent_env,
             log_limit: config.log_limit,
+            logo_env,
             attach_pause: config.attach_pause,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -370,6 +433,7 @@ impl Tower {
             .into_iter()
             .map(|entry| FloorEntryView {
                 name: floor_name_on_disk(&entry.path),
+                logo_version: logo_run::logo_version(&entry.path),
                 path: entry.path,
                 missing: entry.missing,
             })
@@ -379,7 +443,7 @@ impl Tower {
     /// Import `{path}/.swarm/`. `TowerError::NoFloor` when there is none.
     pub fn floor_open(&self, path: &Path) -> Result<FloorView> {
         let floor = self.floor_handle(path)?;
-        Self::reload(&floor)?;
+        reload(&floor)?;
         self.floor_list.add(&floor.path)?;
         self.floor_view(&floor)
     }
@@ -404,6 +468,7 @@ impl Tower {
         let handle = Arc::new(FloorHandle {
             path: key.clone(),
             store: Mutex::new(store),
+            logo: Mutex::default(),
         });
         locked(&self.floors).insert(key.clone(), Arc::clone(&handle));
         self.floor_list.add(&key)?;
@@ -435,6 +500,11 @@ impl Tower {
         if employee.name.trim().is_empty() {
             return Err(other("the employee name is empty"));
         }
+        if employee.slug == SETUP_SLUG {
+            return Err(other(format!(
+                "the slug \"{SETUP_SLUG}\" is reserved for the setup agent. Use another slug."
+            )));
+        }
         let floor = self.floor_handle(path)?;
         locked(&floor.store).write_employee(&employee)?;
         self.notifier.floor_changed(&floor.path);
@@ -465,24 +535,27 @@ impl Tower {
         let handle = Arc::new(FloorHandle {
             path: key.clone(),
             store: Mutex::new(store),
+            logo: Mutex::default(),
         });
         let mut floors = locked(&self.floors);
         // Another thread can have opened it while we did. Then its handle wins.
         Ok(Arc::clone(floors.entry(key).or_insert(handle)))
     }
 
-    /// Read `floor.toml` again (the name and the defaults), so that an edit on disk applies
-    /// while the app runs. It opens the store again; the store lock is held for the swap.
-    fn reload(floor: &FloorHandle) -> Result<()> {
-        let mut store = locked(&floor.store);
-        *store = FloorStore::open(&floor.path)?;
-        Ok(())
-    }
-
     fn floor_view(&self, floor: &FloorHandle) -> Result<FloorView> {
-        let (name, loaded, records) = {
+        let (name, brand, loaded, records, setup_record) = {
             let store = locked(&floor.store);
-            let loaded = store.read_employees()?;
+            let mut loaded = store.read_employees()?;
+            // The slug `setup` is reserved. A file with that slug is an error, not an employee.
+            if loaded.employees.iter().any(|e| e.slug == SETUP_SLUG) {
+                loaded.employees.retain(|e| e.slug != SETUP_SLUG);
+                loaded.errors.push(StoreError::Invalid {
+                    path: floor.swarm().join("employees").join("setup.md"),
+                    message: format!(
+                        "the slug \"{SETUP_SLUG}\" is reserved for the setup agent. Rename the file."
+                    ),
+                });
+            }
             let mut records = Vec::with_capacity(loaded.employees.len());
             for employee in &loaded.employees {
                 // `can_resume` needs the history of the CLI session (D3).
@@ -500,9 +573,17 @@ impl Tower {
                 };
                 records.push(record);
             }
-            (store.floor().name.clone(), loaded, records)
+            let setup_record = store.db().last_session(SETUP_SLUG)?;
+            (
+                store.floor().name.clone(),
+                store.floor().brand.clone(),
+                loaded,
+                records,
+                setup_record,
+            )
         };
         let mut sessions = Vec::new();
+        let mut setup_session_id = None;
         {
             let registry = locked(&self.registry);
             for (employee, record) in loaded.employees.iter().zip(records) {
@@ -530,14 +611,112 @@ impl Tower {
                     });
                 }
             }
+            // The setup session: the live one, or the last one. It never resumes.
+            let live = registry
+                .live
+                .values()
+                .find(|l| l.path == floor.path && l.slug == SETUP_SLUG && !l.exited());
+            if let Some(live) = live {
+                setup_session_id = Some(live.id.clone());
+                sessions.push(live.view());
+            } else if let Some(record) = setup_record {
+                let starting = registry
+                    .reserved
+                    .contains(&(floor.path.clone(), SETUP_SLUG.to_owned()));
+                sessions.push(SessionView {
+                    session_id: record.app_session_id,
+                    slug: SETUP_SLUG.to_owned(),
+                    status: if starting {
+                        Status::Starting
+                    } else {
+                        Status::Stopped
+                    },
+                    draft: false,
+                    message_waiting: false,
+                    can_resume: false,
+                });
+            }
         }
+        let (logo_busy, logo_error) = {
+            let state = locked(&floor.logo);
+            (state.busy, state.error.clone())
+        };
         Ok(FloorView {
             path: floor.path.clone(),
             name,
             employees: loaded.employees,
             employee_errors: loaded.errors.iter().map(ToString::to_string).collect(),
             sessions,
+            description: brand.description,
+            logo_prompt: brand.logo_prompt,
+            logo_version: logo_run::logo_version(&floor.path),
+            logo_busy,
+            logo_error,
+            setup_session_id,
         })
+    }
+
+    // ---- logo and settings ----
+
+    /// The bytes of `.swarm/assets/logo.png`, or `None` when there is no file.
+    pub fn floor_logo(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+        let floor = self.floor_handle(path)?;
+        match fs::read(logo_run::logo_path(&floor.path)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_message("cannot read the logo", error)),
+        }
+    }
+
+    /// Start a logo generation in the background and return at once. `prompt` `Some(text)` is
+    /// written to `[brand] logo_prompt` first. The error text starts with `NO_KEY:` when no
+    /// OpenAI key is known, and with `BUSY:` when a generation runs for this floor already. The
+    /// observer gets `floor_changed` when the generation starts and when it ends.
+    pub fn logo_generate(&self, path: &Path, prompt: Option<String>) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(TowerError::Closing);
+        }
+        let floor = self.floor_handle(path)?;
+        logo_run::start(&self.logo_env, &self.notifier, &floor, prompt.as_deref())
+    }
+
+    /// The settings of the logo. They never hold the key.
+    pub fn settings_get(&self) -> SettingsView {
+        settings::view(&self.logo_env.config_file, &self.logo_env.env)
+    }
+
+    /// Change the settings. `None` is "no change". An empty text removes the stored value: the
+    /// key from the app config, or the image model (the default model is used then).
+    pub fn settings_set(
+        &self,
+        openai_key: Option<String>,
+        image_model: Option<String>,
+    ) -> Result<SettingsView> {
+        if let Some(key) = &openai_key
+            && !key.trim().chars().all(|c| c.is_ascii_graphic())
+        {
+            // The text of the key is not in the message.
+            return Err(other(
+                "the key has a space or a character that a key cannot have",
+            ));
+        }
+        if let Some(model) = &image_model
+            && model.trim().chars().any(|c| c.is_control())
+        {
+            return Err(other("the image model has a control character"));
+        }
+        if openai_key.is_some() || image_model.is_some() {
+            settings::update(&self.logo_env.config_file, |table| {
+                if let Some(key) = &openai_key {
+                    settings::set_openai_text(table, "key", key);
+                }
+                if let Some(model) = &image_model {
+                    settings::set_openai_text(table, "image_model", model);
+                }
+            })
+            .map_err(|e| io_message("cannot write the app config", e))?;
+        }
+        Ok(self.settings_get())
     }
 
     // ---- sessions ----
@@ -551,7 +730,35 @@ impl Tower {
         rows: u16,
         cols: u16,
     ) -> Result<SessionView> {
-        self.launch(path, slug, false, first_message, rows, cols)
+        self.launch(
+            path,
+            Target::Employee(slug),
+            false,
+            first_message,
+            rows,
+            cols,
+        )
+    }
+
+    /// Start a fresh setup session in the floor folder (slug `setup`). The CLI flags are those of
+    /// an employee with the policy `edit-in-worktree`. The model and the effort come from
+    /// `[defaults]` of `floor.toml`. The instructions are `FLOOR_INIT`, and the first message is
+    /// `SETUP_FIRST_MESSAGE`. Refused while a setup session is live for this floor.
+    pub fn setup_start(
+        &self,
+        path: &Path,
+        cli: CliKind,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SessionView> {
+        self.launch(
+            path,
+            Target::Setup(cli),
+            false,
+            Some(SETUP_FIRST_MESSAGE.to_owned()),
+            rows,
+            cols,
+        )
     }
 
     /// Resume the last CLI session of the employee. Claude with no stored ID is an error.
@@ -564,13 +771,13 @@ impl Tower {
         rows: u16,
         cols: u16,
     ) -> Result<SessionView> {
-        self.launch(path, slug, true, message, rows, cols)
+        self.launch(path, Target::Employee(slug), true, message, rows, cols)
     }
 
     fn launch(
         &self,
         path: &Path,
-        slug: &str,
+        target: Target<'_>,
         resume: bool,
         message: Option<String>,
         rows: u16,
@@ -579,19 +786,31 @@ impl Tower {
         if self.closed.load(Ordering::SeqCst) {
             return Err(TowerError::Closing);
         }
+        let (slug, setup_cli) = match target {
+            Target::Employee(slug) => (slug, None),
+            Target::Setup(cli) => (SETUP_SLUG, Some(cli)),
+        };
+        if setup_cli.is_none() && slug == SETUP_SLUG {
+            return Err(other(format!(
+                "the slug \"{SETUP_SLUG}\" is the setup session. Use setup_start."
+            )));
+        }
         let floor = self.floor_handle(path)?;
         let _reservation = self.reserve(&floor.path, slug)?;
         // The defaults are read from the current file, not from the file at app start.
-        Self::reload(&floor)?;
+        reload(&floor)?;
 
         let (employee, previous) = {
             let store = locked(&floor.store);
-            let mut employee = store
-                .read_employees()?
-                .employees
-                .into_iter()
-                .find(|e| e.slug == slug)
-                .ok_or_else(|| StoreError::EmployeeNotFound(slug.to_owned()))?;
+            let mut employee = match setup_cli {
+                Some(cli) => setup_employee(cli),
+                None => store
+                    .read_employees()?
+                    .employees
+                    .into_iter()
+                    .find(|e| e.slug == slug)
+                    .ok_or_else(|| StoreError::EmployeeNotFound(slug.to_owned()))?,
+            };
             // The defaults of `floor.toml` fill what the employee leaves empty.
             let defaults = &store.floor().defaults;
             if employee.model.as_deref().is_none_or(str::is_empty) {
@@ -690,6 +909,9 @@ impl Tower {
             }
         };
         let session = handle.session().clone();
+        if setup_cli.is_some() {
+            logo_run::remember_setup_prompt(&floor);
+        }
         let learn_id = employee.cli == CliKind::Codex && plan.cli_session_id.is_none();
         let live = Live::new(LiveParts {
             id: id.clone(),
@@ -703,6 +925,7 @@ impl Tower {
             db,
             notifier: Arc::clone(&self.notifier),
             attach_pause: self.attach_pause.clone(),
+            after_turn: setup_cli.map(|_| self.setup_hook(&floor)),
         });
         locked(&self.registry)
             .live
@@ -722,6 +945,25 @@ impl Tower {
             return Err(io_message("cannot start the threads of the session", error));
         }
         Ok(live.view())
+    }
+
+    /// What the status thread of the setup session runs after each turn and at the stop: read the
+    /// floor again, tell the observer, and start the logo if the conditions hold.
+    fn setup_hook(&self, floor: &Arc<FloorHandle>) -> Arc<dyn Fn() + Send + Sync> {
+        let floor = Arc::clone(floor);
+        let notifier = Arc::clone(&self.notifier);
+        let env = Arc::clone(&self.logo_env);
+        let closed = Arc::clone(&self.closed);
+        Arc::new(move || {
+            // A `floor.toml` that does not load (the agent is in the middle of an edit) keeps the
+            // old data. The observer still gets the event, because employee files may have changed.
+            let loaded = reload(&floor).is_ok();
+            notifier.floor_changed(&floor.path);
+            // The app is closing: the stop of the session must not start a request.
+            if loaded && !closed.load(Ordering::SeqCst) {
+                logo_run::auto_start(&env, &notifier, &floor);
+            }
+        })
     }
 
     fn reserve(&self, path: &Path, slug: &str) -> Result<Reservation> {
@@ -988,8 +1230,13 @@ fn repair_orphans(store: &FloorStore) {
     let Ok(loaded) = store.read_employees() else {
         return;
     };
-    for employee in loaded.employees {
-        if let Ok(Some(record)) = store.db().last_session(&employee.slug)
+    let slugs = loaded
+        .employees
+        .iter()
+        .map(|employee| employee.slug.as_str())
+        .chain([SETUP_SLUG]);
+    for slug in slugs {
+        if let Ok(Some(record)) = store.db().last_session(slug)
             && record.ended_at.is_none()
         {
             let now = now_ms();
@@ -1022,6 +1269,21 @@ fn instructions(employee: &Employee) -> String {
         text.push_str(role_text);
     }
     text
+}
+
+/// The employee record of the setup session. No file has it. Its role text is `FLOOR_INIT`.
+fn setup_employee(cli: CliKind) -> Employee {
+    Employee {
+        name: "Setup".to_owned(),
+        slug: SETUP_SLUG.to_owned(),
+        role: "Setup agent".to_owned(),
+        manager: None,
+        cli,
+        model: None,
+        effort: None,
+        permission: PermissionPolicy::EditInWorktree,
+        role_text: FLOOR_INIT.to_owned(),
+    }
 }
 
 /// The two employees of a new floor.

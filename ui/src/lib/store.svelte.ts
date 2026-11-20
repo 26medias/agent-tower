@@ -1,4 +1,5 @@
-// The one store of the UI: floors, the open floor, sessions by ID, the active tab, toasts.
+// The one store of the UI: floors, the open floor, sessions by ID, the active tab, the selected
+// employee, logos, settings, toasts.
 // Svelte 5 runes. The pure state changes live in ./reducers.ts.
 import * as ipc from "./ipc";
 import { orderEmployees } from "./order";
@@ -16,12 +17,14 @@ import {
     type SessionState,
 } from "./reducers";
 import type {
+    CliKind,
     Employee,
     FloorEntry,
     FloorView,
     ProgramName,
     Programs,
     SessionView,
+    Settings,
     TrackedSession,
 } from "./types";
 
@@ -57,6 +60,13 @@ class Store {
     activeByPath = $state.raw<Record<string, string>>({});
     toasts = $state.raw<Toast[]>([]);
     programs = $state.raw<Programs | null>(null);
+    settings = $state.raw<Settings | null>(null);
+    /** Logo of each floor as a `data:` URL, by floor path. A floor without a logo has no entry. */
+    logos = $state.raw<Record<string, string>>({});
+    /** The employee that the operator selected, by floor path. */
+    selectedByPath = $state.raw<Record<string, string>>({});
+    /** Text of a rejected `logo_generate` call (`NO_KEY:` or `BUSY:`), by floor path. */
+    logoCallError = $state.raw<Record<string, string>>({});
     /** Set when `floor_open` failed with `NO_FLOOR:`. The UI offers to create the floor. */
     pendingCreate = $state.raw<{ path: string; message: string } | null>(null);
     backend = $state<"tauri" | "mock" | "">("");
@@ -68,6 +78,8 @@ class Store {
 
     private toastId = 0;
     private unlisten: ipc.Unlisten[] = [];
+    /** Version of the logo that was loaded (or asked for) for each floor. */
+    private logoLoaded = new Map<string, number | null>();
 
     /** Tabs of the open floor, in a stable order. */
     tabs = $derived.by(() => {
@@ -94,6 +106,13 @@ class Store {
 
     activeSession = $derived(this.activeId ? (this.sessionState.byId[this.activeId] ?? null) : null);
 
+    /** The selected employee of the open floor, if it still exists. */
+    selectedEmployee = $derived.by(() => {
+        const path = this.openPath;
+        const slug = path ? this.selectedByPath[path] : undefined;
+        return slug ? (this.orderedEmployees.find((e) => e.slug === slug) ?? null) : null;
+    });
+
     private employeeIndex(slug: string): number {
         const i = this.orderedEmployees.findIndex((e) => e.slug === slug);
         return i < 0 ? Number.MAX_SAFE_INTEGER : i;
@@ -109,6 +128,8 @@ class Store {
                     this.sessionState = applySessionChanged(this.sessionState, payload);
                 }),
                 await ipc.onFloorChanged((payload) => {
+                    // The list carries the logo version of every floor.
+                    void this.loadFloors();
                     if (payload.path === this.openPath) void this.reloadFloor();
                 }),
             );
@@ -117,6 +138,7 @@ class Store {
         }
         await this.loadFloors();
         void this.loadPrograms();
+        void this.loadSettings();
         const last = readLastFloor();
         const first = this.floors.find((f) => f.path === last && !f.missing) ?? this.floors.find((f) => !f.missing);
         if (first) await this.openFloor(first.path);
@@ -149,6 +171,7 @@ class Store {
     async loadFloors(): Promise<void> {
         try {
             this.floors = await ipc.floorList();
+            this.syncLogos();
         } catch (e) {
             this.fail(e);
         }
@@ -157,6 +180,59 @@ class Store {
     private applyView(view: FloorView): void {
         this.floorView = view;
         this.sessionState = applyFloorView(this.sessionState, view);
+        this.syncLogos();
+    }
+
+    /** Forget the text of a rejected `logo_generate` call: of one floor, or of all floors. */
+    private clearLogoCallError(path?: string): void {
+        if (path === undefined) {
+            if (Object.keys(this.logoCallError).length > 0) this.logoCallError = {};
+        } else if (path in this.logoCallError) {
+            const next = { ...this.logoCallError };
+            delete next[path];
+            this.logoCallError = next;
+        }
+    }
+
+    /** Change the open floor. The call error of the floor that the operator leaves goes away. */
+    private switchTo(view: FloorView): void {
+        if (this.openPath !== null && this.openPath !== view.path) this.clearLogoCallError(this.openPath);
+        this.openPath = view.path;
+    }
+
+    /** Load the logo of each floor again when its version changed. */
+    private syncLogos(): void {
+        for (const entry of this.floors) {
+            if (entry.missing) continue;
+            const view = this.floorView && this.floorView.path === entry.path ? this.floorView : null;
+            const want = view ? view.logoVersion : entry.logoVersion;
+            if (this.logoLoaded.has(entry.path) && this.logoLoaded.get(entry.path) === want) continue;
+            this.logoLoaded.set(entry.path, want);
+            // The logo changed, so an old call error (for example `NO_KEY:`) is out of date.
+            this.clearLogoCallError(entry.path);
+            if (want === null) {
+                if (entry.path in this.logos) {
+                    const next = { ...this.logos };
+                    delete next[entry.path];
+                    this.logos = next;
+                }
+                continue;
+            }
+            void ipc
+                .floorLogo(entry.path)
+                .then((b64) => {
+                    // A newer version can have been asked for while this call ran.
+                    if (this.logoLoaded.get(entry.path) !== want) return;
+                    const next = { ...this.logos };
+                    if (b64) next[entry.path] = `data:image/png;base64,${b64}`;
+                    else delete next[entry.path];
+                    this.logos = next;
+                })
+                .catch(() => {
+                    // Forget the version, so that the next change tries again.
+                    if (this.logoLoaded.get(entry.path) === want) this.logoLoaded.delete(entry.path);
+                });
+        }
     }
 
     /** Open a floor by path. Returns true on success. */
@@ -169,7 +245,7 @@ class Store {
         try {
             const view = await ipc.floorOpen(clean);
             this.pendingCreate = null;
-            this.openPath = view.path;
+            this.switchTo(view);
             this.applyView(view);
             writeLastFloor(view.path);
             await this.loadFloors();
@@ -189,7 +265,7 @@ class Store {
         try {
             const view = await ipc.floorCreate(path, name.trim());
             this.pendingCreate = null;
-            this.openPath = view.path;
+            this.switchTo(view);
             this.applyView(view);
             writeLastFloor(view.path);
             await this.loadFloors();
@@ -228,6 +304,41 @@ class Store {
         }
     }
 
+    // ---- logo and setup ----
+
+    /** Start a logo generation. `prompt` null keeps the stored prompt. */
+    async generateLogo(prompt: string | null): Promise<void> {
+        const path = this.openPath;
+        if (!path) return;
+        this.clearLogoCallError(path);
+        try {
+            await ipc.logoGenerate(path, prompt);
+        } catch (e) {
+            // `NO_KEY:` and `BUSY:` can come as the error of the call. They show like a `logoError`.
+            this.logoCallError = { ...this.logoCallError, [path]: ipc.errorText(e) };
+        }
+        void this.reloadFloor();
+    }
+
+    /** Save the OpenAI key, then try the logo again. Returns true when the key was saved. */
+    async saveKeyAndRetry(key: string): Promise<boolean> {
+        try {
+            this.settings = await ipc.settingsSet(key.trim(), null);
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
+        // The key is saved: a `NO_KEY:` error of any floor is out of date.
+        this.clearLogoCallError();
+        await this.generateLogo(null);
+        return true;
+    }
+
+    /** Start the setup agent of the open floor. */
+    startSetup(cli: CliKind): Promise<void> {
+        return this.launch("setup", (path, rows, cols) => ipc.setupStart(path, cli, rows, cols));
+    }
+
     // ---- employees ----
 
     async saveEmployee(employee: Employee): Promise<boolean> {
@@ -253,6 +364,15 @@ class Store {
     }
 
     // ---- sessions and tabs ----
+
+    /** Select an employee of the open floor. A live session of the employee gets its tab. */
+    selectEmployee(slug: string): void {
+        const path = this.openPath;
+        if (!path) return;
+        this.selectedByPath = { ...this.selectedByPath, [path]: slug };
+        const session = this.sessionOfEmployee(slug);
+        if (session && isLive(session)) this.selectTab(session.sessionId);
+    }
 
     sessionOfEmployee(slug: string): TrackedSession | undefined {
         return this.openPath ? sessionOf(this.sessionState, this.openPath, slug) : undefined;
@@ -352,6 +472,14 @@ class Store {
     async loadPrograms(): Promise<void> {
         try {
             this.programs = await ipc.programsGet();
+        } catch (e) {
+            this.fail(e);
+        }
+    }
+
+    async loadSettings(): Promise<void> {
+        try {
+            this.settings = await ipc.settingsGet();
         } catch (e) {
             this.fail(e);
         }

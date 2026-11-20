@@ -12,8 +12,8 @@
         width: 12px;
         height: 12px;
         flex: none;
-        border: 1px solid #0c0b12;
-        border-radius: 2px;
+        border: 1px solid #0b111c;
+        border-radius: 6px;
         background: var(--st-stopped);
     }
 

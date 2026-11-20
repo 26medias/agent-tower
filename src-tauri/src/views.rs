@@ -71,6 +71,8 @@ pub struct FloorEntry {
     pub path: String,
     pub name: Option<String>,
     pub missing: bool,
+    /// Modification time of `logo.png` in ms. `null` when there is no logo.
+    pub logo_version: Option<i64>,
 }
 
 impl From<app::FloorEntryView> for FloorEntry {
@@ -79,6 +81,7 @@ impl From<app::FloorEntryView> for FloorEntry {
             path: text(&entry.path),
             name: entry.name,
             missing: entry.missing,
+            logo_version: entry.logo_version,
         }
     }
 }
@@ -170,6 +173,14 @@ pub struct FloorView {
     pub employees: Vec<Employee>,
     pub employee_errors: Vec<String>,
     pub sessions: Vec<SessionView>,
+    /// `[brand] description`.
+    pub description: Option<String>,
+    /// `[brand] logo_prompt`.
+    pub logo_prompt: Option<String>,
+    pub logo_version: Option<i64>,
+    pub logo_busy: bool,
+    pub logo_error: Option<String>,
+    pub setup_session_id: Option<String>,
 }
 
 impl From<app::FloorView> for FloorView {
@@ -180,6 +191,42 @@ impl From<app::FloorView> for FloorView {
             employees: view.employees.into_iter().map(Employee::from).collect(),
             employee_errors: view.employee_errors,
             sessions: view.sessions.iter().map(SessionView::from).collect(),
+            description: view.description,
+            logo_prompt: view.logo_prompt,
+            logo_version: view.logo_version,
+            logo_busy: view.logo_busy,
+            logo_error: view.logo_error,
+            setup_session_id: view.setup_session_id,
+        }
+    }
+}
+
+/// Where the OpenAI key comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeySource {
+    Config,
+    Env,
+}
+
+/// `Settings`. It never holds the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub openai_key_set: bool,
+    pub openai_key_source: Option<KeySource>,
+    pub image_model: String,
+}
+
+impl From<app::SettingsView> for Settings {
+    fn from(view: app::SettingsView) -> Settings {
+        Settings {
+            openai_key_set: view.openai_key_set,
+            openai_key_source: view.openai_key_source.map(|source| match source {
+                app::KeySource::Config => KeySource::Config,
+                app::KeySource::Env => KeySource::Env,
+            }),
+            image_model: view.image_model,
         }
     }
 }
@@ -341,23 +388,52 @@ mod tests {
             employees: vec![employee()],
             employee_errors: vec!["bad.md".into()],
             sessions: vec![session()],
+            description: Some("A shop.".into()),
+            logo_prompt: None,
+            logo_version: Some(1_700_000_000_000),
+            logo_busy: true,
+            logo_error: Some("NO_KEY: x".into()),
+            setup_session_id: None,
         };
         assert_eq!(
             to_json(&floor),
             json!({
                 "path": "/p", "name": "Acme", "employees": [employee_json()],
-                "employeeErrors": ["bad.md"], "sessions": [session_json()]
+                "employeeErrors": ["bad.md"], "sessions": [session_json()],
+                "description": "A shop.", "logoPrompt": null,
+                "logoVersion": 1_700_000_000_000_i64, "logoBusy": true,
+                "logoError": "NO_KEY: x", "setupSessionId": null
             })
         );
         let entry = FloorEntry {
             path: "/p".into(),
             name: None,
             missing: true,
+            logo_version: None,
         };
         assert_eq!(
             to_json(&entry),
-            json!({"path": "/p", "name": null, "missing": true})
+            json!({"path": "/p", "name": null, "missing": true, "logoVersion": null})
         );
+        let settings = Settings {
+            openai_key_set: true,
+            openai_key_source: Some(KeySource::Env),
+            image_model: "m".into(),
+        };
+        assert_eq!(
+            to_json(&settings),
+            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m"})
+        );
+        let none = Settings {
+            openai_key_set: false,
+            openai_key_source: None,
+            image_model: "m".into(),
+        };
+        assert_eq!(
+            to_json(&none),
+            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m"})
+        );
+        assert_eq!(to_json(&KeySource::Config), json!("config"));
     }
 
     #[test]

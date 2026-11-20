@@ -16,6 +16,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 portable-pty = "0.9"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
+ureq = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.23"
 
 [dev-dependencies]
 tempfile = "3"
