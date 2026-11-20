@@ -7,7 +7,9 @@
 //!   and it does this BEFORE it draws a dialog.
 //!
 //! Usage: `fake-cli [--script echo|perm-dialog|startup-dialog|queued-turn] [--kind claude|codex]
-//! [--record <file>] [--hook <program>] [--marker <file>] [--work-ms <n>] [--hook-gap-ms <n>] [--cli-session-id <id>]`
+//! [--record <file>] [--hook <program>] [--marker <file>] [--work-ms <n>] [--hook-gap-ms <n>] [--cli-session-id <id>] [PROMPT]`
+//!
+//! `PROMPT` (one positional argument, not starting with `--`) is the first prompt, as the `[PROMPT]` of a real CLI.
 //!
 //! `--hook-gap-ms` (default 25) is the pause after each hook call, as the gaps between the hook
 //! events of a real CLI.
@@ -68,6 +70,8 @@ struct Opts {
     /// Pause after each hook call (`--hook-gap-ms`).
     hook_gap: Duration,
     cli_session_id: String,
+    /// A positional argument, as the `[PROMPT]` of a real CLI. It is the first prompt.
+    first_prompt: Option<String>,
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -82,6 +86,7 @@ fn parse_args() -> Result<Opts, String> {
         work: Duration::from_millis(100),
         hook_gap: Duration::from_millis(25),
         cli_session_id: "00000000-0000-4000-8000-000000000001".into(),
+        first_prompt: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -117,6 +122,7 @@ fn parse_args() -> Result<Opts, String> {
                 opts.hook_gap = Duration::from_millis(ms);
             }
             "--cli-session-id" => opts.cli_session_id = value()?,
+            other if !other.starts_with("--") => opts.first_prompt = Some(other.to_owned()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -167,7 +173,9 @@ fn run(opts: Opts) -> u8 {
         hooks,
         input: Input::new(receiver),
         started: false,
+        first_prompt: None,
     };
+    app.first_prompt = app.opts.first_prompt.take();
     let code = app.run();
     out(b"\x1b[?2004l");
     raw.restore();
@@ -205,6 +213,8 @@ struct App {
     input: Input,
     /// `SessionStart` was sent.
     started: bool,
+    /// The positional prompt, used for the first turn.
+    first_prompt: Option<String>,
 }
 
 impl App {
@@ -219,10 +229,15 @@ impl App {
             self.session_start();
         }
         loop {
-            out(b"> ");
-            let text = match self.read_prompt(None) {
-                Prompt::Text(text) => text,
-                Prompt::Eof | Prompt::Timeout => return 0,
+            let text = match self.first_prompt.take() {
+                Some(text) => text,
+                None => {
+                    out(b"> ");
+                    match self.read_prompt(None) {
+                        Prompt::Text(text) => text,
+                        Prompt::Eof | Prompt::Timeout => return 0,
+                    }
+                }
             };
             if let Some(code) = parse_exit(&text) {
                 if self.opts.kind == Kind::Claude {

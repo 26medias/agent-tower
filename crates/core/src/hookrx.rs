@@ -156,9 +156,13 @@ impl HookReceiver {
 impl Drop for HookReceiver {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Wake the accept thread, which blocks in accept().
-        let _ = UnixStream::connect(&self.path);
-        if let Some(handle) = self.accept_thread.take() {
+        // Wake the accept thread, which blocks in accept(). If the socket file is gone (someone
+        // removed it), the connect fails and the thread cannot be woken: do not join it, or
+        // the drop would hang for ever. The thread then ends with the process.
+        let woke = UnixStream::connect(&self.path).is_ok();
+        if let Some(handle) = self.accept_thread.take()
+            && woke
+        {
             let _ = handle.join();
         }
         let _ = fs::remove_file(&self.path);
@@ -396,6 +400,23 @@ mod tests {
     fn send_raw(path: &Path, bytes: &[u8]) {
         let mut stream = UnixStream::connect(path).expect("connect");
         stream.write_all(bytes).expect("write");
+    }
+
+    #[test]
+    fn drop_does_not_hang_when_the_socket_file_was_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sock");
+        let (receiver, _messages) = HookReceiver::bind(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drop(receiver);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the drop of the receiver hangs"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Core logic of Agent Tower. No Tauri dependency, so it tests with no window.
 
 pub mod adapter;
+pub mod app;
 pub mod env;
 pub mod hookrx;
 pub mod model;
