@@ -7,8 +7,10 @@
 //!   and it does this BEFORE it draws a dialog.
 //!
 //! Usage: `fake-cli [--script echo|perm-dialog|startup-dialog|queued-turn] [--kind claude|codex]
-//! [--record <file>] [--hook <program>] [--marker <file>] [--work-ms <n>] [--cli-session-id <id>]`
+//! [--record <file>] [--hook <program>] [--marker <file>] [--work-ms <n>] [--hook-gap-ms <n>] [--cli-session-id <id>]`
 //!
+//! `--hook-gap-ms` (default 25) is the pause after each hook call, as the gaps between the hook
+//! events of a real CLI.
 //! `--hook` defaults to the environment variable `TOWER_HOOK`. `tower-hook` reads `TOWER_SESSION`
 //! and `TOWER_SOCKET` from the environment. Without a hook program, no event is sent.
 //!
@@ -63,6 +65,8 @@ struct Opts {
     hook: Option<PathBuf>,
     marker: Option<PathBuf>,
     work: Duration,
+    /// Pause after each hook call (`--hook-gap-ms`).
+    hook_gap: Duration,
     cli_session_id: String,
 }
 
@@ -76,6 +80,7 @@ fn parse_args() -> Result<Opts, String> {
             .map(PathBuf::from),
         marker: None,
         work: Duration::from_millis(100),
+        hook_gap: Duration::from_millis(25),
         cli_session_id: "00000000-0000-4000-8000-000000000001".into(),
     };
     let mut args = std::env::args().skip(1);
@@ -104,6 +109,12 @@ fn parse_args() -> Result<Opts, String> {
             "--work-ms" => {
                 let ms: u64 = value()?.parse().map_err(|_| "--work-ms needs a number")?;
                 opts.work = Duration::from_millis(ms);
+            }
+            "--hook-gap-ms" => {
+                let ms: u64 = value()?
+                    .parse()
+                    .map_err(|_| "--hook-gap-ms needs a number")?;
+                opts.hook_gap = Duration::from_millis(ms);
             }
             "--cli-session-id" => opts.cli_session_id = value()?,
             other => return Err(format!("unknown argument {other:?}")),
@@ -149,7 +160,8 @@ fn run(opts: Opts) -> u8 {
     std::thread::spawn(move || read_stdin(record, sender));
 
     out(b"\x1b[?2004h");
-    let hooks = Hooks::new(opts.hook.clone(), opts.kind, opts.cli_session_id.clone());
+    let mut hooks = Hooks::new(opts.hook.clone(), opts.kind, opts.cli_session_id.clone());
+    hooks.gap = opts.hook_gap;
     let mut app = App {
         opts,
         hooks,

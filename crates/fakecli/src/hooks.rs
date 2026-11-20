@@ -32,6 +32,9 @@ pub struct Hooks {
     /// events, because the socket server does not keep the order of events from different
     /// connections.
     seq: Cell<u64>,
+    /// Pause after each hook call. A real CLI has gaps between its hook events (Claude: 40 ms
+    /// from `PreToolUse` to `PermissionRequest`). The default is set in `main.rs`.
+    pub gap: std::time::Duration,
 }
 
 impl Hooks {
@@ -46,6 +49,7 @@ impl Hooks {
             cwd,
             turn: 0,
             seq: Cell::new(0),
+            gap: std::time::Duration::ZERO,
         }
     }
 
@@ -128,6 +132,7 @@ impl Hooks {
             let _ = stdin.write_all(payload.to_string().as_bytes());
         }
         let _ = child.wait();
+        std::thread::sleep(self.gap);
     }
 
     pub fn send_tool(&self, event: &str, command: &str) {
