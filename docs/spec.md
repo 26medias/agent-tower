@@ -151,7 +151,7 @@ One state machine for each session. The last event wins. "Last event" means the 
 | `PermissionRequest` | yes, 40 ms after `PreToolUse` | yes | `question` |
 | `Stop` | yes | yes | `idle` (or `done`) |
 | `Interrupt` | does not exist | yes, on Esc | `idle` |
-| `SessionEnd` or process exit | yes | process exit | `stopped` |
+| `SessionEnd` or process exit | yes | yes (PROBED at step 0) | `stopped` |
 
 Special cases:
 - **Codex start.** A Codex session leaves `starting` only on its first hook event. Screen output is not a signal, because a startup dialog
@@ -168,6 +168,8 @@ Special cases:
     - Claude: a deny fires no hook. No `Stop` comes, and the late `Notification` is cancelled. The turn ends and the CLI waits for the operator.
       Rule: in `question`, an operator key starts a watch. If a hook event comes (`PostToolUse` or `PreToolUse` after an approval), that event sets the status.
       If no hook event comes and the PTY has no output for 2 s, the status becomes `idle`.
+      If no hook event comes and the PTY output continues 2 s after an Enter or a digit key, the status becomes `working`: the operator approved, and the tool runs
+      (PROBED: an approved long command fires no hook until it ends). A wrong `working` is safe, because the app pastes only in `idle` and `done`.
       This works because the permission prompt draws output each 0.6 s, a working turn each 0.1 s, and the idle prompt draws nothing.
 - **Startup dialogs have unsafe defaults (PROBED at step 0).** Enter on the Claude trust dialog selects "No, exit". Enter on the Codex update dialog selects "Update now".
   This is one more reason for the rule that the app never types into `starting`.
@@ -241,7 +243,7 @@ That the role instructions change this is NOT TRACED (item N14). If they do not,
 
 1. The app never writes to a PTY in `question` or `starting`.
 2. One write lock for each PTY. The app reads the status again inside the lock, immediately before the write.
-3. `idle` permits a paste only if no `PreToolUse` or `PermissionRequest` came after the last `Stop`.
+3. `idle` permits a paste only if no `PreToolUse` or `PermissionRequest` came after the last turn end. A turn end is a `Stop`, a Codex `Interrupt`, or an `idle` from the 2 s quiet rule (deny, Esc, Ctrl-C).
 4. **Draft flag.** A printable key or a paste from the operator, typed while the status is `idle`, `done` or `working`, sets a `draft` flag for that session.
    Keys typed during `question` or `starting` (answers to a dialog), and arrows, Enter and Esc, do not set it. `UserPromptSubmit` clears it.
    The operator can also clear it with a click on the "message waiting" mark of the tab.
