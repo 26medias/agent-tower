@@ -1,0 +1,20 @@
+# Rust
+/target/
+
+# Front end
+node_modules/
+/ui/build/
+/ui/.svelte-kit/
+/ui/package/
+.svelte-kit/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Tauri generated
+/src-tauri/gen/
+
+# Misc
+.DS_Store
+.env
+.env.*
+!.env.example

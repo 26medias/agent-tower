@@ -1,0 +1,9 @@
+[package]
+name = "fakecli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fake-cli"
+path = "src/main.rs"

@@ -1,0 +1,17 @@
+[package]
+name = "tower-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tower-hook"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tower-core = { path = "../core" }
+serde_json = { workspace = true }
+tempfile = "3"
