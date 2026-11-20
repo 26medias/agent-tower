@@ -237,3 +237,36 @@ fn twenty_hooks_at_the_same_time_all_arrive() {
         "no extra event"
     );
 }
+
+/// Order test 4: 200 runs of the real `tower-hook`, one after another (each process ends before
+/// the next starts, as a CLI runs its hooks). The counter in the payload must come out in
+/// strictly increasing order, with none lost.
+#[test]
+fn two_hundred_sequential_hooks_arrive_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (receiver, events) = HookReceiver::bind(dir.path().join("t.sock")).unwrap();
+    for counter in 0..200u32 {
+        let payload = serde_json::json!({ "hook_event_name": "PreToolUse", "counter": counter });
+        let (output, _) = run_hook(
+            Some("ordered"),
+            Some(receiver.path()),
+            payload.to_string().as_bytes(),
+        );
+        assert_silent_success(&output);
+    }
+    let mut previous: Option<u64> = None;
+    for expected in 0..200u64 {
+        let message = events.recv_timeout(WAIT).expect("event arrives");
+        let counter = message.event["counter"].as_u64().expect("counter");
+        assert_eq!(
+            counter, expected,
+            "out of order: got {counter} after {previous:?}, expected {expected}"
+        );
+        previous = Some(counter);
+    }
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no extra event"
+    );
+    assert_eq!(receiver.dropped_count(), 0);
+}
