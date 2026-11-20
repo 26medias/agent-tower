@@ -476,7 +476,20 @@ impl Tower {
             let loaded = store.read_employees()?;
             let mut records = Vec::with_capacity(loaded.employees.len());
             for employee in &loaded.employees {
-                records.push(store.db().last_session(&employee.slug)?);
+                // `can_resume` needs the history of the CLI session (D3).
+                let record = match store.db().last_session(&employee.slug)? {
+                    Some(record) => {
+                        let resumable = match &record.cli_session_id {
+                            Some(cli_id) => {
+                                cli_session_had_turn(store.db(), &employee.slug, cli_id)?
+                            }
+                            None => false,
+                        };
+                        Some((record, resumable))
+                    }
+                    None => None,
+                };
+                records.push(record);
             }
             (store.floor().name.clone(), loaded, records)
         };
@@ -490,7 +503,7 @@ impl Tower {
                     .find(|l| l.path == floor.path && l.slug == employee.slug && !l.exited());
                 if let Some(live) = live {
                     sessions.push(live.view());
-                } else if let Some(record) = record {
+                } else if let Some((record, resumable)) = record {
                     let starting = registry
                         .reserved
                         .contains(&(floor.path.clone(), employee.slug.clone()));
@@ -504,7 +517,7 @@ impl Tower {
                         },
                         draft: false,
                         message_waiting: false,
-                        can_resume: !starting && record.cli_session_id.is_some(),
+                        can_resume: !starting && resumable,
                     });
                 }
             }
@@ -562,17 +575,37 @@ impl Tower {
 
         let (employee, previous) = {
             let store = locked(&floor.store);
-            let employee = store
+            let mut employee = store
                 .read_employees()?
                 .employees
                 .into_iter()
                 .find(|e| e.slug == slug)
                 .ok_or_else(|| StoreError::EmployeeNotFound(slug.to_owned()))?;
+            // The defaults of `floor.toml` fill what the employee leaves empty.
+            let defaults = &store.floor().defaults;
+            if employee.model.as_deref().is_none_or(str::is_empty) {
+                employee.model = defaults.model.clone();
+            }
+            if employee.effort.as_deref().is_none_or(str::is_empty) {
+                employee.effort = defaults.effort.clone();
+            }
             let previous = if resume {
-                store
+                match store
                     .db()
                     .last_session(slug)?
                     .and_then(|record| record.cli_session_id)
+                {
+                    Some(cli_id) => {
+                        if !cli_session_had_turn(store.db(), slug, &cli_id)? {
+                            return Err(other(format!(
+                                "the last session of {} never had a turn, so there is nothing to resume. Start a fresh session.",
+                                employee.name
+                            )));
+                        }
+                        Some(cli_id)
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
@@ -654,6 +687,8 @@ impl Tower {
             session,
             handle,
             cli_session_id: plan.cli_session_id.clone(),
+            // A resume only starts for a session that had a turn.
+            had_turn: previous.is_some(),
             db,
             notifier: Arc::clone(&self.notifier),
             attach_pause: self.attach_pause.clone(),
@@ -896,6 +931,24 @@ fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) {
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
+
+/// The CLI session of an employee had at least one turn: some session row with this CLI session
+/// ID has a `working` status event. A resume gives a new row with the same CLI session ID, so
+/// all rows of the employee with this ID count. `claude --resume` fails with "No conversation
+/// found" for a session with no turn (D3).
+fn cli_session_had_turn(db: &Database, slug: &str, cli_session_id: &str) -> Result<bool> {
+    for record in db.list_sessions(slug)? {
+        if record.cli_session_id.as_deref() == Some(cli_session_id)
+            && db
+                .status_events(&record.app_session_id)?
+                .iter()
+                .any(|(status, _)| status == Status::Working.as_str())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// The text after `REFUSED: `.
 fn refusal_text(refused: &PasteRefused) -> String {

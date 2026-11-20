@@ -12,6 +12,7 @@ use super::TowerError;
 use crate::programs::{ProgramError, Resolver};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -123,22 +124,54 @@ fn io_error(path: &Path, error: io::Error) -> TowerError {
 
 /// The candidates for `tower-hook`, in the order of the search.
 ///
-/// 1. next to the app binary (an installed app);
-/// 2. `target/debug` and `target/release` of the workspace (a dev build). A debug build of the
-///    app looks in `debug` first; a release build looks in `release` first.
+/// 1. next to the app binary (an installed app). A test binary lives in `<target>/<profile>/deps`,
+///    so a binary folder named `deps` also gives its parent folder;
+/// 2. the build folder of Cargo: `$CARGO_TARGET_DIR` if it is set, and then `target/` of the
+///    workspace (a dev build). In each, a debug build of the app looks in `debug` first; a
+///    release build looks in `release` first.
 pub fn hook_candidates(exe: &Path, workspace_root: Option<&Path>) -> Vec<PathBuf> {
+    candidates_with(
+        exe,
+        workspace_root,
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )
+}
+
+pub(crate) fn candidates_with(
+    exe: &Path,
+    workspace_root: Option<&Path>,
+    cargo_target_dir: Option<&OsStr>,
+) -> Vec<PathBuf> {
     let mut list = Vec::new();
     if let Some(dir) = exe.parent() {
         list.push(dir.join(HOOK_NAME));
+        if dir.file_name().is_some_and(|name| name == "deps")
+            && let Some(profile_dir) = dir.parent()
+        {
+            list.push(profile_dir.join(HOOK_NAME));
+        }
+    }
+    let order = if cfg!(debug_assertions) {
+        ["debug", "release"]
+    } else {
+        ["release", "debug"]
+    };
+    let mut target_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(custom) = cargo_target_dir.filter(|dir| !dir.is_empty()) {
+        let custom = PathBuf::from(custom);
+        // A relative `CARGO_TARGET_DIR` is relative to the folder where Cargo ran.
+        match (custom.is_absolute(), workspace_root) {
+            (true, _) => target_dirs.push(custom),
+            (false, Some(root)) => target_dirs.push(root.join(custom)),
+            (false, None) => {}
+        }
     }
     if let Some(root) = workspace_root {
-        let order = if cfg!(debug_assertions) {
-            ["debug", "release"]
-        } else {
-            ["release", "debug"]
-        };
+        target_dirs.push(root.join("target"));
+    }
+    for dir in target_dirs {
         for profile in order {
-            list.push(root.join("target").join(profile).join(HOOK_NAME));
+            list.push(dir.join(profile).join(HOOK_NAME));
         }
     }
     list
@@ -225,6 +258,27 @@ mod tests {
         assert!(error.contains(&format!("{}/tower-hook", dir.path().display())));
         assert!(error.contains("target/debug/tower-hook"));
         assert!(error.contains("target/release/tower-hook"));
+    }
+
+    #[test]
+    fn candidates_have_the_exe_folder_first_then_the_cargo_target_dir() {
+        let exe = Path::new("/t/debug/deps/app_floor-abc");
+        let root = Path::new("/w");
+        let list = candidates_with(exe, Some(root), Some(OsStr::new("/custom")));
+        assert_eq!(list[0], Path::new("/t/debug/deps/tower-hook"));
+        assert_eq!(list[1], Path::new("/t/debug/tower-hook"));
+        let custom: Vec<_> = list.iter().filter(|p| p.starts_with("/custom")).collect();
+        assert_eq!(custom.len(), 2);
+        // The workspace `target/` stays as the last place.
+        assert!(list[list.len() - 1].starts_with("/w/target"));
+        // A relative target dir is relative to the workspace root. An unset one adds nothing.
+        let list = candidates_with(Path::new("/x/app"), Some(root), Some(OsStr::new("out")));
+        assert!(
+            list.iter()
+                .any(|p| p == Path::new("/w/out/debug/tower-hook"))
+        );
+        let list = candidates_with(Path::new("/x/app"), Some(root), None);
+        assert_eq!(list.len(), 3);
     }
 
     #[test]

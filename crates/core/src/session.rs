@@ -40,6 +40,9 @@ use std::time::{Duration, Instant};
 pub const PASTE_START: &[u8] = b"\x1b[200~";
 pub const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// How long the submit watch waits for `UserPromptSubmit` after the operator's Enter (D4).
+pub const SUBMIT_WATCH_MS: u64 = 2000;
+
 /// The shortest wait of the timer after a tick that did not remove its own deadline. It stops a
 /// busy loop if a rule ever keeps a deadline in the past.
 const TIMER_FLOOR: Duration = Duration::from_millis(50);
@@ -92,6 +95,9 @@ pub struct KeyClass {
     pub sets_draft: bool,
     /// The key that the machine gets. `None` for an empty chunk.
     pub key: Option<KeyKind>,
+    /// The LAST key of the chunk is Enter (`\r`). Text after an Enter in the same chunk is a
+    /// new draft, so then this is `false`.
+    pub ends_with_enter: bool,
 }
 
 /// Classify a chunk of operator input (what xterm.js sends in one `onData`).
@@ -99,14 +105,18 @@ pub struct KeyClass {
 /// - A bracketed paste (`ESC[200~ ... ESC[201~`) and printable text (also multi-byte UTF-8 and
 ///   digits) set the draft flag when `status` is `idle`, `done` or `working`.
 /// - They do not set it in `question` or `starting` (answers to a dialog), nor in `stopped`.
-/// - Escape sequences (arrows and so on), Alt keys, control keys, backspace, Enter (`\r`),
-///   Ctrl-C (`\x03`) and a lone ESC never set it.
+/// - Keys that can put text into the input box of a CLI with no printable byte from the operator
+///   also set it. See [`puts_text_in_box`] for the list and the reason for each key. A wrong
+///   flag only delays a paste (the operator can clear it); a missing flag merges text.
+/// - Other escape sequences (arrows and so on), other Alt keys, other control keys, backspace,
+///   Enter (`\r`), Ctrl-C (`\x03`) and a lone ESC never set it.
 /// - `key`: a lone `\x1b` is `Esc`, `\x03` is `CtrlC`, `\r` is `Enter`, an ASCII digit is `Digit`.
 ///   Anything else is `Other`. If a chunk has several keys, the first one that is not `Other`
 ///   wins. A bracketed paste is text, so it is `Other` whatever it contains.
 pub fn classify(bytes: &[u8], status: Status) -> KeyClass {
     let mut printable = false;
     let mut key: Option<KeyKind> = None;
+    let mut last_is_enter = false;
     let mut at = 0;
     while at < bytes.len() {
         let rest = &bytes[at..];
@@ -123,22 +133,31 @@ pub fn classify(bytes: &[u8], status: Status) -> KeyClass {
                 } else {
                     match rest.get(1) {
                         None => (KeyKind::Esc, false, 1),
-                        Some(b'[') => (KeyKind::Other, false, csi_length(rest)),
-                        Some(b'O') => (KeyKind::Other, false, rest.len().min(3)),
+                        Some(b'[') => {
+                            let length = csi_length(rest);
+                            // Up arrow: it recalls an old prompt into the box (history).
+                            (KeyKind::Other, &rest[..length] == b"\x1b[A", length)
+                        }
+                        Some(b'O') => {
+                            let length = rest.len().min(3);
+                            // Up arrow in application cursor mode: the same as `ESC [ A`.
+                            (KeyKind::Other, &rest[..length] == b"\x1bOA", length)
+                        }
                         // ESC ESC: the first one is a lone ESC.
                         Some(0x1b) => (KeyKind::Esc, false, 1),
                         // Alt + a key.
-                        Some(_) => (KeyKind::Other, false, 2),
+                        Some(&alt) => (KeyKind::Other, alt_puts_text_in_box(alt), 2),
                     }
                 }
             }
             0x03 => (KeyKind::CtrlC, false, 1),
             b'\r' => (KeyKind::Enter, false, 1),
             b'0'..=b'9' => (KeyKind::Digit, true, 1),
-            0x00..=0x1f | 0x7f => (KeyKind::Other, false, 1),
+            0x00..=0x1f | 0x7f => (KeyKind::Other, puts_text_in_box(rest[0]), 1),
             _ => (KeyKind::Other, true, 1),
         };
         printable |= is_text;
+        last_is_enter = kind == KeyKind::Enter;
         key = match key {
             None => Some(kind),
             Some(KeyKind::Other) if kind != KeyKind::Other => Some(kind),
@@ -149,7 +168,43 @@ pub fn classify(bytes: &[u8], status: Status) -> KeyClass {
     KeyClass {
         sets_draft: printable && matches!(status, Status::Idle | Status::Done | Status::Working),
         key,
+        ends_with_enter: last_is_enter,
     }
+}
+
+/// A single control byte that can put text into the input box of a CLI, with no printable byte
+/// from the operator. Each one sets the draft flag, because a paste after it would merge with
+/// that text (D1: Ctrl+V and 500 pasted lines merged with an injected message). The list is
+/// for Claude Code and Codex. When in doubt, the flag is set.
+///
+/// | Byte | Key | Why it sets the flag |
+/// |---|---|---|
+/// | 0x16 | Ctrl+V | The CLI reads the X clipboard itself and puts the text (or an image) in the box. |
+/// | 0x19 | Ctrl+Y | Yank: puts the last killed text back in the box. |
+/// | 0x12 | Ctrl+R | History search: it ends with an old prompt in the box. |
+/// | 0x10 | Ctrl+P | Same as Up: history recall puts an old prompt in the box. |
+/// | 0x09 | Tab | Completion (file path, slash command) or accept of a suggestion writes text. |
+/// | 0x07 | Ctrl+G | Opens the external editor; its text comes back into the box. |
+/// | 0x13 | Ctrl+S | Stash: restores a stashed prompt into the box (Claude Code). |
+/// | 0x0a | Ctrl+J | Inserts a new line in the box (also what Shift+Enter can send). |
+/// | 0x18 | Ctrl+X | Start of the chord Ctrl+X Ctrl+E (edit in the editor); we do not track chords. |
+///
+/// These do NOT set it (they move the cursor, delete text, or act on the screen): Ctrl+A, B, E,
+/// F (cursor), Ctrl+D (delete or exit), Ctrl+H and 0x7f (backspace), Ctrl+K, U, W (delete),
+/// Ctrl+L (redraw), Ctrl+N (history forward, only after Up, which set the flag already),
+/// Ctrl+O, Ctrl+T, Ctrl+Z, Ctrl+C (cancel), Enter, and the rest of the control bytes.
+fn puts_text_in_box(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x16 | 0x19 | 0x12 | 0x10 | 0x09 | 0x07 | 0x13 | 0x0a | 0x18
+    )
+}
+
+/// `ESC` + a byte (an Alt key) that puts text in the box.
+/// `y`: yank-pop, the Alt form of Ctrl+Y. `v`: paste from the clipboard (image or text) in
+/// some CLIs. `\r`: Alt+Enter inserts a new line.
+fn alt_puts_text_in_box(byte: u8) -> bool {
+    matches!(byte, b'y' | b'Y' | b'v' | b'V' | b'\r')
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -230,6 +285,10 @@ struct State {
     machine: Machine,
     draft: bool,
     message_waiting: bool,
+    /// The "submit watch" (D4). The operator sent Enter with a draft. If no `UserPromptSubmit`
+    /// comes before this time, the text left the input box by another path (a slash command,
+    /// bash mode), and the draft flag is cleared.
+    submit_watch: Option<Millis>,
     /// `ProcessExit` was applied. The writer is gone.
     exited: bool,
     last_time: Millis,
@@ -255,6 +314,16 @@ pub struct Session {
     inner: Arc<Inner>,
 }
 
+impl State {
+    /// The time at which the timer must tick: the earlier of the machine and the submit watch.
+    fn deadline(&self) -> Option<Millis> {
+        match (self.machine.next_deadline(), self.submit_watch) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -276,6 +345,7 @@ impl Session {
             machine: Machine::new(cli, now),
             draft: false,
             message_waiting: false,
+            submit_watch: None,
             exited: false,
             last_time: now,
             pty_origin: now,
@@ -315,9 +385,13 @@ impl Session {
         locked(&self.inner.state).draft
     }
 
-    /// The operator clears the draft flag by hand (the click on the mark of the tab).
+    /// The operator clears the marks by hand (the click on the mark of the tab). This clears the
+    /// draft flag AND the "message waiting" flag (D5), and it ends a submit watch.
     pub fn clear_draft(&self) {
-        locked(&self.inner.state).draft = false;
+        let mut state = locked(&self.inner.state);
+        state.draft = false;
+        state.message_waiting = false;
+        state.submit_watch = None;
     }
 
     /// A paste was refused (or failed), and no later paste has worked.
@@ -332,7 +406,7 @@ impl Session {
 
     /// The time at which the machine needs a tick, if any.
     pub fn next_deadline(&self) -> Option<Millis> {
-        locked(&self.inner.state).machine.next_deadline()
+        locked(&self.inner.state).deadline()
     }
 
     /// Set the time zero of the PTY layer on the clock of the session (see the module text).
@@ -348,6 +422,7 @@ impl Session {
         let mut state = locked(&self.inner.state);
         if clears_draft {
             state.draft = false;
+            state.submit_watch = None;
         }
         let now = self.inner.stamp(&mut state, None);
         self.inner.apply(&mut state, Input::Hook(event), now)
@@ -407,11 +482,27 @@ impl Session {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let class = classify(bytes, state.machine.status());
+        let status = state.machine.status();
+        let now = self.inner.stamp(&mut state, None);
+        // A watch that is due ends first, so that the flag is right before this input.
+        self.inner.expire_watch(&mut state, now);
         if class.sets_draft {
             state.draft = true;
+            // More draft text: the Enter of an earlier chunk is not the end of the draft.
+            state.submit_watch = None;
+        }
+        // Enter with a draft in `idle`, `done` or `working` (a queued message): the CLI should
+        // fire `UserPromptSubmit`. If it does not (a slash command, bash mode), the watch ends
+        // the flag. `working` is the same as `idle`: Claude fires the event for a queued
+        // message (probed).
+        if class.ends_with_enter
+            && state.draft
+            && matches!(status, Status::Idle | Status::Done | Status::Working)
+        {
+            state.submit_watch = Some(now.plus(SUBMIT_WATCH_MS));
+            self.inner.changed.notify_all();
         }
         if let Some(key) = class.key {
-            let now = self.inner.stamp(&mut state, None);
             self.inner.apply(&mut state, Input::OperatorKey(key), now);
         }
         match state.writer.as_mut() {
@@ -503,6 +594,7 @@ impl Inner {
     /// Apply an input to the machine. A change goes to the status channel. If the next
     /// deadline moved, the timer wakes.
     fn apply(&self, state: &mut State, input: Input, now: Millis) -> Option<Status> {
+        self.expire_watch(state, now);
         let old = state.machine.status();
         let deadline = state.machine.next_deadline();
         let new = state.machine.apply(input, now);
@@ -513,6 +605,14 @@ impl Inner {
             self.changed.notify_all();
         }
         new
+    }
+
+    /// End the submit watch if its time came: the draft flag is cleared.
+    fn expire_watch(&self, state: &mut State, now: Millis) {
+        if state.submit_watch.is_some_and(|due| now >= due) {
+            state.submit_watch = None;
+            state.draft = false;
+        }
     }
 
     #[cfg(test)]
@@ -694,7 +794,7 @@ impl Session {
             if state.exited {
                 return;
             }
-            let Some(deadline) = state.machine.next_deadline() else {
+            let Some(deadline) = state.deadline() else {
                 state = inner
                     .changed
                     .wait(state)
@@ -705,7 +805,7 @@ impl Session {
             let wait = if deadline <= now {
                 let now = inner.stamp(&mut state, None);
                 inner.apply(&mut state, Input::Tick, now);
-                match state.machine.next_deadline() {
+                match state.deadline() {
                     // The tick did not remove the deadline: do not spin.
                     Some(next) if next <= now => TIMER_FLOOR,
                     _ => continue,
@@ -842,7 +942,31 @@ mod tests {
             ("lone ESC", b"\x1b", Idle, (false, Some(Esc))),
             ("lone ESC, question", b"\x1b", Question, (false, Some(Esc))),
             ("Ctrl-C", b"\x03", Working, (false, Some(CtrlC))),
-            ("arrow up", b"\x1b[A", Idle, (false, Some(Other))),
+            // Up arrow recalls an old prompt into the box (history): a draft (D1).
+            ("arrow up", b"\x1b[A", Idle, (true, Some(Other))),
+            ("arrow up, SS3", b"\x1bOA", Idle, (true, Some(Other))),
+            (
+                "arrow up, question",
+                b"\x1b[A",
+                Question,
+                (false, Some(Other)),
+            ),
+            (
+                "arrow up, starting",
+                b"\x1b[A",
+                Starting,
+                (false, Some(Other)),
+            ),
+            ("arrow up, working", b"\x1b[A", Working, (true, Some(Other))),
+            ("arrow down", b"\x1b[B", Idle, (false, Some(Other))),
+            ("arrow left", b"\x1b[D", Idle, (false, Some(Other))),
+            (
+                "arrow up with Ctrl",
+                b"\x1b[1;5A",
+                Idle,
+                (false, Some(Other)),
+            ),
+            ("Shift+Tab", b"\x1b[Z", Idle, (false, Some(Other))),
             (
                 "arrow with modifier",
                 b"\x1b[1;5C",
@@ -853,7 +977,48 @@ mod tests {
             ("Alt+b", b"\x1bb", Idle, (false, Some(Other))),
             ("backspace", b"\x7f", Idle, (false, Some(Other))),
             ("Ctrl-D", b"\x04", Idle, (false, Some(Other))),
-            ("Tab", b"\t", Idle, (false, Some(Other))),
+            ("Tab", b"\t", Idle, (true, Some(Other))),
+            ("Tab, question", b"\t", Question, (false, Some(Other))),
+            // Control bytes that put text in the box with no printable byte (D1).
+            ("Ctrl+V, idle", b"\x16", Idle, (true, Some(Other))),
+            ("Ctrl+V, done", b"\x16", Done, (true, Some(Other))),
+            ("Ctrl+V, working", b"\x16", Working, (true, Some(Other))),
+            ("Ctrl+V, question", b"\x16", Question, (false, Some(Other))),
+            ("Ctrl+V, starting", b"\x16", Starting, (false, Some(Other))),
+            ("Ctrl+V, stopped", b"\x16", Stopped, (false, Some(Other))),
+            ("Ctrl+Y yank", b"\x19", Idle, (true, Some(Other))),
+            ("Ctrl+R history search", b"\x12", Idle, (true, Some(Other))),
+            ("Ctrl+P history", b"\x10", Idle, (true, Some(Other))),
+            ("Ctrl+G editor", b"\x07", Idle, (true, Some(Other))),
+            ("Ctrl+S stash", b"\x13", Idle, (true, Some(Other))),
+            ("Ctrl+J new line", b"\n", Idle, (true, Some(Other))),
+            ("Ctrl+X chord", b"\x18", Idle, (true, Some(Other))),
+            ("Alt+y yank-pop", b"\x1by", Idle, (true, Some(Other))),
+            ("Alt+v paste", b"\x1bv", Idle, (true, Some(Other))),
+            ("Alt+Enter new line", b"\x1b\r", Idle, (true, Some(Other))),
+            // Control bytes that only move the cursor, delete, or act on the screen.
+            ("Ctrl+A", b"\x01", Idle, (false, Some(Other))),
+            ("Ctrl+E", b"\x05", Idle, (false, Some(Other))),
+            ("Ctrl+B", b"\x02", Idle, (false, Some(Other))),
+            ("Ctrl+F", b"\x06", Idle, (false, Some(Other))),
+            ("Ctrl+K", b"\x0b", Idle, (false, Some(Other))),
+            ("Ctrl+U", b"\x15", Idle, (false, Some(Other))),
+            ("Ctrl+W", b"\x17", Idle, (false, Some(Other))),
+            ("Ctrl+H", b"\x08", Idle, (false, Some(Other))),
+            ("Ctrl+L", b"\x0c", Idle, (false, Some(Other))),
+            ("Ctrl+N", b"\x0e", Idle, (false, Some(Other))),
+            ("Ctrl+O", b"\x0f", Idle, (false, Some(Other))),
+            ("Ctrl+T", b"\x14", Idle, (false, Some(Other))),
+            ("Ctrl+Z", b"\x1a", Idle, (false, Some(Other))),
+            ("Alt+Backspace", b"\x1b\x7f", Idle, (false, Some(Other))),
+            (
+                "Backspace only, done",
+                b"\x7f\x7f",
+                Done,
+                (false, Some(Other)),
+            ),
+            ("Esc only, working", b"\x1b", Working, (false, Some(Esc))),
+            ("Ctrl-C only, idle", b"\x03", Idle, (false, Some(CtrlC))),
             ("empty", b"", Idle, (false, None)),
             // A chunk with several keys.
             ("text then Enter", b"ab\r", Idle, (true, Some(Enter))),
@@ -864,7 +1029,7 @@ mod tests {
                 Idle,
                 (true, Some(Enter)),
             ),
-            ("arrow then text", b"\x1b[Aa", Idle, (true, Some(Other))),
+            ("arrow then text", b"\x1b[Ba", Idle, (true, Some(Other))),
             // A paste whose text looks like keys is still text.
             (
                 "paste with keys inside",
@@ -884,6 +1049,19 @@ mod tests {
         for (name, bytes, status, expected) in cases {
             assert_eq!(class(bytes, status), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn classifier_says_when_the_chunk_ends_with_enter() {
+        let ends = |bytes: &[u8]| classify(bytes, Status::Idle).ends_with_enter;
+        assert!(ends(b"\r"));
+        assert!(ends(b"abc\r"));
+        assert!(ends(b"\x1b[200~x\x1b[201~\r"));
+        // Text after the Enter is a new draft: the chunk does not end with Enter.
+        assert!(!ends(b"\rabc"));
+        assert!(!ends(b"abc"));
+        assert!(!ends(b""));
+        assert!(!ends(b"\r\x1b[A"));
     }
 
     // ---- paste gate with a recording writer ---------------------------------------------------
@@ -967,11 +1145,141 @@ mod tests {
         // Only the typing was written.
         assert_eq!(rig.writer.writes(), vec![b"typing".to_vec()]);
         assert!(rig.session.message_waiting());
-        // The operator clears the flag by hand.
+        // The operator clears the marks by hand: the draft flag AND "message waiting" (D5).
         rig.session.clear_draft();
+        assert!(!rig.session.draft());
+        assert!(!rig.session.message_waiting());
         rig.session.paste("m").unwrap();
         assert_eq!(rig.writer.write_count(), 2);
         assert!(!rig.session.message_waiting());
+    }
+
+    // ---- the submit watch (D4) -----------------------------------------------------------------
+
+    /// Move the manual clock and apply a tick, as the timer thread does.
+    fn pass(rig: &Rig, ms: u64) {
+        rig.clock.advance(ms);
+        rig.session.tick();
+    }
+
+    #[test]
+    fn enter_with_a_draft_and_no_prompt_event_clears_the_flag_after_2_s() {
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"!stty size").unwrap();
+        assert!(rig.session.draft());
+        assert_eq!(rig.session.next_deadline(), None);
+        rig.session.operator_input(b"\r").unwrap();
+        assert!(rig.session.draft(), "the flag stays until the watch ends");
+        let due = rig
+            .session
+            .next_deadline()
+            .expect("the watch is a deadline");
+        assert_eq!(due, rig.clock.now().plus(SUBMIT_WATCH_MS));
+        pass(&rig, SUBMIT_WATCH_MS - 1);
+        assert!(rig.session.draft(), "1999 ms: still waiting");
+        assert_eq!(rig.session.paste("m"), Err(PasteRefused::Draft));
+        pass(&rig, 2);
+        assert!(!rig.session.draft(), "2001 ms: the text left the box");
+        assert_eq!(rig.session.next_deadline(), None);
+        rig.session.paste("m").unwrap();
+    }
+
+    #[test]
+    fn a_prompt_event_in_time_clears_the_flag_and_ends_the_watch() {
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"hello").unwrap();
+        rig.session.operator_input(b"\r").unwrap();
+        rig.hook("UserPromptSubmit");
+        assert!(!rig.session.draft());
+        assert_eq!(rig.session.next_deadline(), None, "the watch ended");
+        rig.hook("Stop");
+        // New draft text. The old watch must not clear it later.
+        rig.session.operator_input(b"more").unwrap();
+        assert!(rig.session.draft());
+        pass(&rig, 5 * SUBMIT_WATCH_MS);
+        assert!(
+            rig.session.draft(),
+            "an ended watch does not clear a new draft"
+        );
+    }
+
+    #[test]
+    fn more_draft_text_during_the_watch_cancels_it() {
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"a").unwrap();
+        rig.session.operator_input(b"\r").unwrap();
+        pass(&rig, 500);
+        rig.session.operator_input(b"b").unwrap();
+        assert_eq!(rig.session.next_deadline(), None);
+        pass(&rig, 5 * SUBMIT_WATCH_MS);
+        assert!(rig.session.draft());
+        // A chunk with text after the Enter is a new draft too.
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"a").unwrap();
+        rig.session.operator_input(b"\rb").unwrap();
+        pass(&rig, 5 * SUBMIT_WATCH_MS);
+        assert!(rig.session.draft());
+        // A chunk that is text and Enter (a quick submit) starts the watch.
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"ab\r").unwrap();
+        pass(&rig, SUBMIT_WATCH_MS + 1);
+        assert!(!rig.session.draft());
+    }
+
+    #[test]
+    fn enter_with_no_draft_or_in_a_dialog_starts_no_watch() {
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"\r").unwrap();
+        assert_eq!(rig.session.next_deadline(), None);
+        // A draft typed in `working`, then a dialog. Enter answers the dialog: it is not the
+        // submit of the draft, so no watch starts and the flag stays.
+        let question = Rig::claude_idle();
+        question.hook("UserPromptSubmit");
+        question.session.operator_input(b"draft").unwrap();
+        question.hook("PreToolUse");
+        question.hook("PermissionRequest");
+        assert_eq!(question.session.status(), Status::Question);
+        question.session.operator_input(b"\r").unwrap();
+        pass(&question, 5 * SUBMIT_WATCH_MS);
+        assert!(question.session.draft());
+    }
+
+    #[test]
+    fn enter_in_working_is_watched_like_idle() {
+        // A queued message: Claude fires UserPromptSubmit for it (probed). If it does not,
+        // the flag ends after the watch.
+        let rig = Rig::claude_idle();
+        rig.hook("UserPromptSubmit");
+        rig.session.operator_input(b"queued").unwrap();
+        rig.session.operator_input(b"\r").unwrap();
+        pass(&rig, SUBMIT_WATCH_MS + 1);
+        assert!(!rig.session.draft());
+        // And with the event, the flag ends at once.
+        let rig = Rig::claude_idle();
+        rig.hook("UserPromptSubmit");
+        rig.session.operator_input(b"queued").unwrap();
+        rig.session.operator_input(b"\r").unwrap();
+        rig.hook("UserPromptSubmit");
+        assert!(!rig.session.draft());
+    }
+
+    #[test]
+    fn clear_draft_ends_the_watch() {
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"a\r").unwrap();
+        assert!(rig.session.next_deadline().is_some());
+        rig.session.clear_draft();
+        assert_eq!(rig.session.next_deadline(), None);
+    }
+
+    #[test]
+    fn ctrl_v_and_history_keys_set_the_draft_and_block_a_paste() {
+        for keys in [&b"\x16"[..], b"\x19", b"\x12", b"\x10", b"\x1b[A", b"\t"] {
+            let rig = Rig::claude_idle();
+            rig.session.operator_input(keys).unwrap();
+            assert!(rig.session.draft(), "{keys:?}");
+            assert_eq!(rig.session.paste("m"), Err(PasteRefused::Draft), "{keys:?}");
+        }
     }
 
     #[test]
@@ -992,7 +1300,7 @@ mod tests {
     #[test]
     fn operator_keys_set_the_draft_only_by_rule_4() {
         let rig = Rig::claude_idle();
-        for keys in [&b"\r"[..], b"\x1b", b"\x03", b"\x1b[A", b"\x7f"] {
+        for keys in [&b"\r"[..], b"\x1b", b"\x03", b"\x1b[B", b"\x7f"] {
             rig.session.operator_input(keys).unwrap();
             assert!(!rig.session.draft(), "{keys:?}");
         }

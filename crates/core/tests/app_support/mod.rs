@@ -170,6 +170,8 @@ impl Collector {
 #[derive(Debug, Clone)]
 pub struct Call {
     pub slug: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub app_session_id: String,
     /// `Some(id)` for a resume.
     pub resume: Option<String>,
@@ -258,6 +260,8 @@ impl TestAdapter {
         };
         lock(&self.shared.calls).push(Call {
             slug: ctx.employee.slug.clone(),
+            model: ctx.employee.model.clone(),
+            effort: ctx.employee.effort.clone(),
             app_session_id: id.clone(),
             resume: resume.map(str::to_owned),
             args: args.clone(),
@@ -449,6 +453,18 @@ impl Rig {
 
     pub fn record(&self, id: &str) -> Vec<u8> {
         std::fs::read(record_path(&self.cwd, id)).unwrap_or_default()
+    }
+
+    /// Send a hook event to the socket, as `tower-hook` does (for a process that sends none).
+    pub fn send_hook(&self, session_id: &str, event: &str) {
+        use std::io::Write;
+        let line = format!(
+            "{{\"session\":\"{session_id}\",\"event\":{{\"hook_event_name\":\"{event}\"}}}}\n"
+        );
+        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket).expect("connect");
+        stream
+            .write_all(line.as_bytes())
+            .expect("write the hook line");
     }
 
     pub fn stop_and_wait(&self, id: &str) {

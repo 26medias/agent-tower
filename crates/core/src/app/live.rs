@@ -112,6 +112,9 @@ pub(crate) struct Live {
     /// The last view that was sent to the observer. The mutex also orders the notifications.
     last_view: Mutex<Option<SessionView>>,
     exited: AtomicBool,
+    /// The CLI session has had at least one turn (a `working` status). `claude --resume` fails
+    /// for a session with no turn (D3). A resume of a session that had a turn starts as `true`.
+    had_turn: AtomicBool,
     /// The status as the status thread has seen it, change by change. Views use this and not
     /// `Session::status()`, so each change shows in the views, in order, and a thread that is
     /// late cannot send an older status after a newer one.
@@ -131,6 +134,7 @@ pub(crate) struct LiveParts {
     pub session: Session,
     pub handle: SessionHandle,
     pub cli_session_id: Option<String>,
+    pub had_turn: bool,
     pub db: Database,
     pub notifier: Arc<Notifier>,
     pub attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -150,6 +154,7 @@ impl Live {
             }),
             last_view: Mutex::new(None),
             exited: AtomicBool::new(false),
+            had_turn: AtomicBool::new(parts.had_turn),
             reported: Mutex::new(Status::Starting),
             cli_session_id: Mutex::new(parts.cli_session_id),
             db: Mutex::new(parts.db),
@@ -181,7 +186,9 @@ impl Live {
             status: if stopped { Status::Stopped } else { status },
             draft,
             message_waiting,
-            can_resume: stopped && self.cli_session_id().is_some(),
+            can_resume: stopped
+                && self.had_turn.load(Ordering::SeqCst)
+                && self.cli_session_id().is_some(),
         }
     }
 
@@ -341,6 +348,9 @@ fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) 
             live.release_process();
             return;
         }
+        if change.new == Status::Working {
+            live.had_turn.store(true, Ordering::SeqCst);
+        }
         *locked(&live.reported) = change.new;
         live.refresh();
     }
@@ -354,6 +364,9 @@ fn run_output(live: &Live, output: Receiver<OutputChunk>) {
                 live.refresh();
             }
             Err(RecvTimeoutError::Timeout) => {
+                // The session changes some flags with no event: the submit watch clears the
+                // draft flag by time, and a hook can clear it with no status change.
+                live.refresh();
                 if live.exited() {
                     // Every chunk was sent before the status `stopped` (`Session::on_pty_event`
                     // runs in order), so what is in the queue now is all that is left.

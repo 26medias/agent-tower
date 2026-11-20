@@ -271,6 +271,11 @@ fn a_draft_refuses_the_paste_until_the_operator_clears_it() {
     rig.tower.clear_draft(&id).unwrap();
     let view = rig.events.latest(&id).unwrap();
     assert!(!view.draft);
+    // D5: the click clears the "message waiting" mark too, and the observer is told.
+    assert!(
+        !view.message_waiting,
+        "clear_draft must clear message_waiting"
+    );
     rig.tower.debug_paste(&id, "now it works").unwrap();
     assert!(!rig.events.latest(&id).unwrap().message_waiting);
     rig.stop_and_wait(&id);
@@ -394,4 +399,145 @@ fn unknown_session_ids_and_a_missing_employee_give_clear_errors() {
     assert!(error.to_string().contains("nobody"), "{error}");
     // A refused start leaves nothing behind: the employee can start later.
     assert!(rig.db().last_session("nobody").unwrap().is_none());
+}
+
+#[test]
+fn ctrl_v_sets_the_draft_flag_and_the_paste_is_refused() {
+    // D1: xterm.js sends Ctrl+V as one byte. The CLI then reads the clipboard itself.
+    let rig = Rig::new();
+    rig.create_floor();
+    let id = rig.start("ceo").session_id;
+    rig.wait_first_turn(&id);
+    rig.tower.pty_write(&id, b"\x16").unwrap();
+    assert!(
+        rig.events.latest(&id).unwrap().draft,
+        "Ctrl+V sets the flag"
+    );
+    let error = rig.tower.debug_paste(&id, "injected").unwrap_err();
+    assert_eq!(error.to_string(), "REFUSED: draft");
+    rig.tower.clear_draft(&id).unwrap();
+    assert!(!rig.events.latest(&id).unwrap().draft);
+    rig.stop_and_wait(&id);
+}
+
+#[test]
+fn the_draft_flag_ends_by_itself_when_enter_gives_no_prompt_event() {
+    // D4: a slash command or a bash-mode line fires no UserPromptSubmit. `cat` stands for the
+    // CLI: it sends no hook. The test sends the SessionStart hook by hand to reach `idle`.
+    let rig = Rig::new();
+    rig.create_floor();
+    *app_support::lock(&rig.shared.program) = Some(("/bin/cat".into(), vec![]));
+    let id = rig.start("ceo").session_id;
+    rig.send_hook(&id, "SessionStart");
+    rig.events.wait_status(&id, Status::Idle);
+    rig.tower.pty_write(&id, b"!stty size").unwrap();
+    assert!(rig.events.latest(&id).unwrap().draft);
+    let sent = std::time::Instant::now();
+    rig.tower.pty_write(&id, b"\r").unwrap();
+    // The timer thread of the session clears the flag, and the observer is told (the flag is
+    // not tied to an event, so the Tower polls).
+    rig.events.wait("the draft flag to end", |events| {
+        events.latest(&id).is_some_and(|view| !view.draft)
+    });
+    let waited = sent.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1900),
+        "the flag ended too early: {waited:?}"
+    );
+    rig.tower.debug_paste(&id, "now it works").unwrap();
+    rig.stop_and_wait(&id);
+}
+
+#[test]
+fn resume_is_not_offered_for_a_session_that_never_had_a_turn() {
+    // D3: `claude --resume` fails for a session with no conversation. The startup dialog keeps
+    // the first message from running, so the session never has a `working` status.
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.set_script("ceo", "startup-dialog");
+    let first = rig.start("ceo");
+    let id = first.session_id.clone();
+    wait_for("the process runs", || !rig.log_bytes(&id).is_empty());
+    rig.stop_and_wait(&id);
+    // The ID is stored (Claude: from the plan), but there was no turn.
+    let row = rig.db().last_session("ceo").unwrap().unwrap();
+    assert!(row.cli_session_id.is_some());
+    assert!(!rig.events.latest(&id).unwrap().can_resume);
+    let view = rig.tower.floor_open(&rig.cwd).unwrap();
+    assert!(!view.sessions[0].can_resume, "the floor view agrees");
+    let error = rig
+        .tower
+        .session_resume(&rig.cwd, "ceo", None, 24, 80)
+        .unwrap_err();
+    assert!(error.to_string().contains("never had a turn"), "{error}");
+    assert_eq!(rig.calls().len(), 1, "no process was built for the resume");
+    // A fresh start is still possible.
+    rig.set_script("ceo", "echo");
+    let second = rig.start("ceo");
+    rig.wait_first_turn(&second.session_id);
+    rig.stop_and_wait(&second.session_id);
+}
+
+#[test]
+fn resume_is_offered_after_a_turn_and_stays_offered_after_a_resume_with_no_turn() {
+    let rig = Rig::new();
+    rig.create_floor();
+    let first = rig.start("ceo");
+    rig.wait_first_turn(&first.session_id);
+    rig.stop_and_wait(&first.session_id);
+    assert!(rig.events.latest(&first.session_id).unwrap().can_resume);
+    assert!(rig.tower.floor_open(&rig.cwd).unwrap().sessions[0].can_resume);
+
+    // Resume with no message: the CLI waits at its prompt, with no new turn. The CLI session
+    // still has its old turn, so a second resume is still allowed.
+    let second = rig
+        .tower
+        .session_resume(&rig.cwd, "ceo", None, 24, 80)
+        .unwrap();
+    rig.events.wait_status(&second.session_id, Status::Idle);
+    rig.stop_and_wait(&second.session_id);
+    assert!(rig.events.latest(&second.session_id).unwrap().can_resume);
+    assert!(rig.tower.floor_open(&rig.cwd).unwrap().sessions[0].can_resume);
+    let third = rig
+        .tower
+        .session_resume(&rig.cwd, "ceo", None, 24, 80)
+        .unwrap();
+    rig.stop_and_wait(&third.session_id);
+}
+
+#[test]
+fn the_floor_defaults_fill_a_missing_model_and_effort() {
+    // Today (before this fix) nothing applied them. Now `[defaults]` of floor.toml gives the
+    // model and the effort of an employee that has none. An own value is kept.
+    let rig = Rig::new();
+    rig.create_floor();
+    let toml = rig.cwd.join(".swarm/floor.toml");
+    std::fs::write(
+        &toml,
+        "version = 1\nname = \"Test Floor\"\n\n[defaults]\nmodel = \"sonnet\"\neffort = \"low\"\n",
+    )
+    .unwrap();
+    // A new Tower reads the file. The first Tower has the old floor.toml in memory.
+    let socket = rig.root.path().join("second.sock");
+    let second = Rig::make_tower(&rig.config, &socket, &rig.shared, |_| {});
+    let view = second.floor_open(&rig.cwd).unwrap();
+    let mut pm = view
+        .employees
+        .iter()
+        .find(|e| e.slug == "pm")
+        .unwrap()
+        .clone();
+    pm.model = Some("opus".into());
+    second.employee_save(&rig.cwd, pm).unwrap();
+    let a = second.session_start(&rig.cwd, "ceo", None, 24, 80).unwrap();
+    let b = second.session_start(&rig.cwd, "pm", None, 24, 80).unwrap();
+    let calls = rig.calls();
+    let ceo = calls.iter().find(|c| c.slug == "ceo").unwrap();
+    let pm = calls.iter().find(|c| c.slug == "pm").unwrap();
+    assert_eq!(ceo.model.as_deref(), Some("sonnet"));
+    assert_eq!(ceo.effort.as_deref(), Some("low"));
+    assert_eq!(pm.model.as_deref(), Some("opus"), "an own model is kept");
+    assert_eq!(pm.effort.as_deref(), Some("low"));
+    second.session_stop(&a.session_id).unwrap();
+    second.session_stop(&b.session_id).unwrap();
 }
