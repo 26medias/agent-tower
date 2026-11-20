@@ -1,0 +1,133 @@
+:root {
+    --bg: #14121c;
+    --bg-deep: #0c0b12;
+    --panel: #1d1a2b;
+    --panel-2: #26223a;
+    --line: #3a3556;
+    --text: #e6e1f5;
+    --dim: #8f8aa8;
+    --accent: #ffcf5c;
+    --accent-ink: #1a1400;
+    --danger: #ff6b81;
+    --ok: #4ade80;
+
+    --st-starting: #8b8fa3;
+    --st-working: #4aa3ff;
+    --st-idle: #4ade80;
+    --st-question: #ffb020;
+    --st-done: #2dd4bf;
+    --st-stopped: #4a4a58;
+
+    --mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.4;
+    overflow: hidden;
+}
+
+h1,
+h2,
+h3 {
+    margin: 0;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+
+button,
+input,
+select,
+textarea {
+    font: inherit;
+    color: inherit;
+}
+
+button {
+    background: var(--panel-2);
+    border: 2px solid var(--line);
+    border-radius: 2px;
+    padding: 2px 8px;
+    cursor: pointer;
+    text-transform: lowercase;
+}
+
+button:hover:not(:disabled) {
+    border-color: var(--accent);
+}
+
+button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 700;
+}
+
+button.danger:hover:not(:disabled) {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+button.ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--dim);
+}
+
+button.ghost:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--line);
+}
+
+input,
+select,
+textarea {
+    background: var(--bg-deep);
+    border: 2px solid var(--line);
+    border-radius: 2px;
+    padding: 3px 6px;
+    min-width: 0;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+}
+
+::placeholder {
+    color: #5d5878;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--line);
+    border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
