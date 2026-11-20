@@ -379,6 +379,7 @@ impl Tower {
     /// Import `{path}/.swarm/`. `TowerError::NoFloor` when there is none.
     pub fn floor_open(&self, path: &Path) -> Result<FloorView> {
         let floor = self.floor_handle(path)?;
+        Self::reload(&floor)?;
         self.floor_list.add(&floor.path)?;
         self.floor_view(&floor)
     }
@@ -468,6 +469,14 @@ impl Tower {
         let mut floors = locked(&self.floors);
         // Another thread can have opened it while we did. Then its handle wins.
         Ok(Arc::clone(floors.entry(key).or_insert(handle)))
+    }
+
+    /// Read `floor.toml` again (the name and the defaults), so that an edit on disk applies
+    /// while the app runs. It opens the store again; the store lock is held for the swap.
+    fn reload(floor: &FloorHandle) -> Result<()> {
+        let mut store = locked(&floor.store);
+        *store = FloorStore::open(&floor.path)?;
+        Ok(())
     }
 
     fn floor_view(&self, floor: &FloorHandle) -> Result<FloorView> {
@@ -572,6 +581,8 @@ impl Tower {
         }
         let floor = self.floor_handle(path)?;
         let _reservation = self.reserve(&floor.path, slug)?;
+        // The defaults are read from the current file, not from the file at app start.
+        Self::reload(&floor)?;
 
         let (employee, previous) = {
             let store = locked(&floor.store);

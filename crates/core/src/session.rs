@@ -40,9 +40,6 @@ use std::time::{Duration, Instant};
 pub const PASTE_START: &[u8] = b"\x1b[200~";
 pub const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// How long the submit watch waits for `UserPromptSubmit` after the operator's Enter (D4).
-pub const SUBMIT_WATCH_MS: u64 = 2000;
-
 /// The shortest wait of the timer after a tick that did not remove its own deadline. It stops a
 /// busy loop if a rule ever keeps a deadline in the past.
 const TIMER_FLOOR: Duration = Duration::from_millis(50);
@@ -95,9 +92,6 @@ pub struct KeyClass {
     pub sets_draft: bool,
     /// The key that the machine gets. `None` for an empty chunk.
     pub key: Option<KeyKind>,
-    /// The LAST key of the chunk is Enter (`\r`). Text after an Enter in the same chunk is a
-    /// new draft, so then this is `false`.
-    pub ends_with_enter: bool,
 }
 
 /// Classify a chunk of operator input (what xterm.js sends in one `onData`).
@@ -116,7 +110,6 @@ pub struct KeyClass {
 pub fn classify(bytes: &[u8], status: Status) -> KeyClass {
     let mut printable = false;
     let mut key: Option<KeyKind> = None;
-    let mut last_is_enter = false;
     let mut at = 0;
     while at < bytes.len() {
         let rest = &bytes[at..];
@@ -157,7 +150,6 @@ pub fn classify(bytes: &[u8], status: Status) -> KeyClass {
             _ => (KeyKind::Other, true, 1),
         };
         printable |= is_text;
-        last_is_enter = kind == KeyKind::Enter;
         key = match key {
             None => Some(kind),
             Some(KeyKind::Other) if kind != KeyKind::Other => Some(kind),
@@ -168,7 +160,6 @@ pub fn classify(bytes: &[u8], status: Status) -> KeyClass {
     KeyClass {
         sets_draft: printable && matches!(status, Status::Idle | Status::Done | Status::Working),
         key,
-        ends_with_enter: last_is_enter,
     }
 }
 
@@ -283,12 +274,18 @@ pub struct SessionStreams {
 struct State {
     writer: Option<Box<dyn PtyWriter + Send>>,
     machine: Machine,
+    /// The operator has text in the input box of the CLI (spec 4.5 rule 4).
+    ///
+    /// RULE: this flag ends in two ways ONLY. A `UserPromptSubmit` hook clears it (`on_hook`),
+    /// or the operator clears it by hand (`clear_draft`). It is NOT cleared by a timer, and an
+    /// Enter from the operator does not clear it. Reason (defect N1): after `/help` + Enter the
+    /// CLI fires no `UserPromptSubmit`, but its dialog is still open. If a timer cleared the
+    /// flag, a paste would be accepted then: the message is lost in the dialog, and the `\r`
+    /// of the paste can select an option of a picker (`/model`, `/resume`, `/permissions`).
+    /// A flag that stays too long only delays a paste, and the operator can clear it. Do not
+    /// add an automatic clear.
     draft: bool,
     message_waiting: bool,
-    /// The "submit watch" (D4). The operator sent Enter with a draft. If no `UserPromptSubmit`
-    /// comes before this time, the text left the input box by another path (a slash command,
-    /// bash mode), and the draft flag is cleared.
-    submit_watch: Option<Millis>,
     /// `ProcessExit` was applied. The writer is gone.
     exited: bool,
     last_time: Millis,
@@ -314,16 +311,6 @@ pub struct Session {
     inner: Arc<Inner>,
 }
 
-impl State {
-    /// The time at which the timer must tick: the earlier of the machine and the submit watch.
-    fn deadline(&self) -> Option<Millis> {
-        match (self.machine.next_deadline(), self.submit_watch) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
-    }
-}
-
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -345,7 +332,6 @@ impl Session {
             machine: Machine::new(cli, now),
             draft: false,
             message_waiting: false,
-            submit_watch: None,
             exited: false,
             last_time: now,
             pty_origin: now,
@@ -386,12 +372,12 @@ impl Session {
     }
 
     /// The operator clears the marks by hand (the click on the mark of the tab). This clears the
-    /// draft flag AND the "message waiting" flag (D5), and it ends a submit watch.
+    /// draft flag AND the "message waiting" flag (D5). With `UserPromptSubmit`, it is the only
+    /// way that the draft flag ends (see the rule at `State::draft`).
     pub fn clear_draft(&self) {
         let mut state = locked(&self.inner.state);
         state.draft = false;
         state.message_waiting = false;
-        state.submit_watch = None;
     }
 
     /// A paste was refused (or failed), and no later paste has worked.
@@ -406,7 +392,7 @@ impl Session {
 
     /// The time at which the machine needs a tick, if any.
     pub fn next_deadline(&self) -> Option<Millis> {
-        locked(&self.inner.state).deadline()
+        locked(&self.inner.state).machine.next_deadline()
     }
 
     /// Set the time zero of the PTY layer on the clock of the session (see the module text).
@@ -422,7 +408,6 @@ impl Session {
         let mut state = locked(&self.inner.state);
         if clears_draft {
             state.draft = false;
-            state.submit_watch = None;
         }
         let now = self.inner.stamp(&mut state, None);
         self.inner.apply(&mut state, Input::Hook(event), now)
@@ -482,27 +467,11 @@ impl Session {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let class = classify(bytes, state.machine.status());
-        let status = state.machine.status();
-        let now = self.inner.stamp(&mut state, None);
-        // A watch that is due ends first, so that the flag is right before this input.
-        self.inner.expire_watch(&mut state, now);
         if class.sets_draft {
             state.draft = true;
-            // More draft text: the Enter of an earlier chunk is not the end of the draft.
-            state.submit_watch = None;
-        }
-        // Enter with a draft in `idle`, `done` or `working` (a queued message): the CLI should
-        // fire `UserPromptSubmit`. If it does not (a slash command, bash mode), the watch ends
-        // the flag. `working` is the same as `idle`: Claude fires the event for a queued
-        // message (probed).
-        if class.ends_with_enter
-            && state.draft
-            && matches!(status, Status::Idle | Status::Done | Status::Working)
-        {
-            state.submit_watch = Some(now.plus(SUBMIT_WATCH_MS));
-            self.inner.changed.notify_all();
         }
         if let Some(key) = class.key {
+            let now = self.inner.stamp(&mut state, None);
             self.inner.apply(&mut state, Input::OperatorKey(key), now);
         }
         match state.writer.as_mut() {
@@ -594,7 +563,6 @@ impl Inner {
     /// Apply an input to the machine. A change goes to the status channel. If the next
     /// deadline moved, the timer wakes.
     fn apply(&self, state: &mut State, input: Input, now: Millis) -> Option<Status> {
-        self.expire_watch(state, now);
         let old = state.machine.status();
         let deadline = state.machine.next_deadline();
         let new = state.machine.apply(input, now);
@@ -605,14 +573,6 @@ impl Inner {
             self.changed.notify_all();
         }
         new
-    }
-
-    /// End the submit watch if its time came: the draft flag is cleared.
-    fn expire_watch(&self, state: &mut State, now: Millis) {
-        if state.submit_watch.is_some_and(|due| now >= due) {
-            state.submit_watch = None;
-            state.draft = false;
-        }
     }
 
     #[cfg(test)]
@@ -794,7 +754,7 @@ impl Session {
             if state.exited {
                 return;
             }
-            let Some(deadline) = state.deadline() else {
+            let Some(deadline) = state.machine.next_deadline() else {
                 state = inner
                     .changed
                     .wait(state)
@@ -805,7 +765,7 @@ impl Session {
             let wait = if deadline <= now {
                 let now = inner.stamp(&mut state, None);
                 inner.apply(&mut state, Input::Tick, now);
-                match state.deadline() {
+                match state.machine.next_deadline() {
                     // The tick did not remove the deadline: do not spin.
                     Some(next) if next <= now => TIMER_FLOOR,
                     _ => continue,
@@ -1051,19 +1011,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classifier_says_when_the_chunk_ends_with_enter() {
-        let ends = |bytes: &[u8]| classify(bytes, Status::Idle).ends_with_enter;
-        assert!(ends(b"\r"));
-        assert!(ends(b"abc\r"));
-        assert!(ends(b"\x1b[200~x\x1b[201~\r"));
-        // Text after the Enter is a new draft: the chunk does not end with Enter.
-        assert!(!ends(b"\rabc"));
-        assert!(!ends(b"abc"));
-        assert!(!ends(b""));
-        assert!(!ends(b"\r\x1b[A"));
-    }
-
     // ---- paste gate with a recording writer ---------------------------------------------------
 
     fn exact_paste(text: &str) -> Vec<u8> {
@@ -1154,7 +1101,7 @@ mod tests {
         assert!(!rig.session.message_waiting());
     }
 
-    // ---- the submit watch (D4) -----------------------------------------------------------------
+    // ---- the draft flag has no timer (N1) ------------------------------------------------------
 
     /// Move the manual clock and apply a tick, as the timer thread does.
     fn pass(rig: &Rig, ms: u64) {
@@ -1163,113 +1110,57 @@ mod tests {
     }
 
     #[test]
-    fn enter_with_a_draft_and_no_prompt_event_clears_the_flag_after_2_s() {
+    fn enter_with_a_draft_and_no_prompt_event_keeps_the_flag_and_refuses_a_paste() {
+        // N1: `/help` + Enter fires no UserPromptSubmit, and the dialog is still open. A timer
+        // that cleared the flag would let a paste into the dialog.
         let rig = Rig::claude_idle();
-        rig.session.operator_input(b"!stty size").unwrap();
-        assert!(rig.session.draft());
-        assert_eq!(rig.session.next_deadline(), None);
+        rig.session.operator_input(b"/help").unwrap();
         rig.session.operator_input(b"\r").unwrap();
-        assert!(rig.session.draft(), "the flag stays until the watch ends");
-        let due = rig
-            .session
-            .next_deadline()
-            .expect("the watch is a deadline");
-        assert_eq!(due, rig.clock.now().plus(SUBMIT_WATCH_MS));
-        pass(&rig, SUBMIT_WATCH_MS - 1);
-        assert!(rig.session.draft(), "1999 ms: still waiting");
+        assert!(rig.session.draft());
+        for _ in 0..10 {
+            pass(&rig, 1000);
+        }
+        assert!(rig.session.draft(), "10 s later the flag is still set");
         assert_eq!(rig.session.paste("m"), Err(PasteRefused::Draft));
-        pass(&rig, 2);
-        assert!(!rig.session.draft(), "2001 ms: the text left the box");
-        assert_eq!(rig.session.next_deadline(), None);
+        assert_eq!(rig.session.next_deadline(), None, "no timer for the flag");
+        // Only the operator's keys were written.
+        assert_eq!(rig.writer.all_bytes(), b"/help\r");
+    }
+
+    #[test]
+    fn a_prompt_event_clears_the_draft_flag() {
+        let rig = Rig::claude_idle();
+        rig.session.operator_input(b"hello").unwrap();
+        rig.session.operator_input(b"\r").unwrap();
+        pass(&rig, 10_000);
+        assert!(rig.session.draft());
+        rig.hook("UserPromptSubmit");
+        assert!(!rig.session.draft());
+        rig.hook("Stop");
         rig.session.paste("m").unwrap();
     }
 
     #[test]
-    fn a_prompt_event_in_time_clears_the_flag_and_ends_the_watch() {
-        let rig = Rig::claude_idle();
-        rig.session.operator_input(b"hello").unwrap();
-        rig.session.operator_input(b"\r").unwrap();
-        rig.hook("UserPromptSubmit");
-        assert!(!rig.session.draft());
-        assert_eq!(rig.session.next_deadline(), None, "the watch ended");
-        rig.hook("Stop");
-        // New draft text. The old watch must not clear it later.
-        rig.session.operator_input(b"more").unwrap();
-        assert!(rig.session.draft());
-        pass(&rig, 5 * SUBMIT_WATCH_MS);
-        assert!(
-            rig.session.draft(),
-            "an ended watch does not clear a new draft"
-        );
-    }
-
-    #[test]
-    fn more_draft_text_during_the_watch_cancels_it() {
-        let rig = Rig::claude_idle();
-        rig.session.operator_input(b"a").unwrap();
-        rig.session.operator_input(b"\r").unwrap();
-        pass(&rig, 500);
-        rig.session.operator_input(b"b").unwrap();
-        assert_eq!(rig.session.next_deadline(), None);
-        pass(&rig, 5 * SUBMIT_WATCH_MS);
-        assert!(rig.session.draft());
-        // A chunk with text after the Enter is a new draft too.
-        let rig = Rig::claude_idle();
-        rig.session.operator_input(b"a").unwrap();
-        rig.session.operator_input(b"\rb").unwrap();
-        pass(&rig, 5 * SUBMIT_WATCH_MS);
-        assert!(rig.session.draft());
-        // A chunk that is text and Enter (a quick submit) starts the watch.
-        let rig = Rig::claude_idle();
-        rig.session.operator_input(b"ab\r").unwrap();
-        pass(&rig, SUBMIT_WATCH_MS + 1);
-        assert!(!rig.session.draft());
-    }
-
-    #[test]
-    fn enter_with_no_draft_or_in_a_dialog_starts_no_watch() {
-        let rig = Rig::claude_idle();
-        rig.session.operator_input(b"\r").unwrap();
-        assert_eq!(rig.session.next_deadline(), None);
-        // A draft typed in `working`, then a dialog. Enter answers the dialog: it is not the
-        // submit of the draft, so no watch starts and the flag stays.
-        let question = Rig::claude_idle();
-        question.hook("UserPromptSubmit");
-        question.session.operator_input(b"draft").unwrap();
-        question.hook("PreToolUse");
-        question.hook("PermissionRequest");
-        assert_eq!(question.session.status(), Status::Question);
-        question.session.operator_input(b"\r").unwrap();
-        pass(&question, 5 * SUBMIT_WATCH_MS);
-        assert!(question.session.draft());
-    }
-
-    #[test]
-    fn enter_in_working_is_watched_like_idle() {
-        // A queued message: Claude fires UserPromptSubmit for it (probed). If it does not,
-        // the flag ends after the watch.
+    fn enter_in_working_with_a_draft_keeps_the_flag_until_the_prompt_event() {
         let rig = Rig::claude_idle();
         rig.hook("UserPromptSubmit");
         rig.session.operator_input(b"queued").unwrap();
         rig.session.operator_input(b"\r").unwrap();
-        pass(&rig, SUBMIT_WATCH_MS + 1);
-        assert!(!rig.session.draft());
-        // And with the event, the flag ends at once.
-        let rig = Rig::claude_idle();
-        rig.hook("UserPromptSubmit");
-        rig.session.operator_input(b"queued").unwrap();
-        rig.session.operator_input(b"\r").unwrap();
+        pass(&rig, 10_000);
+        assert!(rig.session.draft());
         rig.hook("UserPromptSubmit");
         assert!(!rig.session.draft());
     }
 
     #[test]
-    fn clear_draft_ends_the_watch() {
+    fn clear_draft_clears_a_flag_that_stayed_after_enter() {
         let rig = Rig::claude_idle();
-        rig.session.operator_input(b"a\r").unwrap();
-        assert!(rig.session.next_deadline().is_some());
+        rig.session.operator_input(b"/help\r").unwrap();
+        pass(&rig, 10_000);
+        assert!(rig.session.draft());
         rig.session.clear_draft();
-        assert_eq!(rig.session.next_deadline(), None);
+        assert!(!rig.session.draft());
+        rig.session.paste("m").unwrap();
     }
 
     #[test]

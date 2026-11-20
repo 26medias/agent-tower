@@ -421,31 +421,80 @@ fn ctrl_v_sets_the_draft_flag_and_the_paste_is_refused() {
 }
 
 #[test]
-fn the_draft_flag_ends_by_itself_when_enter_gives_no_prompt_event() {
-    // D4: a slash command or a bash-mode line fires no UserPromptSubmit. `cat` stands for the
-    // CLI: it sends no hook. The test sends the SessionStart hook by hand to reach `idle`.
+fn enter_with_no_prompt_event_keeps_the_draft_flag_and_the_paste_stays_refused() {
+    // N1: `/help` + Enter fires no UserPromptSubmit and leaves a dialog open. `cat` stands for
+    // the CLI: it sends no hook. The test sends the hooks by hand.
     let rig = Rig::new();
     rig.create_floor();
     *app_support::lock(&rig.shared.program) = Some(("/bin/cat".into(), vec![]));
     let id = rig.start("ceo").session_id;
     rig.send_hook(&id, "SessionStart");
     rig.events.wait_status(&id, Status::Idle);
-    rig.tower.pty_write(&id, b"!stty size").unwrap();
-    assert!(rig.events.latest(&id).unwrap().draft);
-    let sent = std::time::Instant::now();
+    rig.tower.pty_write(&id, b"/help").unwrap();
     rig.tower.pty_write(&id, b"\r").unwrap();
-    // The timer thread of the session clears the flag, and the observer is told (the flag is
-    // not tied to an event, so the Tower polls).
+    // Wait longer than the old 2 s watch (and a few polls of the Tower).
+    std::thread::sleep(Duration::from_millis(3000));
+    assert!(rig.events.latest(&id).unwrap().draft, "the flag must stay");
+    let error = rig
+        .tower
+        .debug_paste(&id, "lost in the dialog")
+        .unwrap_err();
+    assert_eq!(error.to_string(), "REFUSED: draft");
+    // The operator clears the flag (the DRAFT mark in the UI), and then a paste works.
+    rig.tower.clear_draft(&id).unwrap();
+    assert!(!rig.events.latest(&id).unwrap().draft);
+    rig.tower.debug_paste(&id, "now it works").unwrap();
+    rig.stop_and_wait(&id);
+}
+
+#[test]
+fn a_prompt_event_clears_the_draft_flag_and_the_observer_is_told_with_no_status_change() {
+    // In `working`, a queued message fires UserPromptSubmit: the status stays `working`, there
+    // is no output, and only the flag changes. The Tower polls the flags for this case.
+    let rig = Rig::new();
+    rig.create_floor();
+    *app_support::lock(&rig.shared.program) = Some(("/bin/cat".into(), vec![]));
+    let id = rig.start("ceo").session_id;
+    rig.send_hook(&id, "SessionStart");
+    rig.events.wait_status(&id, Status::Idle);
+    rig.send_hook(&id, "UserPromptSubmit");
+    rig.events.wait_status(&id, Status::Working);
+    rig.tower.pty_write(&id, b"queued").unwrap();
+    assert!(rig.events.latest(&id).unwrap().draft);
+    let views = rig.events.views(&id).len();
+    rig.send_hook(&id, "UserPromptSubmit");
     rig.events.wait("the draft flag to end", |events| {
         events.latest(&id).is_some_and(|view| !view.draft)
     });
-    let waited = sent.elapsed();
-    assert!(
-        waited >= Duration::from_millis(1900),
-        "the flag ended too early: {waited:?}"
-    );
-    rig.tower.debug_paste(&id, "now it works").unwrap();
+    assert_eq!(rig.events.latest(&id).unwrap().status, Status::Working);
+    assert!(rig.events.views(&id).len() > views);
     rig.stop_and_wait(&id);
+}
+
+#[test]
+fn a_change_of_floor_toml_applies_at_floor_open_and_at_start() {
+    let rig = Rig::new();
+    rig.create_floor();
+    let toml = rig.cwd.join(".swarm/floor.toml");
+    let write = |model: &str| {
+        std::fs::write(
+            &toml,
+            format!("version = 1\nname = \"Renamed\"\n\n[defaults]\nmodel = \"{model}\"\n"),
+        )
+        .unwrap();
+    };
+    write("model-a");
+    // Same Tower, no restart: floor_open reads the file again (name and defaults).
+    let view = rig.tower.floor_open(&rig.cwd).unwrap();
+    assert_eq!(view.name, "Renamed");
+    let first = rig.start("ceo");
+    assert_eq!(rig.calls()[0].model.as_deref(), Some("model-a"));
+    rig.stop_and_wait(&first.session_id);
+    // An edit with no floor_open before the start also applies.
+    write("model-b");
+    let second = rig.start("ceo");
+    assert_eq!(rig.calls()[1].model.as_deref(), Some("model-b"));
+    rig.stop_and_wait(&second.session_id);
 }
 
 #[test]

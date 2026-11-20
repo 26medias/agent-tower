@@ -364,8 +364,9 @@ fn run_output(live: &Live, output: Receiver<OutputChunk>) {
                 live.refresh();
             }
             Err(RecvTimeoutError::Timeout) => {
-                // The session changes some flags with no event: the submit watch clears the
-                // draft flag by time, and a hook can clear it with no status change.
+                // A hook can clear the draft flag (`UserPromptSubmit`) with no status change
+                // (a queued message in `working`) and with no output. The session sends no
+                // event for flags, so the Tower looks at the flags on each timeout.
                 live.refresh();
                 if live.exited() {
                     // Every chunk was sent before the status `stopped` (`Session::on_pty_event`
