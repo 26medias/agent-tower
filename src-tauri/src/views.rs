@@ -370,6 +370,37 @@ pub struct SessionChanged {
     pub session: SessionView,
 }
 
+/// Payload of the event `employee-started`: an employee started the session of another employee
+/// with the tools of the app. The session itself comes as a normal `session-changed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeStarted {
+    pub path: String,
+    pub session_id: String,
+    /// The employee that was started.
+    pub slug: String,
+    pub name: String,
+    /// The employee that started it.
+    pub by_slug: String,
+    pub by_name: String,
+    /// The last CLI session was resumed (and not a fresh one started).
+    pub resumed: bool,
+}
+
+impl EmployeeStarted {
+    pub fn new(path: &Path, event: &app::EmployeeStarted) -> EmployeeStarted {
+        EmployeeStarted {
+            path: text(path),
+            session_id: event.session_id.clone(),
+            slug: event.slug.clone(),
+            name: event.name.clone(),
+            by_slug: event.by_slug.clone(),
+            by_name: event.by_name.clone(),
+            resumed: event.resumed,
+        }
+    }
+}
+
 /// Payload of the event `floor-changed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -623,6 +654,18 @@ mod tests {
         assert_eq!(
             to_json(&FloorChanged { path: "/p".into() }),
             json!({"path": "/p"})
+        );
+        assert_eq!(
+            to_json(&EmployeeStarted {
+                path: "/p".into(),
+                session_id: "s2".into(),
+                slug: "eng".into(),
+                name: "Kenji".into(),
+                by_slug: "pm".into(),
+                by_name: "Tomas".into(),
+                resumed: false,
+            }),
+            json!({"path": "/p", "sessionId": "s2", "slug": "eng", "name": "Kenji", "bySlug": "pm", "byName": "Tomas", "resumed": false})
         );
     }
 }

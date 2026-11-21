@@ -8,6 +8,7 @@ import {
     applySessionChanged,
     dismissTab,
     emptySessionState,
+    employeeStartedText,
     isLive,
     pickActive,
     questionCount,
@@ -35,6 +36,8 @@ import {
 export interface Toast {
     id: number;
     text: string;
+    /** `info` is a plain notice. No kind is an error. */
+    kind?: "info";
 }
 
 /** What a button was clicked to do. A start, a resume or the setup agent. */
@@ -140,6 +143,12 @@ class Store {
                 await ipc.onSessionChanged((payload) => {
                     this.sessionState = applySessionChanged(this.sessionState, payload);
                 }),
+                // The tab and the status of the new session come from `session-changed`, as for a
+                // session that the operator starts. This event adds only the notice. It does not
+                // change the active tab: the operator keeps the tab that is open.
+                await ipc.onEmployeeStarted((payload) => {
+                    this.toast(employeeStartedText(payload), "info");
+                }),
                 await ipc.onFloorChanged((payload) => {
                     // The list carries the logo version of every floor.
                     void this.loadFloors();
@@ -166,9 +175,9 @@ class Store {
 
     // ---- toasts ----
 
-    toast(text: string): void {
+    toast(text: string, kind?: "info"): void {
         const id = ++this.toastId;
-        this.toasts = [...this.toasts, { id, text }];
+        this.toasts = [...this.toasts, { id, text, kind }];
         setTimeout(() => this.dismissToast(id), TOAST_MS);
     }
 

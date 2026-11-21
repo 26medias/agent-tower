@@ -33,15 +33,17 @@
 //! observer must be quick and must not call back into the Tower. `OutputSink::output` is called
 //! from the output thread of the session, with no lock held.
 
+mod bus;
 mod live;
 mod logo_run;
+mod mcp;
 mod models;
 mod settings;
 mod setup;
 mod tools;
 
 use crate::adapter::{
-    ClaudeAdapter, CliAdapter, CodexAdapter, Programs as AdapterPrograms, StartContext,
+    ClaudeAdapter, CliAdapter, CodexAdapter, McpAccess, Programs as AdapterPrograms, StartContext,
 };
 use crate::env::{EnvMap, current_env};
 use crate::hookrx::HookReceiver;
@@ -58,15 +60,18 @@ use logo_run::{LogoEnv, LogoState};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+pub use bus::{START_LIMIT, START_WINDOW, TestHooks};
 pub use live::SCROLLBACK_LIMIT;
+pub use mcp::{MAX_CONNECTIONS, McpLimits, REQUEST_DEADLINE};
 pub use models::{
     CodexSource, ModelCatalog, ModelKind, ModelOption, STANDARD_EFFORTS, is_valid_effort,
     is_valid_model_name,
@@ -150,6 +155,22 @@ pub struct SessionView {
     pub can_resume: bool,
 }
 
+/// One session that an employee started with the tools of the app (`employee_start`, or `send`
+/// to an employee with no live session). The session itself comes as a normal `session_changed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmployeeStarted {
+    /// The app session ID of the new session.
+    pub session_id: String,
+    /// The employee that was started.
+    pub slug: String,
+    pub name: String,
+    /// The employee that started it.
+    pub by_slug: String,
+    pub by_name: String,
+    /// The app resumed the last CLI session (and did not start a fresh one).
+    pub resumed: bool,
+}
+
 /// `FloorView` of the contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloorView {
@@ -203,6 +224,9 @@ pub trait Observer: Send + Sync {
     fn session_changed(&self, path: &Path, session: &SessionView);
     /// The employees of a floor changed.
     fn floor_changed(&self, path: &Path);
+    /// An employee started the session of another employee. It comes after the `session_changed`
+    /// of the new session. The default does nothing.
+    fn employee_started(&self, _path: &Path, _event: &EmployeeStarted) {}
 }
 
 /// Receives the output of the attached session, in order (see `live.rs`).
@@ -265,6 +289,10 @@ pub struct TowerConfig {
     /// after the scrollback was copied and before the sink is installed. A correct build holds
     /// the output thread during the call; a build with a gap or a duplicate does not.
     pub attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The limits of the MCP endpoint. Tests give small ones.
+    pub mcp_limits: McpLimits,
+    /// Test only. See [`TestHooks`].
+    pub test_hooks: Arc<TestHooks>,
 }
 
 impl TowerConfig {
@@ -282,6 +310,8 @@ impl TowerConfig {
             logo_timeout: REQUEST_TIMEOUT,
             codex_home: None,
             attach_pause: None,
+            mcp_limits: McpLimits::default(),
+            test_hooks: Arc::new(TestHooks::default()),
         }
     }
 }
@@ -354,7 +384,25 @@ impl Drop for Reservation {
     }
 }
 
+/// The Tower. It is a handle: the state is in `TowerCore`, which the MCP server threads share
+/// (they hold a `Weak`, so a dropped `Tower` is not kept alive by them).
 pub struct Tower {
+    core: Arc<TowerCore>,
+}
+
+impl std::ops::Deref for Tower {
+    type Target = TowerCore;
+
+    fn deref(&self) -> &TowerCore {
+        &self.core
+    }
+}
+
+/// The state and the methods of the Tower. Use it through `Tower`.
+#[doc(hidden)]
+pub struct TowerCore {
+    /// A weak handle to this core, for the threads of the sessions and of the MCP server.
+    me: Weak<TowerCore>,
     floor_list: FloorList,
     socket: PathBuf,
     hookrx: Mutex<Option<HookReceiver>>,
@@ -374,6 +422,16 @@ pub struct Tower {
     codex_home: Option<PathBuf>,
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
     closed: Arc<AtomicBool>,
+    /// The token of each live session that has the MCP server (see `mcp.rs`).
+    tokens: Arc<Mutex<HashMap<String, bus::Identity>>>,
+    /// The URL of the MCP endpoint, for example `http://127.0.0.1:41234/mcp`.
+    mcp_url: String,
+    /// The port of the MCP endpoint (`shutdown` connects to it to end the accept thread).
+    mcp_port: u16,
+    /// The address that the MCP listener has really bound (from `local_addr`).
+    mcp_addr: SocketAddr,
+    test_hooks: Arc<TestHooks>,
+    bus: bus::Bus,
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -431,7 +489,11 @@ impl Tower {
         let codex_home = config
             .codex_home
             .or_else(|| default_codex_home(&config.parent_env));
-        Ok(Tower {
+        let (mcp_listener, mcp_addr) =
+            mcp::bind().map_err(|e| io_message("cannot bind the MCP endpoint", e))?;
+        let mcp_port = mcp_addr.port();
+        let core = Arc::new_cyclic(|me| TowerCore {
+            me: me.clone(),
             floor_list: FloorList::new(&config.config_dir),
             socket: hookrx.path().to_path_buf(),
             hookrx: Mutex::new(Some(hookrx)),
@@ -449,9 +511,20 @@ impl Tower {
             codex_home,
             attach_pause: config.attach_pause,
             closed: Arc::new(AtomicBool::new(false)),
-        })
+            tokens: Arc::new(Mutex::new(HashMap::new())),
+            mcp_url: format!("http://127.0.0.1:{mcp_port}/mcp"),
+            mcp_port,
+            mcp_addr,
+            test_hooks: config.test_hooks,
+            bus: bus::Bus::default(),
+        });
+        mcp::serve(mcp_listener, Arc::downgrade(&core), config.mcp_limits)
+            .map_err(|e| io_message("cannot start the MCP endpoint", e))?;
+        Ok(Tower { core })
     }
+}
 
+impl TowerCore {
     /// Set the observer (it replaces the old one).
     pub fn set_observer(&self, observer: Arc<dyn Observer>) {
         self.notifier.set(observer);
@@ -460,6 +533,17 @@ impl Tower {
     /// The path of the hook socket.
     pub fn socket_path(&self) -> &Path {
         &self.socket
+    }
+
+    /// The URL of the MCP endpoint of the app, for example `http://127.0.0.1:41234/mcp`. It is
+    /// not secret: a call needs the token of a session.
+    pub fn mcp_url(&self) -> &str {
+        &self.mcp_url
+    }
+
+    /// The address that the MCP listener has bound. It must be a loopback address.
+    pub fn mcp_local_addr(&self) -> SocketAddr {
+        self.mcp_addr
     }
 
     // ---- floors ----
@@ -856,6 +940,23 @@ impl Tower {
         rows: u16,
         cols: u16,
     ) -> Result<SessionView> {
+        self.launch_with(path, target, resume, message, Vec::new(), rows, cols)
+    }
+
+    /// `launch`, and the IDs of the stored messages that `message` carries (`bus.rs`,
+    /// `start_for_message`). Those messages stay "waiting" in the store until the new session
+    /// reaches its first `working`. If it stops before that, they stay waiting.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_with(
+        &self,
+        path: &Path,
+        target: Target<'_>,
+        resume: bool,
+        message: Option<String>,
+        carried: Vec<i64>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SessionView> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(TowerError::Closing);
         }
@@ -873,15 +974,20 @@ impl Tower {
         // The defaults are read from the current file, not from the file at app start.
         reload(&floor)?;
 
-        let (employee, previous) = {
+        let (employee, previous, team) = {
             let store = locked(&floor.store);
+            // The team goes into the instructions. The setup session has none.
+            let team = if setup_cli.is_some() {
+                Vec::new()
+            } else {
+                store.read_employees()?.employees
+            };
             let mut employee = match setup_cli {
                 Some(cli) => setup_employee(cli, &floor.path),
-                None => store
-                    .read_employees()?
-                    .employees
-                    .into_iter()
+                None => team
+                    .iter()
                     .find(|e| e.slug == slug)
+                    .cloned()
                     .ok_or_else(|| StoreError::EmployeeNotFound(slug.to_owned()))?,
             };
             // The defaults of `floor.toml` fill what the employee leaves empty. They apply only
@@ -928,7 +1034,7 @@ impl Tower {
             } else {
                 None
             };
-            (employee, previous)
+            (employee, previous, team)
         };
         if resume && previous.is_none() && employee.cli == CliKind::Claude {
             return Err(other(format!(
@@ -947,8 +1053,38 @@ impl Tower {
         let hook_program = self.hook_program()?;
         let id = Uuid::new_v4().to_string();
         let log_path = floor.log_path(&id);
+        // The token of this session. It leaves the map when the session ends (`status_hook`).
+        let token = (setup_cli.is_none()).then(bus::new_token);
+        let token_text = token.clone();
+        // The carried messages are held (hidden from `inbox` and from the paste) from now on, so
+        // a fast first turn cannot run before the hold exists. An error before the session
+        // starts drops the hold, and the messages are still waiting in the store.
+        let held = (!carried.is_empty()).then(|| {
+            self.bus
+                .hold_for_session(&id, &floor.path, &employee.slug, carried)
+        });
+        let has_first_message = first_message.is_some();
+        let token_guard = token.as_ref().map(|token| {
+            locked(&self.tokens).insert(
+                token.clone(),
+                bus::Identity {
+                    path: floor.path.clone(),
+                    slug: employee.slug.clone(),
+                    session_id: id.clone(),
+                },
+            );
+            bus::TokenGuard::new(Arc::clone(&self.tokens), token.clone())
+        });
         let ctx = StartContext {
-            instructions: Some(instructions(&employee)),
+            mcp: token.map(|token| McpAccess {
+                url: self.mcp_url.clone(),
+                token,
+            }),
+            instructions: Some(if setup_cli.is_some() {
+                instructions(&employee, None)
+            } else {
+                instructions(&employee, Some(&team))
+            }),
             employee: employee.clone(),
             cwd: floor.path.clone(),
             app_session_id: id.clone(),
@@ -1015,10 +1151,23 @@ impl Tower {
             notifier: Arc::clone(&self.notifier),
             attach_pause: self.attach_pause.clone(),
             after_turn: setup_cli.map(|_| self.setup_hook(&floor)),
+            on_status: token_guard
+                .as_ref()
+                .map(|guard| self.status_hook(&floor.path, slug, guard.token())),
+            has_first_message,
         });
         locked(&self.registry)
             .live
             .insert(id.clone(), Arc::clone(&live));
+        // From here the status thread removes the token when the session ends.
+        if let Some(guard) = token_guard {
+            guard.disarm();
+        }
+        // From here the status thread settles the hold: it is delivered at the first `working`,
+        // and it ends at `stopped` (`status_hook`).
+        if let Some(held) = held {
+            held.disarm();
+        }
         // The first notification is `starting`. The threads start after it, so it comes first.
         live.refresh();
         if let Err(error) = spawn_pumps(
@@ -1031,6 +1180,10 @@ impl Tower {
             learn_id,
         ) {
             live.kill();
+            if let Some(token) = &token_text {
+                bus::forget_token(&self.tokens, token);
+            }
+            self.bus.release_session(&id);
             return Err(io_message("cannot start the threads of the session", error));
         }
         Ok(live.view())
@@ -1140,6 +1293,8 @@ impl Tower {
         let live = self.live(session_id)?;
         live.session.clear_draft();
         live.refresh();
+        // A message may have waited for this flag. Deliver it now (a refusal keeps it waiting).
+        self.deliver_pending(&live.path, &live.slug);
         Ok(())
     }
 
@@ -1237,6 +1392,10 @@ impl Tower {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        // End each `wait` call and the accept thread of the MCP endpoint.
+        self.bus.notify_all();
+        mcp::wake_accept(self.mcp_port);
+        locked(&self.tokens).clear();
         let lives: Vec<Arc<Live>> = locked(&self.registry).live.values().cloned().collect();
         for live in &lives {
             live.kill();
@@ -1261,7 +1420,7 @@ impl Tower {
 
 impl Drop for Tower {
     fn drop(&mut self) {
-        self.shutdown();
+        self.core.shutdown();
     }
 }
 
@@ -1348,12 +1507,18 @@ fn default_first_message(employee: &Employee) -> String {
     )
 }
 
-/// The short M1 instructions (spec 4.6 has the full text, which comes with M2).
-fn instructions(employee: &Employee) -> String {
+/// The instructions of a session (spec 4.6). `team` is `None` for the setup session: it gets
+/// the short text and its role text only. An employee also gets the team, and the rules for the
+/// tools of the app (`bus.rs`, `employee_start` and `send`).
+fn instructions(employee: &Employee, team: Option<&[Employee]>) -> String {
     let mut text = format!(
         "You are {}, the {} on this floor. The operator can type in your terminal at any time.",
         employee.name, employee.role
     );
+    if let Some(team) = team {
+        text.push_str("\n\n");
+        text.push_str(&bus::team_instructions(employee, team));
+    }
     let role_text = employee.role_text.trim();
     if !role_text.is_empty() {
         text.push_str("\n\n");

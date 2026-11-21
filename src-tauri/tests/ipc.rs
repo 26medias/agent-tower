@@ -44,8 +44,14 @@ fn bin(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Starts `fake-cli` in place of a CLI. The first message is the positional argument.
-struct FakeAdapter(CliKind);
+/// The MCP tokens that the app of ONE test gave to its sessions: (slug, token). Each `App` has
+/// its own list. A list that all tests share (a `static`) lets a test read the token of a session
+/// of another test, which is a token for another Tower.
+type Tokens = Arc<Mutex<Vec<(String, String)>>>;
+
+/// Starts `fake-cli` in place of a CLI. The first message is the positional argument. The
+/// second field is the token list of the test that owns this adapter.
+struct FakeAdapter(CliKind, Tokens);
 
 impl FakeAdapter {
     fn build(&self, ctx: &StartContext, cli_id: &str) -> tower_core::adapter::Result<SpawnPlan> {
@@ -60,6 +66,12 @@ impl FakeAdapter {
         }
         if let Some(message) = &ctx.first_message {
             args.push(message.into());
+        }
+        if let Some(mcp) = &ctx.mcp {
+            self.1
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((ctx.employee.slug.clone(), mcp.token.clone()));
         }
         let extra: Vec<(OsString, OsString)> = vec![
             ("TOWER_SESSION".into(), ctx.app_session_id.clone().into()),
@@ -95,6 +107,8 @@ struct App {
     events: Arc<Mutex<Vec<(String, Value)>>>,
     dir: tempfile::TempDir,
     cwd: PathBuf,
+    mcp_url: String,
+    tokens: Tokens,
     _app: tauri::App<MockRuntime>,
 }
 
@@ -117,12 +131,16 @@ fn app() -> App {
         .collect();
     // No test runs a real login shell.
     config.login_env = LoginEnvSource::Fixed(None);
-    config.adapters = Arc::new(|kind| Box::new(FakeAdapter(kind)));
+    let tokens: Tokens = Arc::default();
+    let adapter_tokens = Arc::clone(&tokens);
+    config.adapters =
+        Arc::new(move |kind| Box::new(FakeAdapter(kind, Arc::clone(&adapter_tokens))));
     // The Codex home is a folder of the test, never the real one.
     config.codex_home = Some(base.join("codex-home"));
     // No test reaches the real image API, also not by mistake.
     config.image_api_base = "http://127.0.0.1:1".to_owned();
     let tower = Arc::new(Tower::new(config).unwrap());
+    let mcp_url = tower.mcp_url().to_owned();
     for name in ["claude", "codex"] {
         tower
             .programs_set(name, bin("fake-cli").to_str().unwrap())
@@ -135,7 +153,7 @@ fn app() -> App {
         .unwrap();
     install_tower(&app, tower);
     let events = Arc::new(Mutex::new(Vec::new()));
-    for name in ["session-changed", "floor-changed"] {
+    for name in ["session-changed", "floor-changed", "employee-started"] {
         let events = Arc::clone(&events);
         app.listen(name, move |event| {
             let payload: Value = serde_json::from_str(event.payload()).unwrap();
@@ -153,6 +171,8 @@ fn app() -> App {
         events,
         dir,
         cwd,
+        mcp_url,
+        tokens,
         _app: app,
     }
 }
@@ -645,4 +665,93 @@ fn the_model_and_defaults_commands_work_through_the_ipc_with_the_contract_shapes
         .unwrap_err();
     assert!(error.contains("not a valid model name"), "{error}");
     let _ = &app.dir;
+}
+
+/// One `tools/call` over HTTP, as a CLI would send it.
+fn mcp_call(url: &str, token: &str, tool: &str, args: Value) -> Value {
+    use std::io::{Read, Write};
+    let host = url.trim_start_matches("http://").split('/').next().unwrap();
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}}).to_string();
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+#[test]
+fn an_employee_start_comes_as_a_session_changed_and_an_employee_started_event() {
+    let app = app();
+    let path = app.path();
+    app.call("floor_create", json!({ "path": path, "name": "Tower" }))
+        .unwrap();
+    let ceo = app
+        .call(
+            "session_start",
+            json!({ "path": path, "slug": "ceo", "firstMessage": null, "rows": 24, "cols": 80 }),
+        )
+        .unwrap();
+    let token = app
+        .tokens
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .rev()
+        .find(|(slug, _)| slug == "ceo")
+        .map(|(_, token)| token.clone())
+        .expect("the session has a token");
+    assert_ne!(ceo["sessionId"], Value::Null);
+
+    let answer = mcp_call(
+        &app.mcp_url,
+        &token,
+        "employee_start",
+        json!({"employee": "pm", "message": "Plan it."}),
+    );
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+
+    // The UI hears about the new session as for any session, and about who started it.
+    app.wait_event("the session of the pm shows", |e| {
+        e["session"]["slug"] == "pm"
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let started = loop {
+        let found = app
+            .events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(name, _)| name == "employee-started")
+            .map(|(_, payload)| payload.clone());
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(Instant::now() < deadline, "no employee-started event");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let pm_session = app
+        .session_events()
+        .into_iter()
+        .find(|e| e["session"]["slug"] == "pm")
+        .unwrap();
+    assert_eq!(
+        started,
+        json!({
+            "path": path,
+            "sessionId": pm_session["session"]["sessionId"],
+            "slug": "pm",
+            "name": "Maya",
+            "bySlug": "ceo",
+            "byName": "Ada",
+            "resumed": false,
+        })
+    );
 }

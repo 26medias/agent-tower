@@ -20,7 +20,7 @@
 use crate::model::{
     Brand, CliKind, Employee, Floor, FloorDefaults, PermissionPolicy, SessionRecord,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -285,7 +285,7 @@ pub struct LoadedEmployees {
 // ---------------------------------------------------------------------------------------------
 
 /// `MIGRATIONS[n]` moves a database from `user_version` n to n + 1.
-/// Milestone M2 adds its step (tasks, messages) at the end. The schema version is the length.
+/// Milestone M2 adds its steps (messages, tasks) at the end. The schema version is the length.
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1
     "CREATE TABLE sessions (
@@ -304,6 +304,17 @@ const MIGRATIONS: &[&str] = &[
         at             INTEGER NOT NULL
     );
     CREATE INDEX status_events_by_session ON status_events (app_session_id, id);",
+    // 1 -> 2: the messages between employees (spec 4.4 and 4.5).
+    "CREATE TABLE messages (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_slug    TEXT NOT NULL,
+        to_slug      TEXT NOT NULL,
+        text         TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        delivered_at INTEGER
+    );
+    CREATE INDEX messages_by_target ON messages (to_slug, delivered_at, id);
+    CREATE INDEX messages_by_pair ON messages (from_slug, to_slug, created_at);",
 ];
 
 /// Schema version that this build writes and reads.
@@ -331,6 +342,17 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> 
 }
 
 impl Database {
+    /// Start a write transaction at once (`BEGIN IMMEDIATE`). Use it for each transaction that
+    /// reads and then writes. In WAL mode, a deferred transaction that reads first and then
+    /// writes gets SQLITE_BUSY at once when another connection committed in between, and
+    /// `busy_timeout` does not help. `BEGIN IMMEDIATE` waits for the write lock instead.
+    fn write_transaction(&self) -> Result<Transaction<'_>, StoreError> {
+        Ok(Transaction::new_unchecked(
+            &self.conn,
+            TransactionBehavior::Immediate,
+        )?)
+    }
+
     /// Open the file, and create or migrate it. A file with a higher `user_version` is refused
     /// before anything is written.
     pub fn open(path: &Path) -> Result<Database, StoreError> {
@@ -423,7 +445,7 @@ impl Database {
         status: &str,
         at: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let changed = tx.execute(
             "UPDATE sessions SET last_status = ?2 WHERE app_session_id = ?1",
             params![app_session_id, status],
@@ -471,6 +493,141 @@ impl Database {
                 session_from_row,
             )
             .optional()?)
+    }
+}
+
+/// One row of the `messages` table. Times are Unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRecord {
+    pub id: i64,
+    pub from_slug: String,
+    pub to_slug: String,
+    pub text: String,
+    pub created_at: i64,
+    pub delivered_at: Option<i64>,
+}
+
+fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
+    Ok(MessageRecord {
+        id: row.get(0)?,
+        from_slug: row.get(1)?,
+        to_slug: row.get(2)?,
+        text: row.get(3)?,
+        created_at: row.get(4)?,
+        delivered_at: row.get(5)?,
+    })
+}
+
+const MESSAGE_COLUMNS: &str = "id, from_slug, to_slug, text, created_at, delivered_at";
+
+impl Database {
+    /// Store a message. `delivered_at` is `Some` for a message that goes out at once (the first
+    /// message of a session that the app starts). Returns the ID.
+    pub fn insert_message(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        text: &str,
+        created_at: i64,
+        delivered_at: Option<i64>,
+    ) -> Result<i64, StoreError> {
+        self.conn.execute(
+            "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![from_slug, to_slug, text, created_at, delivered_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The messages for `to_slug` that are not delivered, oldest first.
+    pub fn pending_messages(&self, to_slug: &str) -> Result<Vec<MessageRecord>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
+             WHERE to_slug = ?1 AND delivered_at IS NULL ORDER BY id"
+        ))?;
+        let rows = statement.query_map(params![to_slug], message_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// How many messages for `to_slug` are not delivered.
+    pub fn count_pending_messages(&self, to_slug: &str) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE to_slug = ?1 AND delivered_at IS NULL",
+            params![to_slug],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Mark messages as delivered. A message that is delivered already keeps its first time.
+    pub fn mark_messages_delivered(&self, ids: &[i64], at: i64) -> Result<(), StoreError> {
+        let tx = self.write_transaction()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE messages SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL",
+                params![id, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Put messages back in the waiting state (a start that failed after it took them).
+    pub fn mark_messages_waiting(&self, ids: &[i64]) -> Result<(), StoreError> {
+        let tx = self.write_transaction()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE messages SET delivered_at = NULL WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Take the waiting messages for `to_slug` and mark them delivered, in one transaction.
+    pub fn take_pending_messages(
+        &self,
+        to_slug: &str,
+        at: i64,
+    ) -> Result<Vec<MessageRecord>, StoreError> {
+        let tx = self.write_transaction()?;
+        let messages = {
+            let mut statement = tx.prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages
+                 WHERE to_slug = ?1 AND delivered_at IS NULL ORDER BY id"
+            ))?;
+            let rows = statement.query_map(params![to_slug], message_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        tx.execute(
+            "UPDATE messages SET delivered_at = ?2 WHERE to_slug = ?1 AND delivered_at IS NULL",
+            params![to_slug, at],
+        )?;
+        tx.commit()?;
+        Ok(messages)
+    }
+
+    /// How many messages `from_slug` sent to `to_slug` at `since` or later (the loop limit).
+    pub fn count_messages_since(
+        &self,
+        from_slug: &str,
+        to_slug: &str,
+        since: i64,
+    ) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE from_slug = ?1 AND to_slug = ?2 AND created_at >= ?3",
+            params![from_slug, to_slug, since],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The messages of a floor, oldest first (for tests and later views).
+    pub fn all_messages(&self) -> Result<Vec<MessageRecord>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages ORDER BY id"
+        ))?;
+        let rows = statement.query_map([], message_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -770,6 +927,7 @@ impl FloorList {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn employee(slug: &str, manager: Option<&str>) -> Employee {
@@ -1121,6 +1279,115 @@ mod tests {
         assert!(db.status_events("nope").unwrap().is_empty());
     }
 
+    #[test]
+    fn messages_wait_then_are_taken_once_and_old_database_migrates() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("floor.db");
+        // A version 1 file (before the messages) gets the new table and keeps its rows.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        let a = db.insert_message("pm", "eng", "first", 100, None).unwrap();
+        let b = db.insert_message("pm", "eng", "second", 200, None).unwrap();
+        db.insert_message("pm", "qa", "other target", 150, None)
+            .unwrap();
+        db.insert_message("pm", "eng", "sent with the start", 120, Some(120))
+            .unwrap();
+        assert_eq!(db.count_pending_messages("eng").unwrap(), 2);
+        let waiting = db.pending_messages("eng").unwrap();
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|m| (m.id, m.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(a, "first"), (b, "second")]
+        );
+        let taken = db.take_pending_messages("eng", 300).unwrap();
+        assert_eq!(taken.len(), 2);
+        assert!(db.take_pending_messages("eng", 400).unwrap().is_empty());
+        assert_eq!(db.count_pending_messages("qa").unwrap(), 1);
+        // The first delivery time stays.
+        db.mark_messages_delivered(&[a], 999).unwrap();
+        let first = db
+            .all_messages()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == a)
+            .unwrap();
+        assert_eq!(first.delivered_at, Some(300));
+        // The loop-limit count: by pair, and only from `since`.
+        assert_eq!(db.count_messages_since("pm", "eng", 0).unwrap(), 3);
+        assert_eq!(db.count_messages_since("pm", "eng", 150).unwrap(), 1);
+        assert_eq!(db.count_messages_since("eng", "pm", 0).unwrap(), 0);
+    }
+
+    /// R1: a live session writes its status events through its own connection while the bus takes
+    /// messages through another one. A deferred transaction that reads and then writes gets
+    /// SQLITE_BUSY at once when the other connection committed in between (WAL mode;
+    /// `busy_timeout` does not help). The three message writes must start as write transactions.
+    #[test]
+    fn taking_messages_never_gets_database_is_locked_while_another_connection_writes() {
+        use std::sync::atomic::AtomicBool;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("floor.db");
+        let taker = Database::open(&path).unwrap();
+        let writer = Database::open(&path).unwrap();
+        // No fsync at each commit: the test is about the lock, and it runs faster.
+        writer
+            .conn
+            .execute_batch("PRAGMA synchronous = OFF")
+            .unwrap();
+        writer
+            .create_session(&session("s1", "eng", 1))
+            .expect("create the session");
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = Arc::clone(&stop);
+        let writer_thread = std::thread::spawn(move || {
+            let mut written = 0u32;
+            while !writer_stop.load(Ordering::SeqCst) {
+                writer
+                    .append_status_event("s1", "working", i64::from(written))
+                    .expect("the writer must not fail");
+                written += 1;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            written
+        });
+        let mut failures = Vec::new();
+        for round in 0..2000 {
+            if let Err(error) = taker.take_pending_messages("eng", 1) {
+                failures.push(format!("take {round}: {error}"));
+            }
+            // The other two writes use the same kind of transaction.
+            if round % 10 == 0 {
+                if let Err(error) = taker.mark_messages_delivered(&[1, 2], 1) {
+                    failures.push(format!("deliver {round}: {error}"));
+                }
+                if let Err(error) = taker.mark_messages_waiting(&[1, 2]) {
+                    failures.push(format!("wait {round}: {error}"));
+                }
+            }
+            // A short pause, so that the writer gets the lock between the rounds.
+            std::thread::sleep(Duration::from_micros(300));
+        }
+        stop.store(true, Ordering::SeqCst);
+        let written = writer_thread.join().unwrap();
+        assert!(
+            written > 50,
+            "the writer must run during the test: {written}"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} failures, first: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
     fn schema_dump(conn: &Connection) -> Vec<String> {
         let mut statement = conn
             .prepare("SELECT type || ':' || name || ':' || ifnull(sql, '') FROM sqlite_master ORDER BY 1")
@@ -1133,11 +1400,11 @@ mod tests {
     }
 
     #[test]
-    fn database_version_1_reopens_with_no_change() {
+    fn database_reopens_with_no_change() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("floor.db");
         let first = Database::open(&path).unwrap();
-        assert_eq!(first.schema_version().unwrap(), 1);
+        assert_eq!(first.schema_version().unwrap(), SCHEMA_VERSION);
         first.create_session(&session("s1", "ceo", 1)).unwrap();
         first.set_cli_session_id("s1", "cli").unwrap();
         first.append_status_event("s1", "idle", 2).unwrap();
@@ -1145,13 +1412,13 @@ mod tests {
         let tables: Vec<_> = schema.iter().filter(|s| s.starts_with("table:")).collect();
         assert_eq!(
             tables.len(),
-            3,
-            "sessions, status_events, sqlite_sequence: {tables:?}"
+            4,
+            "sessions, status_events, messages, sqlite_sequence: {tables:?}"
         );
         drop(first);
 
         let second = Database::open(&path).unwrap();
-        assert_eq!(second.schema_version().unwrap(), 1);
+        assert_eq!(second.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(schema_dump(&second.conn), schema);
         let kept = second.last_session("ceo").unwrap().unwrap();
         assert_eq!(kept.cli_session_id.as_deref(), Some("cli"));
@@ -1164,13 +1431,15 @@ mod tests {
         let path = dir.path().join("floor.db");
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("CREATE TABLE future (x); PRAGMA user_version = 2;")
+            conn.execute_batch("CREATE TABLE future (x); PRAGMA user_version = 99;")
                 .unwrap();
         }
         let before = fs::read(&path).unwrap();
         let error = Database::open(&path).unwrap_err();
         match error {
-            StoreError::DbVersionNewer { found, known, .. } => assert_eq!((found, known), (2, 1)),
+            StoreError::DbVersionNewer { found, known, .. } => {
+                assert_eq!((found, known), (99, SCHEMA_VERSION))
+            }
             other => panic!("wrong error: {other}"),
         }
         assert_eq!(fs::read(&path).unwrap(), before);

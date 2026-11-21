@@ -20,11 +20,12 @@
 //! actions still prompt.
 
 use super::{
-    AdapterError, CliAdapter, Result, SpawnPlan, StartContext, check_cli_session_id, check_no_nul,
-    hook_command_text, make_spec, non_empty,
+    AdapterError, CliAdapter, MCP_SERVER_NAME, MCP_TOKEN_ENV, McpAccess, Result, SpawnPlan,
+    StartContext, check_cli_session_id, check_no_nul, hook_command_text, make_spec, non_empty,
 };
 use crate::model::PermissionPolicy;
 use std::ffi::OsString;
+use std::path::Path;
 use uuid::Uuid;
 
 /// The events that the app listens to. `SubagentStop` is not here: spec 4.3 ignores it.
@@ -50,8 +51,56 @@ pub fn permission_mode(policy: PermissionPolicy) -> &'static str {
     }
 }
 
-/// The JSON text for `--settings`: only hooks. Key order is fixed, so snapshots are exact.
-fn settings_json(hook_command: &str) -> String {
+/// The JSON text for `--mcp-config`. The token is NOT in the text: Claude expands
+/// `${TOWER_MCP_TOKEN}` in a header from the environment of the session (PROBED, Claude 2.1.330).
+/// So the token is not in the argument list, which any process of the same user can read.
+fn mcp_config_json(mcp: &McpAccess) -> String {
+    let url = serde_json::Value::String(mcp.url.clone());
+    format!(
+        r#"{{"mcpServers":{{"{MCP_SERVER_NAME}":{{"type":"http","url":{url},"headers":{{"Authorization":"Bearer ${{{MCP_TOKEN_ENV}}}"}}}}}}}}"#
+    )
+}
+
+/// The files that the app reads under `.swarm/` of the floor, as the path part of a rule. An
+/// employee must not edit them: the start rule reads `employees/*.md` (the `manager` field
+/// gives authority), and `floor.toml` holds the defaults. `reports/` and `worktrees/` are not
+/// here: the employees write there (spec 4.9, 4.10).
+const PROTECTED_SWARM_PATHS: [&str; 5] = [
+    "floor.toml",
+    ".gitignore",
+    "employees/**",
+    "assets/**",
+    "state/**",
+];
+
+/// The deny rules for an employee session: the file tools of Claude (`Edit` is the rule for
+/// every tool that edits a file: Edit, Write, MultiEdit, NotebookEdit; PROBED with `claude -p`,
+/// 2.1.330) cannot change the protected files. Each file has two rules: the absolute path
+/// (`//` is the root of the file system in a rule), and the path relative to the working
+/// folder. The relative rule still holds when the absolute path has a character that a rule
+/// reads as a pattern (`[`, `*`, `?`). `cwd` is the floor folder: a session starts in it.
+///
+/// Limits (NOT closed here): a shell command can still write these files. In the modes `manual`
+/// and `acceptEdits` a shell command asks the operator first.
+fn deny_rules(cwd: &Path) -> Vec<String> {
+    let cwd = cwd.to_string_lossy();
+    let root = cwd.trim_start_matches('/').trim_end_matches('/');
+    PROTECTED_SWARM_PATHS
+        .iter()
+        .flat_map(|path| {
+            [
+                format!("Edit(//{root}/.swarm/{path})"),
+                format!("Edit(./.swarm/{path})"),
+            ]
+        })
+        .collect()
+}
+
+/// The JSON text for `--settings`: the hooks, and, with an MCP server, the permission to use the
+/// tools of that one server with no prompt (`mcp__tower` is the rule for a whole server) and the
+/// deny rules for the files under `.swarm/` (`deny_rules`). No other tool is allowed. Key order
+/// is fixed, so snapshots are exact.
+fn settings_json(hook_command: &str, with_mcp: bool, cwd: &Path) -> String {
     let command = serde_json::Value::String(hook_command.to_owned()).to_string();
     let entries: Vec<String> = HOOK_EVENTS
         .iter()
@@ -62,7 +111,13 @@ fn settings_json(hook_command: &str) -> String {
             )
         })
         .collect();
-    format!(r#"{{"hooks":{{{}}}}}"#, entries.join(","))
+    let permissions = if with_mcp {
+        let deny = serde_json::Value::from(deny_rules(cwd)).to_string();
+        format!(r#","permissions":{{"allow":["mcp__{MCP_SERVER_NAME}"],"deny":{deny}}}"#)
+    } else {
+        String::new()
+    };
+    format!(r#"{{"hooks":{{{}}}{permissions}}}"#, entries.join(","))
 }
 
 impl ClaudeAdapter {
@@ -97,8 +152,15 @@ impl CliAdapter for ClaudeAdapter {
 fn build_args(ctx: &StartContext, session_args: &[&str]) -> Result<Vec<OsString>> {
     let hook_command = hook_command_text(&ctx.hook_program)?;
     let mut args: Vec<OsString> = session_args.iter().map(OsString::from).collect();
+    if let Some(mcp) = &ctx.mcp {
+        check_no_nul("the MCP url", &mcp.url)?;
+        // `--mcp-config` takes a list of values. A flag must follow it, or the next positional
+        // argument (the first message) would become a config. `--settings` always follows.
+        args.push("--mcp-config".into());
+        args.push(mcp_config_json(mcp).into());
+    }
     args.push("--settings".into());
-    args.push(settings_json(&hook_command).into());
+    args.push(settings_json(&hook_command, ctx.mcp.is_some(), &ctx.cwd).into());
     args.push("--permission-mode".into());
     args.push(permission_mode(ctx.employee.permission).into());
     if let Some(model) = non_empty(&ctx.employee.model) {

@@ -76,6 +76,21 @@ interface Programs { claude: string | null; codex: string | null; node: string |
 |---|---|---|
 | `session-changed` | `{ path: string, session: SessionView }` | The status, the draft flag or the "message waiting" flag of a session changed, or a session was started |
 | `floor-changed` | `{ path: string }` | Employees changed. The UI calls `floor_open` again |
+| `employee-started` | `{ path, sessionId, slug, name, bySlug, byName, resumed }` | An employee started the session of another employee with the tools of the app (`employee_start`, or `send` to an employee with no live session). See below |
+
+### `employee-started` (milestone M2, the people and message tools)
+
+An employee can start another employee through the MCP server of the app. The app starts the session
+with the same code as `session_start` (30 rows, 120 columns), so the UI gets the normal events:
+`session-changed` with the status `starting`, and the later statuses. The UI did not call
+`session_start` for this session, so it must handle a `session-changed` for a session ID that it has
+never seen: it makes a tab (a live session always has a tab) and shows the status in the room and in
+the list. It must NOT make that tab the active one.
+
+`employee-started` is sent once for each start, after the first `session-changed` of the new session.
+`slug` and `name` are the employee that was started. `bySlug` and `byName` are the employee that
+started it. `resumed` is `true` when the app resumed the last CLI session. The UI shows one toast:
+`"{byName} started {name}"`. The event has no other effect.
 
 ## UI behaviour in M1
 

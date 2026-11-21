@@ -4,7 +4,7 @@
 
 <div class="toasts" aria-live="polite">
     {#each store.toasts as toast (toast.id)}
-        <div class="toast" role="alert">
+        <div class="toast" class:info={toast.kind === "info"} role={toast.kind === "info" ? "status" : "alert"} data-kind={toast.kind ?? "error"}>
             <span class="text">{toast.text}</span>
             <button type="button" class="ghost" aria-label="Dismiss" onclick={() => store.dismissToast(toast.id)}>
                 x
@@ -35,6 +35,12 @@
         background: #2a1a2c;
         border: 1px solid var(--danger);
         border-radius: 6px;
+    }
+
+    /* A notice, not an error: no red border. */
+    .toast.info {
+        background: var(--panel);
+        border-color: var(--line);
     }
 
     .text {

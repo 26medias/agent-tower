@@ -390,6 +390,12 @@ impl Session {
         locked(&self.inner.state).message_waiting = false;
     }
 
+    /// For the caller that holds a message back with no paste attempt (the first-turn guard of
+    /// the app). A paste that works, or `clear_message_waiting`, ends the mark.
+    pub fn set_message_waiting(&self) {
+        locked(&self.inner.state).message_waiting = true;
+    }
+
     /// The time at which the machine needs a tick, if any.
     pub fn next_deadline(&self) -> Option<Millis> {
         locked(&self.inner.state).machine.next_deadline()

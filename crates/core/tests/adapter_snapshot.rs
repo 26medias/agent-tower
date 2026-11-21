@@ -7,11 +7,11 @@ mod adapter_support;
 use adapter_support::*;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use tower_core::adapter::{
-    AdapterError, ClaudeAdapter, CliAdapter, CodexAdapter, SpawnPlan, StartContext, adapter_for,
-    claude_permission_mode, cli_session_id_from_event,
+    AdapterError, ClaudeAdapter, CliAdapter, CodexAdapter, McpAccess, SpawnPlan, StartContext,
+    adapter_for, claude_permission_mode, cli_session_id_from_event,
 };
 use tower_core::env::EnvMap;
 use tower_core::model::{CliKind, PermissionPolicy};
@@ -706,4 +706,169 @@ fn claude_payloads_of_the_probe_logs_carry_the_session_id() {
             Some(id)
         );
     }
+}
+
+// ---- the MCP server of the app (spec 4.4) ----
+
+const MCP_URL: &str = "http://127.0.0.1:41234/mcp";
+const MCP_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn with_mcp(mut ctx: StartContext) -> StartContext {
+    ctx.mcp = Some(McpAccess {
+        url: MCP_URL.to_owned(),
+        token: MCP_TOKEN.to_owned(),
+    });
+    ctx
+}
+
+#[test]
+fn claude_with_the_app_server_has_the_config_the_allow_rule_and_no_token_in_the_argv() {
+    let ctx = with_mcp(claude_ctx(PermissionPolicy::ReadOnly));
+    let plan = ClaudeAdapter.start_with_id(&ctx, UUID_A).expect("plan");
+    let args = text(&plan);
+
+    // The token is in the environment only. Any process of the same user can read the argv.
+    assert!(
+        args.iter().all(|arg| !arg.contains(MCP_TOKEN)),
+        "token in argv: {args:?}"
+    );
+    assert_eq!(
+        plan.spec.env.get(OsStr::new("TOWER_MCP_TOKEN")),
+        Some(&OsString::from(MCP_TOKEN))
+    );
+
+    let mut allowed_settings = claude_settings(HOOK);
+    allowed_settings.truncate(allowed_settings.len() - 1);
+    let deny: Vec<String> = [
+        "floor.toml",
+        ".gitignore",
+        "employees/**",
+        "assets/**",
+        "state/**",
+    ]
+    .iter()
+    .flat_map(|path| {
+        [
+            format!("Edit(//work/floor/wt1/.swarm/{path})"),
+            format!("Edit(./.swarm/{path})"),
+        ]
+    })
+    .collect();
+    allowed_settings.push_str(&format!(
+        r#","permissions":{{"allow":["mcp__tower"],"deny":{}}}}}"#,
+        serde_json::to_string(&deny).unwrap()
+    ));
+    let config = format!(
+        r#"{{"mcpServers":{{"tower":{{"type":"http","url":"{MCP_URL}","headers":{{"Authorization":"Bearer ${{TOWER_MCP_TOKEN}}"}}}}}}}}"#
+    );
+    assert_eq!(
+        args,
+        strings(&[
+            "--session-id",
+            UUID_A,
+            "--mcp-config",
+            &config,
+            "--settings",
+            &allowed_settings,
+            "--permission-mode",
+            "manual",
+            "--model",
+            "haiku",
+            "--effort",
+            "low",
+            "--append-system-prompt",
+            "Be brief.",
+            "Reply with only: OK",
+        ])
+    );
+    // `--mcp-config` takes a list. A flag follows it, so the first message stays a prompt.
+    let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+    assert!(args[at + 2].starts_with("--"), "{args:?}");
+    // The two JSON texts are valid, and the allow rule names only the server of the app.
+    let settings: Value = serde_json::from_str(&allowed_settings).unwrap();
+    assert_eq!(
+        settings["permissions"]["allow"],
+        serde_json::json!(["mcp__tower"])
+    );
+    // R6: the file tools cannot change what the app reads under `.swarm/` of the floor. The
+    // folders for reports and worktrees stay open for the employees.
+    let deny: Vec<&str> = settings["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rule| rule.as_str().unwrap())
+        .collect();
+    assert!(
+        deny.contains(&"Edit(//work/floor/wt1/.swarm/employees/**)"),
+        "{deny:?}"
+    );
+    assert!(
+        deny.contains(&"Edit(//work/floor/wt1/.swarm/floor.toml)"),
+        "{deny:?}"
+    );
+    assert!(deny.contains(&"Edit(./.swarm/state/**)"), "{deny:?}");
+    assert!(
+        deny.iter().all(|rule| rule.starts_with("Edit(")
+            && !rule.contains("reports")
+            && !rule.contains("worktrees")),
+        "{deny:?}"
+    );
+    let parsed: Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(parsed["mcpServers"]["tower"]["url"], MCP_URL);
+
+    // The resume path has it too.
+    let resumed = ClaudeAdapter.resume(&ctx, UUID_B).expect("plan");
+    assert!(text(&resumed).contains(&"--mcp-config".to_owned()));
+    assert!(text(&resumed).iter().all(|a| !a.contains(MCP_TOKEN)));
+}
+
+#[test]
+fn claude_without_the_app_server_has_no_mcp_flag_and_no_permission_rule() {
+    let plan = ClaudeAdapter
+        .start_with_id(&claude_ctx(PermissionPolicy::ReadOnly), UUID_A)
+        .expect("plan");
+    let args = text(&plan);
+    assert!(!args.contains(&"--mcp-config".to_owned()));
+    assert!(
+        args.iter()
+            .all(|a| !a.contains("permissions") && !a.contains("mcp__"))
+    );
+    assert!(!plan.spec.env.contains_key(OsStr::new("TOWER_MCP_TOKEN")));
+}
+
+#[test]
+fn codex_with_the_app_server_has_the_three_settings_and_no_token_in_the_argv() {
+    let ctx = with_mcp(codex_ctx(PermissionPolicy::ReadOnly));
+    for plan in [
+        CodexAdapter.start(&ctx).expect("plan"),
+        CodexAdapter.resume(&ctx, "019c-test-id").expect("plan"),
+    ] {
+        let args = text(&plan);
+        assert!(args.iter().all(|a| !a.contains(MCP_TOKEN)), "{args:?}");
+        for expected in [
+            format!(r#"mcp_servers.tower.url="{MCP_URL}""#),
+            r#"mcp_servers.tower.bearer_token_env_var="TOWER_MCP_TOKEN""#.to_owned(),
+            r#"mcp_servers.tower.default_tools_approval_mode="approve""#.to_owned(),
+        ] {
+            let at = args.iter().position(|a| *a == expected);
+            let at = at.unwrap_or_else(|| panic!("{expected} missing in {args:?}"));
+            assert_eq!(args[at - 1], "-c");
+        }
+        assert_eq!(
+            plan.spec.env.get(OsStr::new("TOWER_MCP_TOKEN")),
+            Some(&OsString::from(MCP_TOKEN))
+        );
+    }
+    let plain = CodexAdapter
+        .start(&codex_ctx(PermissionPolicy::ReadOnly))
+        .unwrap();
+    assert!(text(&plain).iter().all(|a| !a.contains("mcp_servers")));
+}
+
+#[test]
+fn the_debug_text_of_the_access_hides_the_token() {
+    let ctx = with_mcp(claude_ctx(PermissionPolicy::ReadOnly));
+    let shown = format!("{:?}", ctx.mcp);
+    assert!(!shown.contains(MCP_TOKEN), "{shown}");
+    assert!(!format!("{ctx:?}").contains(MCP_TOKEN));
 }

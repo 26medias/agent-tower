@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
     AttachResult,
     CliKind,
+    EmployeeStartedPayload,
     FloorChangedPayload,
     FloorDefaults,
     FloorEntry,
@@ -173,4 +174,9 @@ export async function onSessionChanged(handler: (payload: SessionChangedPayload)
 
 export async function onFloorChanged(handler: (payload: FloorChangedPayload) => void): Promise<Unlisten> {
     return (await backend()).listen<FloorChangedPayload>("floor-changed", handler);
+}
+
+/** An employee started the session of another employee with the tools of the app. */
+export async function onEmployeeStarted(handler: (payload: EmployeeStartedPayload) => void): Promise<Unlisten> {
+    return (await backend()).listen<EmployeeStartedPayload>("employee-started", handler);
 }

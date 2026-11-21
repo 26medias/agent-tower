@@ -1,7 +1,7 @@
 {
     "$schema": "../gen/schemas/desktop-schema.json",
     "identifier": "default",
-    "description": "Capability for the main window. The commands of the app need no permission (the app has no ACL manifest). The UI listens to the events session-changed and floor-changed.",
+    "description": "Capability for the main window. The commands of the app need no permission (the app has no ACL manifest). The UI listens to the events session-changed, floor-changed and employee-started.",
     "windows": ["main"],
     "permissions": [
         "core:default",

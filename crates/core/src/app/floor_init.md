@@ -101,11 +101,39 @@ complete and that they can stop this session.
   itself: do not make the team small to save money.
 - **`manager`.** The field is the slug of another employee. It gives the reporting line. A
   hierarchy with many levels is permitted (for example an engineer answers to a technical
-  director, who answers to the `ceo`). Today the app stores and shows the field; the task and
-  message routing that uses it comes in a later version. Write the routing rules in the role
-  texts too.
-- **Tasks.** Today the operator gives the work to each employee in its terminal. The app does not
-  pass tasks between employees yet.
+  director, who answers to the `ceo`). The app uses the field for one rule: an employee may start
+  the session of the employees below it (see "Work between employees"). Write the routing rules
+  (who gives work to whom) in the role texts too.
+- **Work between employees.** Each employee of the floor is a separate session that the operator
+  can see in its own tab. An employee gives work to another employee with the tools of the app.
+  The app gives these tools to each employee in each session (not to this setup session). The
+  employee does not need to configure them. The tools are in the MCP server `tower`:
+    - `org_chart`: shows the team, the status of each employee, and who the caller may start.
+    - `employee_start(employee, message)`: gives work to an employee. If the employee has no live
+      session, the app starts one (it resumes the last one when it can), and the message is the
+      first message. If the employee has a live session, the message goes to it.
+    - `send(to, text)`: a message to one employee of the same floor. Each employee can send a
+      message to each other employee. If the receiver has no session and the sender may start it,
+      the app starts it. A message that arrives while the receiver works waits, and the app pastes
+      it when the receiver is idle. The app never pastes into a permission question.
+    - `inbox` and `wait(timeout_s)`: read the waiting messages, or block (50 s at most) until one
+      comes.
+    - **Who may start whom.** An employee may start another employee that is below it in the
+      `manager` chain. The `ceo` and the `pm` may start every employee of the floor. Nobody may
+      start itself or the setup session. Any other start is refused with a clear error.
+    - A message reaches the receiver with the header `[message from <Name> (<Role>)]`. Each line
+      of the message body starts with `> `. The receiver answers with `send`.
+    - The app denies the file tools of each employee for the files that it reads under `.swarm/`
+      (`floor.toml`, `employees/`, `assets/`, `state/`). Only the operator and the setup agent
+      change them. The app also limits the starts by employees (12 for each floor in 10 minutes).
+    - The app limits the messages from one employee to one other employee (30 in one hour).
+    - The app writes the team, the manager, the direct reports and the rules for these tools into
+      the instructions of each employee. Your role texts add the details of the role.
+    - **Subagents.** A role text must tell a manager to give work to the employees with these
+      tools and NEVER with the subagents, the agent tool or the task tool of the CLI. The CLI
+      subagents hide the work from the operator and bypass the team. Tell each manager that
+      the CLI subagents are for small work of its own role only.
+  There is no task board yet. The tools above carry the work and the answers.
 - **Permission with the CLI `claude`.**
     - `read-only`: the CLI asks the operator before each file edit and before each shell command
       that the operator's own CLI settings do not already permit. The employee can read all
@@ -123,8 +151,8 @@ complete and that they can stop this session.
   with `codex`.
 - **Tools of an employee.** An employee is a normal session of its CLI. It has the tools of that
   CLI on this machine: file read and edit, the shell (with the permission rules above), and the
-  skills and MCP servers that the operator configured for the CLI. The app adds no tools yet. You
-  cannot see that list. For a seat that needs a special tool (pictures, 3D models, sound, a
+  skills and MCP servers that the operator configured for the CLI. The app adds the tools of the
+  team (see "Work between employees") and no other tool. You cannot see the rest of that list. For a seat that needs a special tool (pictures, 3D models, sound, a
   browser), ask the operator in Step 3 which tool it has. If none is known, tell the employee in
   its role text to write an exact brief and to report the missing tool.
 - **Which CLI.** Use the default CLI of the floor (`[defaults]` in `floor.toml`) if it is set.

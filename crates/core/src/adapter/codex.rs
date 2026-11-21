@@ -13,8 +13,9 @@
 //! escape does not always give an error. Text values use `toml_string`.
 
 use super::{
-    AdapterError, CliAdapter, Result, SpawnPlan, StartContext, check_cli_session_id, check_no_nul,
-    hook_command_text, make_spec, non_empty, path_str, toml_string,
+    AdapterError, CliAdapter, MCP_SERVER_NAME, MCP_TOKEN_ENV, Result, SpawnPlan, StartContext,
+    check_cli_session_id, check_no_nul, hook_command_text, make_spec, non_empty, path_str,
+    toml_string,
 };
 use crate::model::PermissionPolicy;
 use serde_json::Value;
@@ -96,6 +97,29 @@ fn build_args(ctx: &StartContext) -> Result<Vec<OsString>> {
         ),
     );
     push_config(&mut args, "check_for_update_on_startup=false".to_owned());
+    if let Some(mcp) = &ctx.mcp {
+        check_no_nul("the MCP url", &mcp.url)?;
+        // The token is not in the arguments: Codex reads it from the environment variable.
+        // `default_tools_approval_mode="approve"` stops the question before each tool call.
+        push_config(
+            &mut args,
+            format!(
+                "mcp_servers.{MCP_SERVER_NAME}.url={}",
+                toml_string(&mcp.url)
+            ),
+        );
+        push_config(
+            &mut args,
+            format!(
+                "mcp_servers.{MCP_SERVER_NAME}.bearer_token_env_var={}",
+                toml_string(MCP_TOKEN_ENV)
+            ),
+        );
+        push_config(
+            &mut args,
+            format!("mcp_servers.{MCP_SERVER_NAME}.default_tools_approval_mode=\"approve\""),
+        );
+    }
     if let Some(instructions) = non_empty(&ctx.instructions) {
         check_no_nul("the instructions", instructions)?;
         push_config(

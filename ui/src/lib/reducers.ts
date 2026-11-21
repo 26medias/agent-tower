@@ -1,5 +1,5 @@
 // Pure state reducers for the session store. No Svelte, no Tauri.
-import type { FloorView, SessionView, TrackedSession } from "./types";
+import type { EmployeeStartedPayload, FloorView, SessionView, TrackedSession } from "./types";
 
 export interface SessionState {
     /** Sessions by session ID, for all floors that the UI knows. */
@@ -88,4 +88,9 @@ export function pickActive(
     if (preferred && tabs.some((t) => t.sessionId === preferred)) return preferred;
     if (current && tabs.some((t) => t.sessionId === current)) return current;
     return tabs.length > 0 ? tabs[0].sessionId : null;
+}
+
+/** The text of the toast for an employee that started another employee: "Tomas started Kenji". */
+export function employeeStartedText(payload: Pick<EmployeeStartedPayload, "byName" | "name">): string {
+    return `${payload.byName} started ${payload.name}`;
 }

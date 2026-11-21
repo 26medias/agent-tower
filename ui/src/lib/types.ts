@@ -112,6 +112,17 @@ export interface FloorChangedPayload {
     path: string;
 }
 
+/** Payload of the `employee-started` event (docs/ipc-m1.md, "Events"). */
+export interface EmployeeStartedPayload {
+    path: string;
+    sessionId: string; // the new session. Its `session-changed` events come as for any session
+    slug: string; // the employee that was started
+    name: string;
+    bySlug: string; // the employee that started it
+    byName: string;
+    resumed: boolean; // the last CLI session was resumed (not a fresh start)
+}
+
 /** Names accepted by `programs_set`. */
 export type ProgramName = "claude" | "codex" | "node";
 

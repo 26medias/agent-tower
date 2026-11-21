@@ -126,7 +126,7 @@ pub struct LogConfig {
 }
 
 /// What to start.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SpawnSpec {
     /// Absolute path of the program.
     pub program: PathBuf,
@@ -140,6 +140,24 @@ pub struct SpawnSpec {
     pub rows: u16,
     pub cols: u16,
     pub log: Option<LogConfig>,
+}
+
+/// The debug text shows the names of the environment variables and never their values: the
+/// environment holds the token of the MCP server of the app, and the login shell environment of
+/// the operator can hold other secrets. The argument list is shown as it is (no secret goes there:
+/// the adapters put the token in the environment).
+impl std::fmt::Debug for SpawnSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .field("cwd", &self.cwd)
+            .field("rows", &self.rows)
+            .field("cols", &self.cols)
+            .field("log", &self.log)
+            .finish()
+    }
 }
 
 /// How a process ended.
@@ -472,6 +490,27 @@ impl LogFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_text_of_a_spec_hides_the_values_of_the_environment() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            OsString::from("TOWER_MCP_TOKEN"),
+            OsString::from("s3cret-value"),
+        );
+        let spec = SpawnSpec {
+            program: "/bin/true".into(),
+            args: vec![],
+            env,
+            cwd: "/tmp".into(),
+            rows: 1,
+            cols: 1,
+            log: None,
+        };
+        let shown = format!("{spec:?}");
+        assert!(shown.contains("TOWER_MCP_TOKEN"), "{shown}");
+        assert!(!shown.contains("s3cret-value"), "{shown}");
+    }
 
     #[test]
     fn recording_writer_keeps_each_call() {

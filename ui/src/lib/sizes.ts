@@ -58,9 +58,16 @@ export function infoRange(officeW: number): Range {
     return { min: INFO_MIN, max: Math.max(INFO_MIN, Math.floor(officeW - ROOM_MIN)) };
 }
 
-/** The room gets a 3:2 box at the default height. The info panel gets the rest, but at least 300 px. */
-export function defaultInfo(officeW: number, defaultOfficeH: number): number {
-    return Math.max(300, Math.round(officeW - defaultOfficeH * 1.5));
+/** The info panel that the operator never resized is not narrower than this (a drag can go down to `INFO_MIN`). */
+export const INFO_DEFAULT_MIN = 300;
+
+/**
+ * The width of the info panel while the operator has not set it by hand. The room gets a 3:2 box
+ * at the REAL height of the office (`officeH`), so the room picture grows when the operator makes
+ * the office taller. The info panel takes the rest, but never less than `INFO_DEFAULT_MIN`.
+ */
+export function defaultInfo(officeW: number, officeH: number): number {
+    return Math.max(INFO_DEFAULT_MIN, Math.round(officeW - officeH * 1.5));
 }
 
 /** The size to use: the custom value when there is one, else the default. Always inside the range. */

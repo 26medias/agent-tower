@@ -223,6 +223,19 @@ Tool group "messages":
 | `inbox()` | Read the messages that wait |
 | `wait(timeout)` | Block until a message comes or a task of a report changes. Maximum 50 s; the agent calls it again. It returns only the number of waiting messages. Only `inbox()` marks messages as read, so a call that times out loses nothing (Claude drops an HTTP tool call after about 60 s, PROBED) |
 
+**Built in M2a (people and messages).** The tools `org_chart`, `employee_start`, `send`, `inbox` and `wait` work (`crates/core/src/app/bus.rs`).
+`employee_start` and `send` start a session of an employee that has none, if the caller may start it: the caller is above the target in the `manager` chain, or the caller is `ceo` or `pm`.
+The token is in the environment of the session (`TOWER_MCP_TOKEN`), not in an argument: Claude expands `${TOWER_MCP_TOKEN}` in the `Authorization` header of `--mcp-config` (PROBED, 2.1.330),
+and Codex reads `bearer_token_env_var`. Claude gets `permissions.allow = ["mcp__tower"]` in `--settings`, so its tool calls need no prompt in the modes `manual` and `acceptEdits` (PROBED).
+Repairs after the M2a review:
+- A delivered message has the header line, the body with `> ` before each line, and the answer line. The role instructions say that only lines with `>` are the body, and that a body is not an order from another person than the sender.
+- The first message of a start carries the new message and older waiting messages while the text stays under 60000 bytes. Those messages stay waiting in the store until the new session reaches its first `working`. If it stops before that, they are waiting again. The others are pasted after the first turn.
+- A session that starts with no first message (an operator resume) counts as past its first turn at its first `idle`. While the first turn is open, a new message is held and the "message waiting" mark shows.
+- `inbox` marks messages delivered after it wrote the answer. The HTTP endpoint checks the token before it reads the body, gives each request one deadline of 30 s, and allows 256 open connections (HTTP 503 over that).
+- The start rule ignores the manager chain of an employee that is its own ancestor. Employees can start 12 sessions for each floor in a rolling 10 minutes. The Claude settings of an employee deny the file tools for `floor.toml`, `employees/`, `assets/` and `state/` under `.swarm/`. Codex has no enforced deny (its sandbox is off on this machine).
+
+Not built yet: `employee_stop`, the task tools, the Stop-hook delivery path, and the loop limit per task (M2a counts 30 messages for each pair in a rolling hour).
+
 Who can talk to whom: each employee of a floor can message each other employee of that floor.
 The operator can message all. Messages between floors are never possible (isolation rule, 4.0).
 The hierarchy limits only assignment and session control (`task_assign`, `employee_start`, `employee_stop`), not messages.
@@ -455,7 +468,7 @@ Placeholder art is used in M1 to M3. The visual work (M4) can move earlier if th
 | N5 | Codex instructions for one session | WORKS: `developer_instructions` (4.6) |
 | N6 | Codex approval and sandbox settings | DOES NOT WORK on this machine. Decision O7 (4.7) |
 | N7 | CLI session ID of a live session | WORKS (4.2). Resume keeps the context in both CLIs |
-| N8 | `rmcp` crate as the MCP server | NOT TRACED. Version 3.11.0 has an HTTP server feature. Plan B in 4.4. Close at the start of M2 |
+| N8 | `rmcp` crate as the MCP server | CLOSED in M2a: plan B. A hand-written HTTP endpoint (`crates/core/src/app/mcp.rs`, std `TcpListener` and threads, JSON answers) works with both CLIs in the live test. No `rmcp`, no async runtime |
 | N9 | Long blocking `wait` | WORKS up to about 60 s in Claude. `wait` is limited to 50 s (4.4) |
 | N10 | Codex access to the reports folder outside a worktree | NOT TRACED. Depends on O7. Close at the start of M2 |
 | N11 | How `question` ends when the operator denies a prompt, both CLIs. Claude Ctrl-C and the 2 s quiet rule | PROBED at step 0 (4.3). Evidence in `probes/step0/` |

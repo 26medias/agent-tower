@@ -9,9 +9,9 @@ use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-use tower_core::adapter::{CliAdapter, SpawnPlan, StartContext};
+use tower_core::adapter::{CliAdapter, McpAccess, SpawnPlan, StartContext};
 use tower_core::app::{
-    FloorView, Observer, OutputSink, SessionView, Tower, TowerConfig, TowerError,
+    EmployeeStarted, FloorView, Observer, OutputSink, SessionView, Tower, TowerConfig, TowerError,
 };
 use tower_core::env::{EnvMap, build_env};
 use tower_core::login_env::LoginEnvSource;
@@ -75,6 +75,8 @@ pub enum Ev {
 pub struct Events {
     log: Mutex<Vec<Ev>>,
     changed: Condvar,
+    /// The `employee_started` events, oldest first.
+    pub started: Mutex<Vec<(PathBuf, EmployeeStarted)>>,
 }
 
 impl Observer for Events {
@@ -85,6 +87,11 @@ impl Observer for Events {
 
     fn floor_changed(&self, path: &Path) {
         lock(&self.log).push(Ev::Floor(path.to_path_buf()));
+        self.changed.notify_all();
+    }
+
+    fn employee_started(&self, path: &Path, event: &EmployeeStarted) {
+        lock(&self.started).push((path.to_path_buf(), event.clone()));
         self.changed.notify_all();
     }
 }
@@ -190,6 +197,8 @@ pub struct Call {
     pub parent_env: EnvMap,
     /// The environment of the process (`build_env` of `parent_env`).
     pub env: EnvMap,
+    /// The MCP server that the app gave to the session (`None` for the setup session).
+    pub mcp: Option<McpAccess>,
 }
 
 #[derive(Default)]
@@ -281,6 +290,7 @@ impl TestAdapter {
             plan_cli_session_id: plan_id.clone(),
             parent_env: ctx.parent_env.clone(),
             env: env.clone(),
+            mcp: ctx.mcp.clone(),
         });
         Ok(SpawnPlan {
             spec: SpawnSpec {
@@ -512,4 +522,169 @@ pub fn pids_with(needle: &str) -> Vec<u32> {
         }
     }
     found
+}
+
+// ---------------------------------------------------------------------------------------------
+// A plain HTTP client for the MCP endpoint
+// ---------------------------------------------------------------------------------------------
+
+/// The answer of one HTTP request.
+#[derive(Debug)]
+pub struct HttpAnswer {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl HttpAnswer {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {:?}", self.body))
+    }
+}
+
+/// `http://127.0.0.1:PORT/mcp` to `127.0.0.1:PORT`.
+fn host_of(url: &str) -> String {
+    url.trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+/// One request on its own connection (`Connection: close`). `bearer` `None` sends no
+/// `Authorization` header.
+pub fn http(url: &str, method: &str, bearer: Option<&str>, body: &str) -> HttpAnswer {
+    use std::io::{Read, Write};
+    let host = host_of(url);
+    let mut stream = std::net::TcpStream::connect(&host).expect("connect to the MCP endpoint");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut request = format!(
+        "{method} /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if let Some(token) = bearer {
+        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").expect("an HTTP answer");
+    let mut lines = head.lines();
+    let status: u16 = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
+        .collect();
+    HttpAnswer {
+        status,
+        headers,
+        body: body.to_owned(),
+    }
+}
+
+/// The result of a `tools/call`.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub text: String,
+    pub is_error: bool,
+}
+
+pub fn rpc_body(id: u64, method: &str, params: serde_json::Value) -> String {
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
+}
+
+/// Call a tool with a token. Panics when the call is not a normal MCP answer.
+pub fn call_tool_with(url: &str, token: &str, name: &str, args: serde_json::Value) -> ToolResult {
+    let answer = http(
+        url,
+        "POST",
+        Some(token),
+        &rpc_body(
+            1,
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": args}),
+        ),
+    );
+    assert_eq!(answer.status, 200, "{answer:?}");
+    let json = answer.json();
+    let result = &json["result"];
+    ToolResult {
+        text: result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no text in {json}"))
+            .to_owned(),
+        is_error: result["isError"].as_bool().unwrap(),
+    }
+}
+
+impl Rig {
+    /// The token that the app gave to the latest session of `slug` in this floor.
+    pub fn token_of(&self, slug: &str) -> String {
+        self.calls()
+            .into_iter()
+            .rev()
+            .find(|c| c.slug == slug && c.cwd == self.cwd)
+            .and_then(|c| c.mcp)
+            .unwrap_or_else(|| panic!("no MCP access for {slug}"))
+            .token
+    }
+
+    /// Call a tool as the session of `slug`.
+    pub fn tool(&self, slug: &str, name: &str, args: serde_json::Value) -> ToolResult {
+        call_tool_with(self.tower.mcp_url(), &self.token_of(slug), name, args)
+    }
+
+    /// Add an employee (a Claude employee with the default policy) to the floor.
+    pub fn add_employee(&self, slug: &str, manager: Option<&str>) {
+        self.tower
+            .employee_save(
+                &self.cwd,
+                Employee {
+                    name: slug.to_uppercase(),
+                    slug: slug.to_owned(),
+                    role: format!("Role of {slug}"),
+                    manager: manager.map(str::to_owned),
+                    cli: CliKind::Claude,
+                    model: None,
+                    effort: None,
+                    permission: PermissionPolicy::ReadOnly,
+                    role_text: format!("Role text of {slug}."),
+                },
+            )
+            .expect("save the employee");
+    }
+
+    /// Wait until the live session of `slug` is idle after its first turn. Returns its ID.
+    pub fn live_idle(&self, slug: &str) -> String {
+        let id = self
+            .calls()
+            .into_iter()
+            .rev()
+            .find(|c| c.slug == slug && c.cwd == self.cwd)
+            .map(|c| c.app_session_id)
+            .expect("a session of the employee");
+        self.wait_first_turn(&id);
+        id
+    }
+
+    /// The paste that the session got, with the text of the paste only.
+    pub fn paste_text(&self, id: &str) -> Option<String> {
+        let record = String::from_utf8_lossy(&self.record(id)).into_owned();
+        let start = record.find("\u{1b}[200~")?;
+        let end = record.rfind("\u{1b}[201~")?;
+        Some(record[start + 6..end].to_owned())
+    }
 }

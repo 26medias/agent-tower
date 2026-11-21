@@ -10,7 +10,7 @@ use commands::{Shared, WriteQueues};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
-use tower_core::app::{Observer, SessionView, Tower, TowerConfig};
+use tower_core::app::{EmployeeStarted, Observer, SessionView, Tower, TowerConfig};
 
 /// Sends the changes of the Tower to all windows as Tauri events.
 struct TauriObserver<R: Runtime> {
@@ -24,6 +24,12 @@ impl<R: Runtime> Observer for TauriObserver<R> {
             session: session.into(),
         };
         let _ = self.app.emit("session-changed", payload);
+    }
+
+    fn employee_started(&self, path: &Path, event: &EmployeeStarted) {
+        let _ = self
+            .app
+            .emit("employee-started", views::EmployeeStarted::new(path, event));
     }
 
     fn floor_changed(&self, path: &Path) {

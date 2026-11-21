@@ -62,6 +62,34 @@ pub struct Programs {
     pub node: Option<PathBuf>,
 }
 
+/// The name of the MCP server of the app, in the configuration of each CLI. The tools show as
+/// `mcp__tower__<tool>` in Claude.
+pub const MCP_SERVER_NAME: &str = "tower";
+
+/// The environment variable that holds the token of a session. Neither CLI gets the token in an
+/// argument: Claude expands `${TOWER_MCP_TOKEN}` in the header, and Codex reads the variable
+/// named by `bearer_token_env_var`.
+pub const MCP_TOKEN_ENV: &str = "TOWER_MCP_TOKEN";
+
+/// How a session reaches the MCP server of the app (spec 4.4).
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpAccess {
+    /// For example `http://127.0.0.1:41234/mcp`.
+    pub url: String,
+    /// The secret of this one session. It is never part of a log text or an error text.
+    pub token: String,
+}
+
+impl std::fmt::Debug for McpAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token stays out of every debug text.
+        f.debug_struct("McpAccess")
+            .field("url", &self.url)
+            .field("token", &"<hidden>")
+            .finish()
+    }
+}
+
 /// All that an adapter needs to start or resume one session.
 #[derive(Debug, Clone)]
 pub struct StartContext {
@@ -85,6 +113,8 @@ pub struct StartContext {
     pub rows: u16,
     pub cols: u16,
     pub log: Option<LogConfig>,
+    /// The MCP server of the app for this session. `None` for the setup session.
+    pub mcp: Option<McpAccess>,
 }
 
 /// What to start, and what the app learns at once.
@@ -230,6 +260,11 @@ fn make_spec(ctx: &StartContext, program: &Path, args: Vec<OsString>) -> Result<
             ctx.socket.clone().into_os_string(),
         ),
     ];
+    let mut extra = extra.to_vec();
+    if let Some(mcp) = &ctx.mcp {
+        check_no_nul("the MCP token", &mcp.token)?;
+        extra.push((OsString::from(MCP_TOKEN_ENV), OsString::from(&mcp.token)));
+    }
     let env = build_env(&ctx.parent_env, &extra, &path_dirs)?;
     Ok(SpawnSpec {
         program: program.to_path_buf(),

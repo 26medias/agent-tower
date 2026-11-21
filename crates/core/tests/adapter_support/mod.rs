@@ -72,6 +72,7 @@ pub fn fixed_ctx(cli: CliKind, policy: PermissionPolicy) -> StartContext {
         rows: 40,
         cols: 120,
         log: None,
+        mcp: None,
     }
 }
 

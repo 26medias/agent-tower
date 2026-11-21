@@ -67,6 +67,12 @@ export interface MockControl {
     output(sessionId: string, text: string): void;
     /** End the status `starting` at once. */
     leaveStarting(sessionId: string): void;
+    /**
+     * An employee starts another employee, as the tool `employee_start` does in the real app:
+     * the session starts, `session-changed` follows, then `employee-started`. Returns the new
+     * session ID.
+     */
+    employeeStart(path: string, bySlug: string, slug: string): string;
 }
 
 const config = (): MockConfig => ((globalThis as Record<string, unknown>).__towerMockConfig ?? {}) as MockConfig;
@@ -805,6 +811,23 @@ export function createMockBackend(): Backend {
         leaveStarting(sessionId) {
             const s = sessionById(sessionId);
             if (s.view.status === "starting") setStatus(s, s.view.slug === SETUP_SLUG ? "working" : "idle");
+        },
+        employeeStart(path, bySlug, slug) {
+            const floor = floorOf(path);
+            const by = floor.employees.find((e) => e.slug === bySlug);
+            const target = floor.employees.find((e) => e.slug === slug);
+            if (!by || !target) throw `unknown employee ${by ? slug : bySlug}`;
+            const view = startSession(path, slug);
+            emit("employee-started", {
+                path,
+                sessionId: view.sessionId,
+                slug,
+                name: target.name,
+                bySlug,
+                byName: by.name,
+                resumed: false,
+            });
+            return view.sessionId;
         },
     } satisfies MockControl;
 

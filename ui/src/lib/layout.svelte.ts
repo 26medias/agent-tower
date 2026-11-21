@@ -52,7 +52,9 @@ class Layout {
     officeRangeNow = $derived(officeRange(this.space));
     officeH = $derived(resolveSize(this.custom.office, defaultOffice(this.winH), this.officeRangeNow));
     infoRangeNow = $derived(infoRange(this.workW));
-    infoW = $derived(resolveSize(this.custom.info, defaultInfo(this.workW, defaultOffice(this.winH)), this.infoRangeNow));
+    // The default width follows the REAL height of the office (`officeH`), so a taller office gives
+    // the room a wider box. A width that the operator set by hand (`custom.info`) is kept as it is.
+    infoW = $derived(resolveSize(this.custom.info, defaultInfo(this.workW, this.officeH), this.infoRangeNow));
 
     constructor() {
         this.custom = read();

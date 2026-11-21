@@ -1177,6 +1177,52 @@ try {
     await page.waitForTimeout(60);
     check("a double click resets the info panel to 456 px", (await infoW()) === 456, String(await infoW()));
 
+    // 16c2. The room follows the height of the office while the operator has not set the info
+    // width by hand. Measured before the repair (1280 x 800, office dragged to 585 px): the room
+    // picture stayed 503 x 335, because the default info width came from the DEFAULT office height.
+    {
+        const roomArt = async () => {
+            const b = await page.locator(".office .room svg > image").boundingBox();
+            return { w: Math.round(b.width), h: Math.round(b.height) };
+        };
+        await page.locator(H_OFFICE).dblclick();
+        await page.waitForTimeout(150);
+        const before = await roomArt();
+        await drag(H_OFFICE, 0, 130);
+        await page.waitForTimeout(150);
+        const taller = await roomArt();
+        const infoTaller = await infoW();
+        check(
+            "the room picture is larger after the office is dragged taller",
+            taller.w >= before.w + 100 && taller.h >= before.h + 60,
+            `before ${JSON.stringify(before)}, office ${await officeH()}, after ${JSON.stringify(taller)}`,
+        );
+        check(
+            "the room picture keeps its 3:2 shape",
+            Math.abs(taller.w / taller.h - 1.5) < 0.02,
+            JSON.stringify(taller),
+        );
+        check(
+            "the info panel takes the rest, and it keeps at least 300 px",
+            infoTaller >= 300 && infoTaller < 456,
+            `info ${infoTaller}`,
+        );
+        await page.screenshot({ path: join(resizeShots, "5b-room-follows-office.png") });
+        // A width that the operator sets by hand stays when the office changes.
+        await drag(H_INFO, -40, 0);
+        const byHand = await infoW();
+        await drag(H_OFFICE, 0, -100);
+        check(
+            "an info width that the operator set by hand stays when the office height changes",
+            byHand !== infoTaller && (await infoW()) === byHand,
+            `by hand ${byHand}, then ${await infoW()}`,
+        );
+        await page.locator(H_OFFICE).dblclick();
+        await page.locator(H_INFO).dblclick();
+        await page.waitForTimeout(100);
+        check("the default sizes come back after two double clicks", (await officeH()) === 336 && (await infoW()) === 456, `${await officeH()} ${await infoW()}`);
+    }
+
     // 16d. The building and the room stay inside their containers.
     const inside = (inner, outer, tol = 1) =>
         inner.left >= outer.left - tol && inner.right <= outer.right + tol && inner.top >= outer.top - tol && inner.bottom <= outer.bottom + tol;
@@ -1276,9 +1322,13 @@ try {
     await drag(H_OFFICE, 0, -50);
     await drag(H_INFO, 60, 0);
     const mine = { col: await colW(), office: await officeH(), info: await infoW() };
-    check("the three sizes changed by the drags", mine.col === 280 && mine.office === 286 && mine.info === 556, JSON.stringify(mine));
+    // The info width before the drag is the default for the REAL office height (286 px): the work
+    // area is 1000 px wide, the room box is 1.5 x 286 = 429 px, and the info panel is 571 px.
+    // With the drag of 60 px it is 631 px. (Before the repair the default came from the default
+    // office height, and the result was 556 px.)
+    check("the three sizes changed by the drags", mine.col === 280 && mine.office === 286 && mine.info === 631, JSON.stringify(mine));
     const storedText = await page.evaluate(() => localStorage.getItem("agent-tower:layout"));
-    check("the sizes are in localStorage", storedText === JSON.stringify({ col: 280, office: 286, info: 556 }), String(storedText));
+    check("the sizes are in localStorage", storedText === JSON.stringify({ col: 280, office: 286, info: 631 }), String(storedText));
     await page.reload();
     await page.waitForSelector(".storey.on");
     await page.waitForTimeout(400);
@@ -1498,6 +1548,53 @@ try {
     await page.evaluate((id) => window.__towerMock.leaveStarting(id), await sid());
     await page.waitForSelector("[data-starting]", { state: "detached" });
     check("no session was stopped by the app during the whole wait", (await calls("session_stop")).length === stopsBeforeStuck);
+
+    // 18. A session that an employee starts (the tool employee_start of the real app): the UI did
+    // not call session_start. It must show as a tab with a status, show the status on the
+    // character and in the list, keep the active tab, and show one toast.
+    {
+        await setMock({ startCallMs: 0, startingMs: 600_000 });
+        const startsBefore = (await calls("session_start")).length;
+        const activeBefore = await sid();
+        const tabsBefore = await page.locator(".tab").count();
+        const target = await page.evaluate(() =>
+            [...document.querySelectorAll(".emp")].find((g) => g.dataset.status === "stopped")?.dataset.slug,
+        );
+        const targetName = await page.evaluate((slug) => document.querySelector(`.tag[data-slug="${slug}"] .tag-name`)?.textContent ?? slug, target);
+        const newId = await page.evaluate((slug) => window.__towerMock.employeeStart("/home/demo/tower", "pm", slug), target);
+        await page.waitForSelector(`.tab[data-session="${newId}"]`);
+        check("a session that an employee started gets a tab", (await page.locator(".tab").count()) === tabsBefore + 1);
+        check(
+            "the UI made no session_start call for it",
+            (await calls("session_start")).length === startsBefore,
+        );
+        check(
+            "the tab shows the status starting",
+            (await page.locator(`.tab[data-session="${newId}"] .dot`).getAttribute("data-status")) === "starting",
+        );
+        check(
+            "the character of that employee shows a live status in the room",
+            (await emp(target).getAttribute("data-status")) === "starting",
+            (await emp(target).getAttribute("data-status")) ?? "",
+        );
+        const rowStatus = await page.evaluate(
+            (slug) => document.querySelector(`.roster .row[data-slug="${slug}"] [data-status]`)?.getAttribute("data-status") ?? "none",
+            target,
+        );
+        check("the employee list shows the same status", rowStatus === "starting", rowStatus);
+        check("the active tab did not change", (await sid()) === activeBefore && (await page.locator(".tab.active").getAttribute("data-session")) === activeBefore);
+        const toast = page.locator('.toast[data-kind="info"]');
+        await toast.first().waitFor();
+        check("one toast says who started whom", (await toast.count()) === 1 && (await toast.innerText()).replace(/\s+/g, " ").trim().startsWith(`Maya started ${targetName}`), `target=${JSON.stringify(targetName)} count=${await toast.count()} ` + (await toast.allInnerTexts().then((t) => JSON.stringify(t))));
+        check("the notice toast is not an alert", (await toast.getAttribute("role")) === "status");
+        await page.evaluate((id) => window.__towerMock.leaveStarting(id), newId);
+        await page.waitForSelector(`.tab[data-session="${newId}"] .dot[data-status="idle"]`);
+        check("the status of the new tab follows session-changed", true);
+        // A click on its tab is the only thing that moves the focus.
+        await page.locator(`.tab[data-session="${newId}"]`).click();
+        await page.waitForSelector(`.tab.active[data-session="${newId}"]`);
+        check("the operator can open the new tab", (await sid()) === newId);
+    }
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

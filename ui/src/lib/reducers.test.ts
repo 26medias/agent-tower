@@ -4,6 +4,7 @@ import {
     applySessionChanged,
     dismissTab,
     emptySessionState,
+    employeeStartedText,
     pickActive,
     questionCount,
     sessionOf,
@@ -159,5 +160,39 @@ describe("floor view and tabs", () => {
         expect(pickActive(tabs, "zzz")).toBe("a");
         expect(pickActive(tabs, "a", "b")).toBe("b");
         expect(pickActive([], "a")).toBeNull();
+    });
+});
+
+describe("a session that an employee started (the UI did not start it)", () => {
+    it("gets a tab from the first session-changed, with its status", () => {
+        let s = applySessionChanged(emptySessionState, { path: P, session: session({ sessionId: "ops", status: "idle" }) });
+        // The event of a session that the UI never saw before. It is `starting`.
+        s = applySessionChanged(s, { path: P, session: session({ sessionId: "emp", slug: "eng", status: "starting" }) });
+        expect(tabSessions(s).map((t) => t.sessionId).sort()).toEqual(["emp", "ops"]);
+        expect(sessionOf(s, P, "eng")).toMatchObject({ sessionId: "emp", status: "starting" });
+        s = applySessionChanged(s, { path: P, session: session({ sessionId: "emp", slug: "eng", status: "working" }) });
+        expect(sessionOf(s, P, "eng")?.status).toBe("working");
+    });
+
+    it("does not move the active tab: the tab that the operator has open stays", () => {
+        let s = applySessionChanged(emptySessionState, { path: P, session: session({ sessionId: "ops", status: "idle" }) });
+        const before = pickActive(tabSessions(s), "ops");
+        s = applySessionChanged(s, { path: P, session: session({ sessionId: "emp", slug: "eng", status: "starting" }) });
+        // The store keeps the ID of the active tab. A new tab changes only the list.
+        expect(pickActive(tabSessions(s), before)).toBe("ops");
+        expect(pickActive(tabSessions(s), "ops", null)).toBe("ops");
+    });
+
+    it("a new session of an employee replaces its old stopped one, and the tab list follows", () => {
+        let s = applySessionChanged(emptySessionState, {
+            path: P,
+            session: session({ sessionId: "old", slug: "eng", status: "stopped", canResume: true }),
+        });
+        s = applySessionChanged(s, { path: P, session: session({ sessionId: "new", slug: "eng", status: "starting" }) });
+        expect(tabSessions(s).map((t) => t.sessionId)).toEqual(["new"]);
+    });
+
+    it("the toast text names who started whom", () => {
+        expect(employeeStartedText({ byName: "Tomas", name: "Kenji" })).toBe("Tomas started Kenji");
     });
 });

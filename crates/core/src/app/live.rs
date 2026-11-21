@@ -64,7 +64,7 @@ pub(crate) fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn warn(message: &str) {
+pub(crate) fn warn(message: &str) {
     eprintln!("agent-tower: {message}");
 }
 
@@ -92,6 +92,12 @@ impl Notifier {
     pub fn floor_changed(&self, path: &Path) {
         if let Some(observer) = self.get() {
             observer.floor_changed(path);
+        }
+    }
+
+    pub fn employee_started(&self, path: &Path, event: &super::EmployeeStarted) {
+        if let Some(observer) = self.get() {
+            observer.employee_started(path, event);
         }
     }
 }
@@ -127,7 +133,20 @@ pub(crate) struct Live {
     /// Setup session only. The status thread runs it after a turn ended (the status went from
     /// `working` to `idle` or `done`) and after the stop, with no lock of the session held.
     after_turn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The status thread calls it after each status change (after the observer was told), with
+    /// no lock held. The Tower uses it to deliver waiting messages and to drop the MCP token.
+    on_status: Option<StatusHook>,
+    /// A `working` status was seen in this run of the process. Before that, an `idle` is only the
+    /// start of the CLI, and the first message is about to begin a turn. A session that started
+    /// with no first message (an operator resume) has no first turn, so its first `idle` sets it
+    /// too (`run_status`).
+    worked: AtomicBool,
+    /// The session started with a first message. See `worked`.
+    has_first_message: bool,
 }
+
+/// See `Live::on_status`.
+pub(crate) type StatusHook = Arc<dyn Fn(&Live, Status) + Send + Sync>;
 
 /// What `Live::new` needs.
 pub(crate) struct LiveParts {
@@ -143,6 +162,10 @@ pub(crate) struct LiveParts {
     pub attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Setup session only. See `Live::after_turn`.
     pub after_turn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// See `Live::on_status`.
+    pub on_status: Option<StatusHook>,
+    /// The session started with a first message. See `Live::worked`.
+    pub has_first_message: bool,
 }
 
 impl Live {
@@ -166,7 +189,21 @@ impl Live {
             notifier: parts.notifier,
             attach_pause: parts.attach_pause,
             after_turn: parts.after_turn,
+            on_status: parts.on_status,
+            worked: AtomicBool::new(false),
+            has_first_message: parts.has_first_message,
         })
+    }
+
+    /// A turn ran in this run of the process (a `working` status was seen).
+    pub fn worked(&self) -> bool {
+        self.worked.load(Ordering::SeqCst)
+    }
+
+    fn run_on_status(&self, status: Status) {
+        if let Some(hook) = &self.on_status {
+            hook(self, status);
+        }
     }
 
     pub fn exited(&self) -> bool {
@@ -359,6 +396,7 @@ fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) 
             *locked(&live.reported) = Status::Stopped;
             router.unsubscribe(&live.id);
             live.refresh();
+            live.run_on_status(Status::Stopped);
             // The process has ended. This frees the PTY handles and does not wait.
             live.release_process();
             live.run_after_turn();
@@ -366,10 +404,16 @@ fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) 
         }
         if change.new == Status::Working {
             live.had_turn.store(true, Ordering::SeqCst);
+            live.worked.store(true, Ordering::SeqCst);
             working = true;
+        } else if change.new == Status::Idle && !live.has_first_message {
+            // No first message, so no first turn is coming: this `idle` is the CLI that waits
+            // for its first prompt (after `SessionStart`), and a message can be pasted now.
+            live.worked.store(true, Ordering::SeqCst);
         }
         *locked(&live.reported) = change.new;
         live.refresh();
+        live.run_on_status(change.new);
         if matches!(change.new, Status::Idle | Status::Done) && working {
             working = false;
             live.run_after_turn();
