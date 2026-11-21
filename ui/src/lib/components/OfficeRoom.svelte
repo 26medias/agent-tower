@@ -7,11 +7,15 @@
         STATUS_COLOR,
         STATUS_GLYPH,
         TAG_FONT,
+        TAG_ROLE_FONT,
+        TAG_ROLE_MAX_EMPLOYEES,
         layoutOffice,
         readableTagScale,
+        roleColor,
         spriteFor,
+        tagBoxWidth,
         tagLabel,
-        tagWidth,
+        tagRole,
         tagY,
     } from "$lib/office-layout";
     import { store } from "$lib/store.svelte";
@@ -19,6 +23,7 @@
 
     const employees = $derived(store.orderedEmployees);
     const layout = $derived(layoutOffice(employees.length));
+    const showRole = $derived(employees.length <= TAG_ROLE_MAX_EMPLOYEES);
     const selectedSlug = $derived(store.selectedEmployee?.slug ?? null);
 
     // Screen pixels for one SVG unit. The tag text never gets smaller than 10 px on the screen.
@@ -87,8 +92,9 @@
                 {@const status = statusOf(emp.slug)}
                 {@const color = STATUS_COLOR[status]}
                 {@const label = tagLabel(emp.name)}
-                {@const w = tagWidth(label)}
-                {@const gx = -w / 2 + 24}
+                {@const role = showRole ? tagRole(emp.role) : ""}
+                {@const w = tagBoxWidth(label, role)}
+                {@const gx = -(58 + [...label].length * 17) / 2 + 24}
                 <g
                     class="tag"
                     data-slug={emp.slug}
@@ -98,7 +104,10 @@
                 >
                     <g class="bubble {status}">
                         <polygon points="-8,18 8,18 0,30" fill="#0b111c" />
-                        <rect x={-w / 2} y="-20" width={w} height="40" rx="10" fill="#0b111c" stroke={color} stroke-width="4" />
+                        <rect x={-w / 2} y={showRole ? -46 : -20} width={w} height={showRole ? 66 : 40} rx="10" fill="#0b111c" stroke={color} stroke-width="4" />
+                        {#if showRole}
+                            <text class="tag-role" x="0" y="-20" text-anchor="middle" font-size={TAG_ROLE_FONT} fill={roleColor(emp.role)}>{role}</text>
+                        {/if}
                         {#if status === "working" || status === "starting"}
                             {#each [-9, 0, 9] as dx, i (dx)}
                                 <circle class="d d{i + 1}" cx={gx + dx} cy="0" r="3.5" fill={color} />

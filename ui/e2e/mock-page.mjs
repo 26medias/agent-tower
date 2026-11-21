@@ -203,6 +203,13 @@ try {
     await page.waitForTimeout(350);
     check("the overlay is back to dim when the pointer leaves", approx(await shade("/home/demo/second"), 0.5));
     check("the name tag shows the name", (await page.locator('.tag[data-slug="ceo"] .tag-name').textContent()) === "Ada");
+    check("the name tag shows the job title", (await page.locator('.tag[data-slug="ceo"] .tag-role').textContent()) === "CEO");
+    check(
+        "the employee list shows the name and the job title of each employee",
+        (await page.locator('.roster .row[data-slug="ceo"]').innerText()).replace(/\s+/g, " ").trim() === "Ada CEO" &&
+            (await page.locator('.roster .row[data-slug="pm"] .r-role').innerText()) === "Project Manager" &&
+            (await page.locator(".roster .row").count()) === (await page.locator(".emp").count()),
+    );
     check("mock badge shown", await page.locator(".mock").isVisible());
     check("the debug area is collapsed", (await page.locator("details.debug-area[open]").count()) === 0);
     const box1280 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox() };
@@ -254,6 +261,14 @@ try {
     check("with 13 employees the centre of each character reaches that character (or its tag)", covered.length === 0, covered.join(","));
     const textH = await page.evaluate(() => document.querySelector(".tag .tag-name").getBoundingClientRect().height);
     check("with 13 employees the name text is readable (at least 8 px tall on the screen)", textH >= 8, `text box height ${textH.toFixed(1)} px`);
+    check("with 13 employees the tags have no job title line", (await page.locator(".tag .tag-role").count()) === 0);
+    check("with 13 employees the employee list has 13 rows", (await page.locator(".roster .row").count()) === 13);
+    await page.locator('.roster .row[data-slug="des-2"]').click();
+    check(
+        "a click on a row of the employee list selects that employee",
+        (await page.locator(".bar").getAttribute("data-slug")) === "des-2" &&
+            (await page.locator('.emp[data-slug="des-2"]').getAttribute("aria-pressed")) === "true",
+    );
     check("a long name in the tag is cut", (await page.locator('.tag[data-slug="des-2"] .tag-name').textContent()).endsWith("…"));
     await page.screenshot({ path: shot.replace(/\.png$/, "-13.png") });
     await clickStorey("/home/demo/tower");

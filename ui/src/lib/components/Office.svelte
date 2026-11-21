@@ -5,6 +5,7 @@
     import EmployeeBar from "./EmployeeBar.svelte";
     import OfficeHeader from "./OfficeHeader.svelte";
     import OfficeRoom from "./OfficeRoom.svelte";
+    import Roster from "./Roster.svelte";
 
     let { onedit, onadd }: { onedit: (employee: Employee) => void; onadd: () => void } = $props();
 
@@ -15,6 +16,7 @@
     <div class="info">
         <OfficeHeader />
         <EmployeeBar {onedit} {onadd} />
+        <Roster />
     </div>
     <div class="room">
         <OfficeRoom />

@@ -179,6 +179,33 @@ export function tagWidth(label: string): number {
     return 58 + [...label].length * 17;
 }
 
+const TAG_ROLE_MAX = 16;
+
+/** Font size of the role line before scaling, in SVG units. */
+export const TAG_ROLE_FONT = 20;
+
+/** The tags show the role line up to this number of employees. Above it, taller tags cover the characters. */
+export const TAG_ROLE_MAX_EMPLOYEES = 8;
+
+/** The job title in the tag, in capitals. A long title is cut. */
+export function tagRole(role: string): string {
+    const chars = [...role.trim().toUpperCase()];
+    return chars.length > TAG_ROLE_MAX ? chars.slice(0, TAG_ROLE_MAX - 1).join("") + "…" : chars.join("");
+}
+
+/** Width of the tag for the name label and the role line: the wider of the two. */
+export function tagBoxWidth(label: string, role: string): number {
+    return Math.max(tagWidth(label), 28 + [...role].length * 14.5);
+}
+
+/** Colour of the role line. The CEO and the Project Manager have their own colour. */
+export function roleColor(role: string): string {
+    const r = role.trim().toLowerCase();
+    if (r === "ceo") return "#ffd166";
+    if (r === "project manager") return "#7cc4ff";
+    return "#9fb0cc";
+}
+
 /** Scale of the tag from the scale of the desk (the prototype rule). */
 export function tagScale(k: number): number {
     return Math.max(0.72, Math.min(1, k / 0.3));

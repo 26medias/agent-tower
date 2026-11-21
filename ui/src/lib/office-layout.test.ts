@@ -13,7 +13,10 @@ import {
     spriteFor,
     stickerTransform,
     storeyY,
+    roleColor,
+    tagBoxWidth,
     tagLabel,
+    tagRole,
     tagScale,
     tagWidth,
     tagY,
@@ -192,5 +195,25 @@ describe("name tags", () => {
     it("puts the tag above the head", () => {
         const [p] = layoutOffice(1).placements;
         expect(tagY(p, 1)).toBeLessThan(p.fy - p.ah);
+    });
+});
+
+describe("role line of the tag", () => {
+    it("shows the job title in capitals and cuts a long title", () => {
+        expect(tagRole(" Project Manager ")).toBe("PROJECT MANAGER");
+        const cut = tagRole("Senior Database Reliability Engineer");
+        expect([...cut].length).toBe(16);
+        expect(cut.endsWith("…")).toBe(true);
+    });
+
+    it("makes the tag as wide as the wider line", () => {
+        expect(tagBoxWidth("Ada", "CEO")).toBe(tagWidth("Ada"));
+        expect(tagBoxWidth("Ada", "PROJECT MANAGER")).toBeGreaterThan(tagWidth("Ada"));
+    });
+
+    it("gives the CEO and the Project Manager their own colour", () => {
+        const colors = new Set([roleColor("CEO"), roleColor("project manager"), roleColor("Engineer")]);
+        expect(colors.size).toBe(3);
+        expect(roleColor("QA")).toBe(roleColor("Engineer"));
     });
 });
