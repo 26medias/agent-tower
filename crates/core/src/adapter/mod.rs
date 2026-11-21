@@ -6,7 +6,8 @@
 //!
 //! Rules that both adapters follow:
 //! - The program is an absolute path. The environment comes from `build_env` with `TOWER_SESSION`
-//!   and `TOWER_SOCKET`, and a PATH of `/usr/bin:/bin` plus the folders of the programs.
+//!   and `TOWER_SOCKET`. The PATH is the folders of the programs, then the parent PATH, then
+//!   `/usr/bin:/bin`.
 //! - The hook command text is the absolute path of `tower-hook` and nothing more. It is the same
 //!   text for each session and each event. The identity of the session goes in the environment
 //!   (spec 4.2, "Codex hook trust"). A path with a character that a shell would change is put in
@@ -74,8 +75,8 @@ pub struct StartContext {
     /// Absolute path of `tower-hook`.
     pub hook_program: PathBuf,
     pub programs: Programs,
-    /// The environment of the app. `build_env` copies the allow-list from it. The caller gives
-    /// `env::current_env()`; tests give a fixed map.
+    /// The parent environment of the session. `build_env` copies it, minus the names that stay
+    /// out. The app gives the login shell environment over its own; tests give a fixed map.
     pub parent_env: EnvMap,
     /// Becomes the last positional argument of the CLI.
     pub first_message: Option<String>,

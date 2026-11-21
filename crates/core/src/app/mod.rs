@@ -45,6 +45,7 @@ use crate::adapter::{
 };
 use crate::env::{EnvMap, current_env};
 use crate::hookrx::HookReceiver;
+use crate::login_env::{LoginEnvSource, SessionEnv};
 use crate::logo::{DEFAULT_API_BASE, REQUEST_TIMEOUT};
 use crate::model::{CliKind, Employee, FloorDefaults, PermissionPolicy, SessionRecord};
 use crate::programs::Resolver;
@@ -243,8 +244,14 @@ pub struct TowerConfig {
     pub resolver: Resolver,
     /// The adapters. Tests give an adapter that starts `fake-cli`.
     pub adapters: AdapterFactory,
-    /// The environment that the allow-list is copied from.
+    /// The environment of the app. The login shell environment goes over it (see `login_env`),
+    /// and the result is the parent environment of each session. The logo generation reads
+    /// `OPENAI_API_KEY` from this map only.
     pub parent_env: EnvMap,
+    /// Where the login shell environment comes from. The default runs `$SHELL -lic` one time, in
+    /// a thread, when the `Tower` is made. Tests give `LoginEnvSource::Fixed(..)`, so that no real
+    /// shell runs.
+    pub login_env: LoginEnvSource,
     /// The size limit of each PTY log file.
     pub log_limit: u64,
     /// The base URL of the image API. Tests give the URL of a local fake server.
@@ -269,6 +276,7 @@ impl TowerConfig {
             resolver: Resolver::from_env(),
             adapters: real_adapters(),
             parent_env: current_env(),
+            login_env: LoginEnvSource::from_env(),
             log_limit: LOG_LIMIT_BYTES,
             image_api_base: DEFAULT_API_BASE.to_owned(),
             logo_timeout: REQUEST_TIMEOUT,
@@ -358,7 +366,8 @@ pub struct Tower {
     registry: Arc<Mutex<Registry>>,
     notifier: Arc<Notifier>,
     adapters: AdapterFactory,
-    parent_env: EnvMap,
+    /// The parent environment of the sessions: the login shell environment over the app one.
+    session_env: SessionEnv,
     log_limit: u64,
     logo_env: Arc<LogoEnv>,
     /// The Codex home folder, or `None` when it is not known (the built-in Codex list is used).
@@ -434,7 +443,7 @@ impl Tower {
             registry: Arc::new(Mutex::new(Registry::default())),
             notifier: Arc::new(Notifier::default()),
             adapters: config.adapters,
-            parent_env: config.parent_env,
+            session_env: SessionEnv::start(config.parent_env, config.login_env),
             log_limit: config.log_limit,
             logo_env,
             codex_home,
@@ -946,7 +955,7 @@ impl Tower {
             socket: self.socket.clone(),
             hook_program,
             programs,
-            parent_env: self.parent_env.clone(),
+            parent_env: self.session_env.get(),
             first_message,
             rows: rows.max(1),
             cols: cols.max(1),

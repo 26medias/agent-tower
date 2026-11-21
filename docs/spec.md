@@ -106,8 +106,14 @@ An employee exists in the database when it has no session. A session is started 
 Rule: only the direct manager chain and the operator can start or stop an employee.
 
 Start rules (from the gate 1 probes; the parts that are not probed are marked):
-- **Clean environment.** The app builds the environment of each CLI process. It does not pass its own
-  environment. An inherited `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off, and then resume has nothing to resume.
+- **Clean environment.** The app builds the environment of each CLI process. A session gets the environment of the login
+  shell of the operator, so that `cargo`, `pnpm`, `NVM_DIR`, `JAVA_HOME` and a proxy work as in a terminal. The operator asked for this
+  rule on 2026-11-20. The app runs `$SHELL -lic` one time when it starts (15 s limit), lays the result over its own environment
+  (a name from the shell wins), and copies all variables to the session. If the capture fails, the session gets the environment of the app.
+  These names stay out: `CLAUDECODE` and `CLAUDE_CODE_*`; `PWD`, `OLDPWD`, `SHLVL`, `_`; `TOWER_*`, `BASH_FUNC_*` and `TAURI_*`;
+  and `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` (a key in the environment changes
+  how the CLI logs in and who pays). `PATH` is built: the folders of the programs that the app found, then the `PATH` of the parent, then `/usr/bin`
+  and `/bin`. `TERM` is `xterm-256color` when the parent has none. An inherited `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off, and then resume has nothing to resume.
 - **Working folder and programs.** The app always sets the working folder of the process (the PTY library starts in `$HOME` by default, PROBED at gate 2).
   The app starts `claude`, `codex`, `node` and its hook program by absolute path, because a desktop PATH does not contain them (PROBED at gate 2).
 - **Session ID.** Claude: the app makes a UUID and gives it with `--session-id`. Codex: no flag sets the ID. The app reads it

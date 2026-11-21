@@ -1,12 +1,21 @@
-//! Clean environment for a CLI process (spec 4.2, "Clean environment").
+//! Environment of a CLI process (spec 4.2, "Clean environment").
 //!
-//! The app never passes its own environment to a CLI. `build_env` makes a new map from an
-//! allow-list of the parent environment, plus the values that the caller gives. It is a pure
-//! function: it reads no process state, so tests give it maps.
+//! `build_env` makes a new map for each CLI process. It copies all variables of the parent
+//! environment, except a short list of names (see below). The parent is the environment of the
+//! login shell of the operator, laid over the environment of the app (`login_env`). So a session
+//! sees what the operator sees in a terminal: `cargo`, `pnpm`, `NVM_DIR`, `JAVA_HOME`, a proxy.
+//! The operator asked for this rule on 2026-11-20. Before that, the app copied an allow-list only.
 //!
-//! An inherited `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off in Claude, and then
-//! resume has nothing to resume. The names `CLAUDECODE` and `CLAUDE_CODE_*` are therefore
-//! never in the result.
+//! These names never reach a session:
+//! - `CLAUDECODE` and `CLAUDE_CODE_*`. An inherited `CLAUDE_CODE_CHILD_SESSION` turns transcript
+//!   saving off in Claude, and then resume has nothing to resume.
+//! - `PATH` (built by `build_env`), `PWD`, `OLDPWD`, `SHLVL`, `_`: they describe the shell or the
+//!   process of the app, not the session.
+//! - `TOWER_*`, `BASH_FUNC_*`, `TAURI_*`: they belong to the app, to exported shell functions,
+//!   or to the Tauri runtime. `TOWER_SESSION` and `TOWER_SOCKET` come from the caller in `extra`.
+//! - The API keys and base URLs in `CREDENTIAL_NAMES`.
+//!
+//! It is a pure function: it reads no process state, so tests give it maps.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -16,28 +25,39 @@ use std::path::PathBuf;
 /// An environment: variable name to value.
 pub type EnvMap = BTreeMap<OsString, OsString>;
 
-/// The first folders of the PATH of each session.
+/// The last folders of the PATH of each session.
 pub const BASE_PATH_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
 
 /// The value of `TERM` when the parent has none.
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
-/// Names that are copied from the parent when they are present.
-const ALLOWED_NAMES: [&str; 10] = [
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "LANG",
-    "TERM",
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "SSH_AUTH_SOCK",
+/// API keys and base URLs that a session does not inherit.
+///
+/// Reason: a key in the environment changes how the CLI logs in, and who pays. Claude Code uses
+/// `ANTHROPIC_API_KEY` instead of the subscription of the operator. A base URL sends the traffic
+/// to another server. The operator can change this rule here. (`CODEX_HOME` is not in the list:
+/// it only says where the Codex files are.) The `extra` values of the caller can still set them.
+const CREDENTIAL_NAMES: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
 ];
 
-/// Prefixes of names that are copied from the parent.
-const ALLOWED_PREFIXES: [&str; 2] = ["LC_", "XDG_"];
+/// Other names that are not copied from the parent.
+const EXCLUDED_NAMES: [&str; 7] = [
+    "PATH",
+    "PWD",
+    "OLDPWD",
+    "SHLVL",
+    "_",
+    "TOWER_SESSION",
+    "TOWER_SOCKET",
+];
+
+/// Prefixes of names that are not copied from the parent.
+const EXCLUDED_PREFIXES: [&str; 3] = ["TOWER_", "BASH_FUNC_", "TAURI_"];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EnvError {
@@ -64,29 +84,43 @@ pub fn is_forbidden_name(name: &OsStr) -> bool {
     bytes == b"CLAUDECODE" || bytes.starts_with(b"CLAUDE_CODE_")
 }
 
-fn is_allowed_name(name: &OsStr) -> bool {
+/// True for the names that `build_env` does not copy from the parent (the forbidden names, the
+/// names that the app sets or builds, the shell state, and the credentials).
+fn is_excluded_from_parent(name: &OsStr) -> bool {
     let bytes = name.as_bytes();
-    ALLOWED_NAMES
-        .iter()
-        .any(|allowed| allowed.as_bytes() == bytes)
-        || ALLOWED_PREFIXES
+    is_forbidden_name(name)
+        || EXCLUDED_NAMES
+            .iter()
+            .chain(CREDENTIAL_NAMES.iter())
+            .any(|excluded| excluded.as_bytes() == bytes)
+        || EXCLUDED_PREFIXES
             .iter()
             .any(|prefix| bytes.starts_with(prefix.as_bytes()))
 }
 
+/// A name that no process can have: empty, or with `=` or a NUL byte.
+fn is_invalid_name(name: &OsStr) -> bool {
+    let bytes = name.as_bytes();
+    bytes.is_empty() || bytes.contains(&b'=') || bytes.contains(&0)
+}
+
 /// Make the environment of a CLI process.
 ///
-/// - Allow-list from `parent`: `HOME USER LOGNAME SHELL LANG LC_* TERM DISPLAY WAYLAND_DISPLAY
-///   XDG_* DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK`. Nothing else is copied.
+/// - All variables of `parent` are copied, except: the forbidden names (`CLAUDECODE`,
+///   `CLAUDE_CODE_*`); `PATH`, `PWD`, `OLDPWD`, `SHLVL`, `_`; `TOWER_*`, `BASH_FUNC_*`,
+///   `TAURI_*`; and the names in `CREDENTIAL_NAMES`. A name or a value that no process can have
+///   is skipped with no error: the parent is the environment of a shell, not a caller value.
 /// - `TERM` is `xterm-256color` when the parent has none (or an empty one).
-/// - `PATH` is `/usr/bin:/bin` and then `path_dirs`, in order, with no duplicates. The parent
-///   `PATH` is not copied.
+/// - `PATH` is, in this order and with no folder two times: `path_dirs` (the folders of the
+///   programs that the app resolved, so the session runs the same `claude`, `codex` and
+///   `node`), the folders of the `PATH` of `parent`, then `/usr/bin` and `/bin`. A folder of
+///   the parent `PATH` that is not absolute, or has a NUL byte, is skipped.
 /// - `extra` is added last and wins over a parent value. It carries `TOWER_SESSION`,
 ///   `TOWER_SOCKET` and the values of the adapter.
 ///
 /// Errors (and no partial result): a name in `extra` that is `CLAUDECODE` or starts with
-/// `CLAUDE_CODE_`; `PATH` in `extra`; an invalid name or value; a bad PATH folder. An error is
-/// better than a silent drop: such a value in `extra` is a bug of the caller.
+/// `CLAUDE_CODE_`; `PATH` in `extra`; an invalid name or value in `extra`; a bad folder in
+/// `path_dirs`. An error is better than a silent drop: such a value is a bug of the caller.
 pub fn build_env(
     parent: &EnvMap,
     extra: &[(OsString, OsString)],
@@ -95,9 +129,10 @@ pub fn build_env(
     let mut env = EnvMap::new();
 
     for (name, value) in parent {
-        if is_allowed_name(name) && !is_forbidden_name(name) {
-            env.insert(name.clone(), value.clone());
+        if is_invalid_name(name) || value.as_bytes().contains(&0) || is_excluded_from_parent(name) {
+            continue;
         }
+        env.insert(name.clone(), value.clone());
     }
     if env
         .get(OsStr::new("TERM"))
@@ -106,7 +141,7 @@ pub fn build_env(
         env.insert("TERM".into(), DEFAULT_TERM.into());
     }
 
-    let mut dirs: Vec<PathBuf> = BASE_PATH_DIRS.iter().map(PathBuf::from).collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
     for dir in path_dirs {
         let bytes = dir.as_os_str().as_bytes();
         if !dir.is_absolute() || bytes.contains(&b':') || bytes.contains(&0) {
@@ -116,13 +151,28 @@ pub fn build_env(
             dirs.push(dir.clone());
         }
     }
+    if let Some(parent_path) = parent.get(OsStr::new("PATH")) {
+        // `split_paths` splits at `:`, so a folder has no `:`. An empty part is not absolute.
+        for dir in std::env::split_paths(parent_path) {
+            if dir.is_absolute() && !dir.as_os_str().as_bytes().contains(&0) && !dirs.contains(&dir)
+            {
+                dirs.push(dir);
+            }
+        }
+    }
+    for base in BASE_PATH_DIRS {
+        let base = PathBuf::from(base);
+        if !dirs.contains(&base) {
+            dirs.push(base);
+        }
+    }
     let path = std::env::join_paths(&dirs)
         .map_err(|_| EnvError::InvalidPathDir(dirs.last().cloned().unwrap_or_default()))?;
     env.insert("PATH".into(), path);
 
     for (name, value) in extra {
         let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.contains(&b'=') || bytes.contains(&0) {
+        if is_invalid_name(name) {
             return Err(EnvError::InvalidName(name.clone()));
         }
         if is_forbidden_name(name) {
@@ -139,8 +189,9 @@ pub fn build_env(
     Ok(env)
 }
 
-/// The environment of this process as a map. The app calls this once and gives the result to
-/// `build_env`. Tests do not use it, except the test that runs a real CLI.
+/// The environment of this process as a map. The app calls this once. It is the base of the
+/// parent environment of the sessions (see `login_env`). Tests do not use it, except the test
+/// that runs a real CLI.
 pub fn current_env() -> EnvMap {
     std::env::vars_os().collect()
 }
@@ -168,56 +219,86 @@ mod tests {
     }
 
     #[test]
-    fn copies_only_the_allow_list() {
+    fn normal_parent_variables_are_copied() {
         let parent = map(&[
             ("HOME", "/home/a"),
             ("USER", "a"),
-            ("LOGNAME", "a"),
             ("SHELL", "/bin/zsh"),
             ("LANG", "fr_FR.UTF-8"),
             ("LC_ALL", "C"),
-            ("LC_TIME", "en_GB"),
             ("TERM", "screen"),
             ("DISPLAY", ":0"),
-            ("WAYLAND_DISPLAY", "wayland-0"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
-            ("XDG_CONFIG_HOME", "/home/a/.config"),
-            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
             ("SSH_AUTH_SOCK", "/run/user/1000/ssh"),
-            // Not allowed:
-            ("PATH", "/home/a/.nvm/bin:/usr/bin"),
-            ("AWS_SECRET_ACCESS_KEY", "secret"),
-            ("OPENAI_API_KEY", "secret"),
-            ("ANTHROPIC_API_KEY", "secret"),
-            ("PWD", "/tmp"),
+            ("CARGO_HOME", "/home/a/.cargo"),
+            ("HTTPS_PROXY", "http://proxy.example:3128"),
+            ("NVM_DIR", "/home/a/.nvm"),
+            ("JAVA_HOME", "/usr/lib/jvm/java-21"),
+            ("CODEX_HOME", "/home/a/.codex"),
+            ("AWS_PROFILE", "dev"),
             ("LCX", "not a LC_ name"),
-            ("XDG", "not an XDG_ name"),
-            ("TOWER_SESSION", "from the parent"),
+            ("TOWERISH", "not a TOWER_ name"),
         ]);
         let env = build_env(&parent, &[], &[]).unwrap();
-        let names: Vec<&str> = env.keys().filter_map(|key| key.to_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "DBUS_SESSION_BUS_ADDRESS",
-                "DISPLAY",
-                "HOME",
-                "LANG",
-                "LC_ALL",
-                "LC_TIME",
-                "LOGNAME",
-                "PATH",
-                "SHELL",
-                "SSH_AUTH_SOCK",
-                "TERM",
-                "USER",
-                "WAYLAND_DISPLAY",
-                "XDG_CONFIG_HOME",
-                "XDG_RUNTIME_DIR",
-            ]
-        );
+        for (name, value) in &parent {
+            assert_eq!(env.get(name), Some(value), "{name:?}");
+        }
+        // The copy is complete, and PATH is the only name that is added.
+        assert_eq!(env.len(), parent.len() + 1);
         assert_eq!(get(&env, "TERM"), Some("screen"));
+    }
+
+    #[test]
+    fn the_excluded_names_are_not_copied() {
+        let excluded = [
+            "PWD",
+            "OLDPWD",
+            "SHLVL",
+            "_",
+            "TOWER_SESSION",
+            "TOWER_SOCKET",
+            "TOWER_ANYTHING",
+            "BASH_FUNC_ll%%",
+            "BASH_FUNC_x()",
+            "TAURI_ENV_DEBUG",
+            "TAURI_DEV",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+        ];
+        let mut parent = map(&[("HOME", "/home/a")]);
+        for name in excluded {
+            parent.insert(name.into(), "from the parent".into());
+        }
+        let env = build_env(&parent, &[], &[]).unwrap();
+        for name in excluded {
+            assert!(!env.contains_key(OsStr::new(name)), "{name} was copied");
+        }
         assert_eq!(get(&env, "HOME"), Some("/home/a"));
+        // Each name of the two constants is excluded (the test list cannot drift from them).
+        for name in EXCLUDED_NAMES.iter().chain(CREDENTIAL_NAMES.iter()) {
+            assert!(is_excluded_from_parent(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn codex_home_is_not_a_credential() {
+        let env = build_env(&map(&[("CODEX_HOME", "/home/a/.codex")]), &[], &[]).unwrap();
+        assert_eq!(get(&env, "CODEX_HOME"), Some("/home/a/.codex"));
+    }
+
+    #[test]
+    fn extra_can_set_a_credential_name_and_a_tower_name() {
+        let env = build_env(
+            &map(&[("OPENAI_API_KEY", "from the parent")]),
+            &extra(&[("OPENAI_API_KEY", "made-up"), ("TOWER_SESSION", "s-1")]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(get(&env, "OPENAI_API_KEY"), Some("made-up"));
+        assert_eq!(get(&env, "TOWER_SESSION"), Some("s-1"));
     }
 
     #[test]
@@ -229,19 +310,31 @@ mod tests {
     }
 
     #[test]
+    fn invalid_parent_names_and_values_are_skipped_without_an_error() {
+        let mut parent = map(&[("HOME", "/home/a"), ("OK", "1")]);
+        parent.insert("".into(), "empty name".into());
+        parent.insert("A=B".into(), "equals in the name".into());
+        parent.insert(OsString::from("A\0B"), "NUL in the name".into());
+        parent.insert("NUL_VALUE".into(), OsString::from("x\0y"));
+        let env = build_env(&parent, &[], &[]).unwrap();
+        let names: Vec<&str> = env.keys().filter_map(|key| key.to_str()).collect();
+        assert_eq!(names, vec!["HOME", "OK", "PATH", "TERM"]);
+    }
+
+    #[test]
     fn claude_variables_in_the_parent_are_dropped() {
-        // None of these is in the allow-list. The test also shows that a future change of the
-        // allow-list (for example to a prefix) cannot let them through.
         let parent = map(&[
             ("HOME", "/home/a"),
             ("CLAUDE_CODE_CHILD_SESSION", "1"),
             ("CLAUDE_CODE_ENTRYPOINT", "cli"),
             ("CLAUDECODE", "1"),
+            ("CLAUDE_CODEX", "looks alike"),
         ]);
         let env = build_env(&parent, &[], &[]).unwrap();
         assert!(env.keys().all(|key| !is_forbidden_name(key)));
         assert_eq!(get(&env, "HOME"), Some("/home/a"));
-        assert!(!is_allowed_name(OsStr::new("CLAUDE_CODE_CHILD_SESSION")));
+        // A name that only looks alike is copied.
+        assert_eq!(get(&env, "CLAUDE_CODEX"), Some("looks alike"));
     }
 
     #[test]
@@ -280,21 +373,47 @@ mod tests {
     }
 
     #[test]
-    fn path_is_built_and_never_copied() {
-        let parent = map(&[("PATH", "/evil:/usr/bin")]);
+    fn path_is_the_program_folders_then_the_parent_path_then_the_base_folders() {
+        let parent = map(&[(
+            "PATH",
+            // A relative folder, an empty part, a repeat, and the base folders in the middle.
+            "/home/a/.cargo/bin:relative/bin::/home/a/.local/bin:/usr/bin:/opt/x/bin:/home/a/.cargo/bin/",
+        )]);
         let dirs = [
             PathBuf::from("/home/a/.local/bin"),
             PathBuf::from("/home/a/.nvm/versions/node/v24/bin"),
             PathBuf::from("/home/a/.local/bin"),
-            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
         ];
         let env = build_env(&parent, &[], &dirs).unwrap();
         assert_eq!(
             get(&env, "PATH"),
-            Some("/usr/bin:/bin:/home/a/.local/bin:/home/a/.nvm/versions/node/v24/bin")
+            Some(
+                "/home/a/.local/bin:/home/a/.nvm/versions/node/v24/bin:/bin:/home/a/.cargo/bin:/usr/bin:/opt/x/bin"
+            )
         );
-        let env = build_env(&parent, &[], &[]).unwrap();
+    }
+
+    #[test]
+    fn path_has_the_base_folders_last_when_nothing_else_is_there() {
+        let env = build_env(&map(&[]), &[], &[]).unwrap();
         assert_eq!(get(&env, "PATH"), Some("/usr/bin:/bin"));
+        let env = build_env(&map(&[("PATH", "/opt/a")]), &[], &[]).unwrap();
+        assert_eq!(get(&env, "PATH"), Some("/opt/a:/usr/bin:/bin"));
+        let dirs = [PathBuf::from("/opt/b")];
+        let env = build_env(&map(&[("PATH", "/opt/a")]), &[], &dirs).unwrap();
+        assert_eq!(get(&env, "PATH"), Some("/opt/b:/opt/a:/usr/bin:/bin"));
+    }
+
+    #[test]
+    fn a_parent_path_folder_with_a_nul_byte_is_skipped() {
+        let mut path = OsString::from("/opt/a:/opt/b");
+        path.push(OsStr::from_bytes(b"\0x"));
+        path.push(":/opt/c");
+        let mut parent = EnvMap::new();
+        parent.insert("PATH".into(), path);
+        let env = build_env(&parent, &[], &[]).unwrap();
+        assert_eq!(get(&env, "PATH"), Some("/opt/a:/opt/c:/usr/bin:/bin"));
     }
 
     #[test]

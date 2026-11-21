@@ -245,10 +245,21 @@ fn nvm_bin_dirs(versions: &Path) -> Vec<PathBuf> {
 
 /// Run `$SHELL -lic 'command -v <name>'` and parse the output. `None` on any failure.
 fn login_shell_lookup(shell: &OsStr, name: &str, timeout: Duration) -> Option<PathBuf> {
+    let bytes = run_login_shell(shell, &format!("command -v {name}"), timeout)?;
+    last_absolute_executable(&bytes)
+}
+
+/// Run `$SHELL -lic '<script>'` and return all that it wrote to stdout. `None` when the shell
+/// does not start, or does not end before `timeout`.
+///
+/// Safety rules: stdin is null; stderr is dropped; the shell has its own process group, and a
+/// timeout kills the whole group; a thread reads the output, so a tool that an rc file starts
+/// in the background cannot hold us.
+pub(crate) fn run_login_shell(shell: &OsStr, script: &str, timeout: Duration) -> Option<Vec<u8>> {
     let mut command = Command::new(shell);
     command
         .arg("-lic")
-        .arg(format!("command -v {name}"))
+        .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -304,7 +315,7 @@ fn login_shell_lookup(shell: &OsStr, name: &str, timeout: Duration) -> Option<Pa
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
-    last_absolute_executable(&bytes)
+    Some(bytes)
 }
 
 /// Start a command. A script that was just written can give "text file busy" for a moment,

@@ -20,6 +20,7 @@ use tauri::{Listener, WebviewWindow, WebviewWindowBuilder};
 use tower_core::adapter::{CliAdapter, SpawnPlan, StartContext};
 use tower_core::app::{Tower, TowerConfig};
 use tower_core::env::build_env;
+use tower_core::login_env::LoginEnvSource;
 use tower_core::model::CliKind;
 use tower_core::programs::Resolver;
 use tower_core::pty::SpawnSpec;
@@ -114,6 +115,8 @@ fn app() -> App {
         .iter()
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .collect();
+    // No test runs a real login shell.
+    config.login_env = LoginEnvSource::Fixed(None);
     config.adapters = Arc::new(|kind| Box::new(FakeAdapter(kind)));
     // The Codex home is a folder of the test, never the real one.
     config.codex_home = Some(base.join("codex-home"));

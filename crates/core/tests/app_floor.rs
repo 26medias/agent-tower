@@ -143,6 +143,7 @@ fn programs_overrides_are_checked_stored_and_read_by_a_new_tower() {
     let mut cfg = tower_core::app::TowerConfig::new(&rig.config);
     cfg.socket_path = Some(socket);
     cfg.hook_program = Some(bin("tower-hook"));
+    cfg.login_env = tower_core::login_env::LoginEnvSource::Fixed(None);
     cfg.resolver = tower_core::programs::Resolver {
         shell: None,
         known_dirs: vec![],

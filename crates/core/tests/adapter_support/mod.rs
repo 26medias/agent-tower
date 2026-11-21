@@ -47,8 +47,10 @@ pub fn fixed_ctx(cli: CliKind, policy: PermissionPolicy) -> StartContext {
         ("LANG", "C.UTF-8"),
         ("TERM", "xterm"),
         ("CLAUDE_CODE_CHILD_SESSION", "1"),
-        ("PATH", "/should/not/pass"),
-        ("SECRET_TOKEN", "nope"),
+        ("PATH", "/home/test/bin:/opt/cli/bin:/usr/bin"),
+        ("CARGO_HOME", "/home/test/.cargo"),
+        ("ANTHROPIC_API_KEY", "made-up-not-for-a-session"),
+        ("PWD", "/home/test"),
     ]
     .iter()
     .map(|(name, value)| (os(name), os(value)))

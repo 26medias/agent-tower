@@ -85,7 +85,11 @@ fn expected_env(session: &str) -> EnvMap {
         ("HOME", "/home/test"),
         ("LANG", "C.UTF-8"),
         ("TERM", "xterm"),
-        ("PATH", "/usr/bin:/bin:/opt/cli/bin:/opt/node/bin"),
+        ("CARGO_HOME", "/home/test/.cargo"),
+        (
+            "PATH",
+            "/opt/cli/bin:/opt/node/bin:/home/test/bin:/usr/bin:/bin",
+        ),
         ("TOWER_SESSION", session),
         ("TOWER_SOCKET", "/run/tower/hooks.sock"),
     ]
@@ -584,10 +588,16 @@ fn the_environment_is_clean_and_the_tower_values_are_set() {
         let plan = adapter_for(kind).start(&ctx).expect("plan");
         let env: &BTreeMap<OsString, OsString> = &plan.spec.env;
         assert!(!env.contains_key(&os("CLAUDE_CODE_CHILD_SESSION")));
-        assert!(!env.contains_key(&os("SECRET_TOKEN")));
+        // The names that stay out of a session (the parent of `fixed_ctx` has them all).
+        for name in ["ANTHROPIC_API_KEY", "PWD"] {
+            assert!(!env.contains_key(&os(name)), "{name}");
+        }
+        // A normal name of the parent is copied.
+        assert_eq!(env[&os("CARGO_HOME")], os("/home/test/.cargo"));
+        // The folders of the programs come first, then the parent PATH, then the base folders.
         assert_eq!(
             env[&os("PATH")],
-            os("/usr/bin:/bin:/opt/cli/bin:/opt/node/bin")
+            os("/opt/cli/bin:/opt/node/bin:/home/test/bin:/usr/bin:/bin")
         );
         assert_eq!(env[&os("TOWER_SESSION")], os("app-session-A"));
         assert_eq!(env[&os("TOWER_SOCKET")], os("/run/tower/hooks.sock"));

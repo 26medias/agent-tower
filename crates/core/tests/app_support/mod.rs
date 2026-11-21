@@ -14,6 +14,7 @@ use tower_core::app::{
     FloorView, Observer, OutputSink, SessionView, Tower, TowerConfig, TowerError,
 };
 use tower_core::env::{EnvMap, build_env};
+use tower_core::login_env::LoginEnvSource;
 use tower_core::model::{CliKind, Employee, PermissionPolicy};
 use tower_core::programs::Resolver;
 use tower_core::pty::SpawnSpec;
@@ -185,6 +186,10 @@ pub struct Call {
     pub log: Option<(PathBuf, u64)>,
     /// The CLI session ID that the plan gave (`None` for a fresh Codex).
     pub plan_cli_session_id: Option<String>,
+    /// The parent environment that the app gave to the adapter (`ctx.parent_env`).
+    pub parent_env: EnvMap,
+    /// The environment of the process (`build_env` of `parent_env`).
+    pub env: EnvMap,
 }
 
 #[derive(Default)]
@@ -274,6 +279,8 @@ impl TestAdapter {
             socket: ctx.socket.clone(),
             log: ctx.log.as_ref().map(|l| (l.path.clone(), l.max_bytes)),
             plan_cli_session_id: plan_id.clone(),
+            parent_env: ctx.parent_env.clone(),
+            env: env.clone(),
         });
         Ok(SpawnPlan {
             spec: SpawnSpec {
@@ -365,6 +372,9 @@ impl Rig {
             .iter()
             .map(|(k, v)| (OsString::from(k), OsString::from(v)))
             .collect::<EnvMap>();
+        // No test runs a real login shell. A test that wants a map or a shell gives its own in
+        // `tweak`.
+        cfg.login_env = LoginEnvSource::Fixed(None);
         let adapters = Arc::clone(shared);
         cfg.adapters = Arc::new(move |kind| {
             Box::new(TestAdapter {
