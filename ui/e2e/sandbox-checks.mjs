@@ -8,15 +8,14 @@ import { join } from "node:path";
 
 const HELP = "On Ubuntu 24.04 and later, AppArmor blocks bwrap by default. Add an AppArmor profile that lets /usr/bin/bwrap use user namespaces, then press Test again.";
 const NETWORK = "With the sandbox on, the commands of a Codex employee have no network access (for example a package install fails).";
-const DOWN = 'The setting is "Always", but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or choose "Automatic" or "Never".';
+const DOWN = 'In effect now: Codex employees cannot start. The setting is "Always", but the sandbox does not work on this machine. Repair the sandbox, or choose "Automatic" or "Never".';
 const UID_ERROR = "bwrap: setting up uid map: Permission denied";
 const AUTO = "Automatic (recommended): use the sandbox when it works on this machine";
 const ALWAYS = "Always: refuse to start a Codex employee when the sandbox does not work";
 const NEVER = "Never: Codex employees have full access";
 const ON_NOW = "In effect now: the sandbox is on.";
 const OFF_NEVER = "In effect now: the sandbox is off, because you chose Never.";
-const OFF_DOWN = `In effect now: the sandbox is off, because it does not work on this machine (${UID_ERROR}).`;
-const REFUSED = `In effect now: Codex employees cannot start, because the sandbox does not work on this machine (${UID_ERROR}).`;
+const OFF_DOWN = "In effect now: the sandbox is off, because it does not work on this machine. Codex employees have full access.";
 const AUTO_NOTICE = "The Codex sandbox does not work on this machine, so Codex employees run with full access. See Settings > Codex sandbox.";
 const REFUSAL_START =
     `Lin did not start: the Codex sandbox does not work on this machine now (${UID_ERROR}). The setting "Codex sandbox" is "Always". Repair the sandbox, or choose "Automatic" or "Never" in Settings > Codex sandbox.`;
@@ -55,7 +54,7 @@ export async function sandboxChecks({ page, check, url, shots }) {
         page.waitForFunction(
             (want) =>
                 ["works", "fails", "missing"].includes(document.querySelector('[data-testid="sandbox-state"]')?.dataset.state) &&
-                (want === undefined || document.querySelector('[data-testid="sandbox-effective"]')?.dataset.effective === want),
+                (want === undefined || document.querySelector('[data-section="codex-sandbox"]')?.dataset.effective === want),
             expected,
         );
     const text = async () => (await section.innerText()).replace(/\s+/g, " ");
@@ -182,7 +181,7 @@ export async function sandboxChecks({ page, check, url, shots }) {
         (await state.innerText()).includes("bwrap was not found in the PATH of a session") &&
             (await help.innerText()).startsWith("Install bubblewrap") && !(await radio("on").isEnabled()));
     check("sandbox: missing in Automatic: the line says the sandbox is off because it does not work",
-        (await effective.innerText()).startsWith("In effect now: the sandbox is off, because it does not work on this machine (bwrap was not found"), await effective.innerText());
+        (await effective.innerText()) === OFF_DOWN, await effective.innerText());
     await closeSettings();
 
     // ================= The app refuses Always =================
@@ -215,8 +214,10 @@ export async function sandboxChecks({ page, check, url, shots }) {
     await settled("refused");
     check("sandbox: Always and a failing probe: a red line says the sandbox does not work and what to do",
         (await down.count()) === 1 && (await down.innerText()).replace(/\s+/g, " ") === DOWN && (await section.getAttribute("data-effective")) === "refused", await section.innerText());
-    check("sandbox: the line 'In effect now' says that Codex employees cannot start, with the probe error",
-        (await effective.innerText()) === REFUSED, await effective.innerText());
+    // Changed on purpose: the failure is said one time. The red line holds "In effect now", the test row holds the
+    // error of the test, and no second line repeats it.
+    check("sandbox: with Always and a failing probe the error of the test shows one time, and no second 'In effect now' line shows",
+        (await effective.count()) === 0 && ((await section.innerText()).split(UID_ERROR).length - 1) === 1, await section.innerText());
     check("sandbox: the red line is red (the danger colour) and the stored value did not change by itself",
         (await down.evaluate((el) => getComputedStyle(el).color)) !== (await help.evaluate((el) => getComputedStyle(el).color)) &&
             (await calls("settings_set")).length === setCalls && (await radio("on").isChecked()));

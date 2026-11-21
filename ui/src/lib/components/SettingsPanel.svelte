@@ -86,11 +86,11 @@
         if (!store.settings) return "";
         if (store.sandboxTesting) return "In effect now: testing the sandbox...";
         if (sandboxEffective === "on") return "In effect now: the sandbox is on.";
-        if (sandboxEffective === "refused") {
-            return `In effect now: Codex employees cannot start, because the sandbox does not work on this machine (${probe?.detail ?? "not tested"}).`;
-        }
+        // The error of the test shows one time, in the test row above. These lines do not repeat it.
+        // With "Always" and a failing test, the red line below says all of it, so this line is empty.
+        if (sandboxEffective === "refused") return "";
         if (sandboxMode === "off") return "In effect now: the sandbox is off, because you chose Never.";
-        return `In effect now: the sandbox is off, because it does not work on this machine (${probe?.detail ?? "not tested"}).`;
+        return "In effect now: the sandbox is off, because it does not work on this machine. Codex employees have full access.";
     });
     // The data-mode of the section: the stored mode, and what is in effect now.
     const sandboxEffectiveState = $derived(store.sandboxTesting ? "testing" : sandboxEffective);
@@ -243,14 +243,16 @@
                     </label>
                 {/each}
             </div>
-            <p class="hint effective" data-testid="sandbox-effective" data-effective={sandboxEffectiveState}>{effectiveText}</p>
+            {#if effectiveText}
+                <p class="hint effective" data-testid="sandbox-effective" data-effective={sandboxEffectiveState}>{effectiveText}</p>
+            {/if}
             <p class="hint" data-testid="sandbox-network">
                 With the sandbox on, the commands of a Codex employee have no network access (for example a package install fails).
             </p>
             {#if sandboxEffective === "refused" && !store.sandboxTesting}
                 <p class="down" role="alert" data-testid="sandbox-down">
-                    The setting is "Always", but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or choose
-                    "Automatic" or "Never".
+                    In effect now: Codex employees cannot start. The setting is "Always", but the sandbox does not work on this machine. Repair
+                    the sandbox, or choose "Automatic" or "Never".
                 </p>
             {/if}
             {#if alwaysReason}
