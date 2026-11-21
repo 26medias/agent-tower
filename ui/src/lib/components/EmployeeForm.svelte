@@ -10,6 +10,8 @@
         listFor,
         modelChoices,
     } from "$lib/models";
+    import { modal } from "$lib/modal";
+    import { POLICY_IDS, POLICY_INFO, defaultManager } from "$lib/policies";
     import { isValidSlug, slugify, uniqueSlug } from "$lib/slug";
     import { store } from "$lib/store.svelte";
     import type { CliKind, Employee, Policy } from "$lib/types";
@@ -23,7 +25,8 @@
 
     let name = $state(initial?.name ?? "");
     let role = $state(initial?.role ?? "Engineer");
-    let manager = $state<string>(initial?.manager ?? "");
+    // A new employee reports to the Project Manager (else the CEO) by default.
+    let manager = $state<string>(initial ? (initial.manager ?? "") : defaultManager(store.floorView?.employees ?? []));
     let cli = $state<CliKind>(initial?.cli ?? "claude");
     let model = $state(initial?.model ?? "");
     let effort = $state(initial?.effort ?? "");
@@ -59,7 +62,24 @@
         model = value;
         effort = afterModelChange(list, value, effort, fallbackModel);
     }
-    const valid = $derived(name.trim() !== "" && role.trim() !== "" && isValidSlug(slug));
+
+    // What blocks the button, as text. The operator reads it next to the button and under the field.
+    const nameProblem = $derived(
+        name.trim() === "" ? "Write a name." : !isValidSlug(slug) ? "The name needs at least one letter or digit." : null,
+    );
+    const roleProblem = $derived(role.trim() === "" ? "Write a role." : null);
+    const valid = $derived(nameProblem === null && roleProblem === null);
+    const blocked = $derived(nameProblem ?? roleProblem);
+
+    // A name that is used twice is allowed, but tabs and tags then look alike.
+    const sameName = $derived(
+        name.trim() === ""
+            ? null
+            : ((store.floorView?.employees ?? []).find(
+                  (e) => e.slug !== slug && e.name.trim().toLowerCase() === name.trim().toLowerCase(),
+              ) ?? null),
+    );
+    const noInstructions = $derived(roleText.trim() === "");
 
     async function submit(): Promise<void> {
         if (!valid || busy) return;
@@ -80,11 +100,12 @@
     }
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && onclose()} />
-
-<div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
+<div class="backdrop" role="presentation" use:modal={{ onclose }} onclick={(e) => e.target === e.currentTarget && onclose()}>
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
     <form
         class="panel"
+        role="dialog"
+        aria-modal="true"
         aria-label={editing ? "Edit employee" : "Add employee"}
         onsubmit={(e) => {
             e.preventDefault();
@@ -95,9 +116,19 @@
 
         <label>
             <span>Name</span>
-            <input type="text" name="name" placeholder="Maya" autocomplete="off" bind:value={name} />
+            <input type="text" name="name" placeholder="Name, for example Lena" autocomplete="off" aria-invalid={nameProblem !== null && name !== ""} bind:value={name} />
         </label>
-        <div class="slug">slug: <code>{slug || "(from the name)"}</code></div>
+        {#if name !== "" && nameProblem}
+            <p class="problem" role="alert" data-testid="name-problem">{nameProblem}</p>
+        {/if}
+        {#if sameName}
+            <p class="warn" role="status" data-testid="name-duplicate">
+                {sameName.name} ({sameName.role}) has this name already. You can save, but the tabs and the name tags will look alike.
+            </p>
+        {/if}
+        <div class="slug" title="The app keeps this employee in the file .swarm/employees/{slug || 'name'}.md. The file name does not change later.">
+            File name: <code>{slug ? `${slug}.md` : "(from the name)"}</code>
+        </div>
 
         <div class="two">
             <label>
@@ -126,12 +157,14 @@
             <label>
                 <span>Policy</span>
                 <select name="policy" bind:value={policy}>
-                    <option value="read_only">read_only</option>
-                    <option value="edit_in_worktree">edit_in_worktree</option>
-                    <option value="ask_always">ask_always</option>
+                    {#each POLICY_IDS as id (id)}
+                        <option value={id}>{POLICY_INFO[id].label}</option>
+                    {/each}
                 </select>
             </label>
         </div>
+
+        <p class="help" data-testid="policy-help">{POLICY_INFO[policy].help}</p>
 
         <div class="two">
             <label>
@@ -158,8 +191,14 @@
             <span>Role text (instructions)</span>
             <textarea name="roleText" rows="6" placeholder="You are the engineer. You write small, tested changes." bind:value={roleText}></textarea>
         </label>
+        {#if noInstructions}
+            <p class="warn" role="status" data-testid="no-instructions">This employee has no instructions. You can save, but it will not know its job.</p>
+        {/if}
 
         <div class="buttons">
+            {#if blocked}
+                <span class="reason" data-testid="form-reason">{blocked}</span>
+            {/if}
             <button type="submit" class="primary" disabled={!valid || busy}>{editing ? "save" : "add"}</button>
             <button type="button" onclick={onclose}>cancel</button>
         </div>
@@ -230,7 +269,41 @@
 
     .buttons {
         display: flex;
+        align-items: center;
         gap: 6px;
         justify-content: flex-end;
+    }
+
+    .reason {
+        margin-right: auto;
+        color: var(--danger);
+        font-size: 12px;
+    }
+
+    .problem {
+        margin: -4px 0 0;
+        color: var(--danger);
+        font-size: 12px;
+    }
+
+    .warn {
+        margin: 0;
+        padding: 4px 8px;
+        border: 1px solid var(--st-question);
+        border-radius: 6px;
+        background: rgba(255, 197, 107, 0.08);
+        color: var(--st-question);
+        font-size: 12px;
+    }
+
+    /* The help line sits under the two rows of selects. */
+    .help {
+        margin: -2px 0 0;
+        color: var(--dim);
+        font-size: 12px;
+    }
+
+    input[aria-invalid="true"] {
+        border-color: var(--danger);
     }
 </style>

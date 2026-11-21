@@ -11,6 +11,7 @@ import {
     isValidModelName,
     listFor,
     modelChoices,
+    modelDisplay,
     modelText,
 } from "./models";
 import type { FloorDefaults, ModelCatalog, ModelOption } from "./types";
@@ -146,5 +147,25 @@ describe("a change of model", () => {
         expect(afterModelChange(catalog.codex, "gpt-a", "ultra", null)).toBe("ultra");
         expect(afterModelChange(catalog.codex, "gpt-b", "ultra", null)).toBe("");
         expect(afterModelChange(catalog.codex, "gpt-b", "", null)).toBe("");
+    });
+});
+
+describe("modelDisplay", () => {
+    const none: FloorDefaults = { cli: null, model: null, effort: null, policy: null };
+    it("shows the model of the employee first", () => {
+        expect(modelDisplay({ cli: "claude", model: "opus" }, { ...none, model: "haiku" })).toBe("opus");
+    });
+    it("shows the floor default when the employee has no model", () => {
+        expect(modelDisplay({ cli: "claude", model: null }, { ...none, model: "haiku" })).toBe("haiku (floor default)");
+        expect(modelDisplay({ cli: "claude", model: null }, { cli: "claude", model: "haiku", effort: null, policy: null })).toBe(
+            "haiku (floor default)",
+        );
+    });
+    it("shows CLI default when no default applies", () => {
+        expect(modelDisplay({ cli: "claude", model: null }, none)).toBe("CLI default");
+        expect(modelDisplay({ cli: "codex", model: null }, { cli: "claude", model: "haiku", effort: null, policy: null })).toBe(
+            "CLI default",
+        );
+        expect(modelDisplay({ cli: "claude", model: null }, null)).toBe("CLI default");
     });
 });

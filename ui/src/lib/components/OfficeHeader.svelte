@@ -1,7 +1,8 @@
 <script lang="ts">
     // The header of the office: logo, name, path, description, and the buttons "Run the setup
     // agent" and "New logo". A failed logo shows its error. `NO_KEY:` shows a field for the key.
-    import { resumeButton } from "$lib/resume";
+    import { splitFileError, tidyError } from "$lib/messages";
+    import { resumeButton, resumeWho } from "$lib/resume";
     import { store } from "$lib/store.svelte";
     import { SETUP_SLUG, type CliKind } from "$lib/types";
     import Spinner from "./Spinner.svelte";
@@ -22,6 +23,17 @@
     // The button "Resume the last team (N)" (docs/ipc-m3.md). The app resumes one employee at a time.
     const resume = $derived(resumeButton(view?.resumable ?? [], view?.resumeProgress ?? null));
     let resumeBusy = $state(false);
+    // Who the button resumes, for a line under the buttons and for the tooltip.
+    const resumeLabels = $derived(
+        (view?.resumable ?? []).map((slug) => {
+            const emp = view?.employees.find((e) => e.slug === slug);
+            return emp ? `${emp.name} (${emp.role})` : slug;
+        }),
+    );
+    // The setup agent starts with the floor default CLI when there is one. Else the operator chooses.
+    const defaultCli = $derived(view?.defaults.cli ?? null);
+    // One primary (green) button at a time: the resume of the team first, then the setup agent.
+    const resumePrimary = $derived(resume.visible && !resume.busy);
 
     async function resumeTeam(): Promise<void> {
         if (resumeBusy || resume.busy) return;
@@ -40,6 +52,11 @@
     async function runSetup(cli: CliKind): Promise<void> {
         askCli = false;
         await store.startSetup(cli);
+    }
+
+    function clickSetup(): void {
+        if (defaultCli) void runSetup(defaultCli);
+        else askCli = true;
     }
 
     async function stopSetup(): Promise<void> {
@@ -100,25 +117,41 @@
         {:else if setupBusy}
             <button type="button" class="setup busy-setup" disabled aria-busy="true"><Spinner size={11} /> starting...</button>
         {:else if askCli}
-            <span class="ask">Run the setup agent with</span>
-            <button type="button" class="primary cli-claude" onclick={() => runSetup("claude")}>claude</button>
-            <button type="button" class="cli-codex" onclick={() => runSetup("codex")}>codex</button>
-            <button type="button" class="ghost" onclick={() => (askCli = false)}>cancel</button>
+            <!-- The choice has its own row. "New logo" is not part of it. -->
+            <div class="choose" role="group" aria-label="Choose the CLI of the setup agent">
+                <span class="ask">Run the setup agent with</span>
+                <button type="button" class="cli-claude" class:primary={(defaultCli ?? "claude") === "claude"} onclick={() => runSetup("claude")}>claude</button>
+                <button type="button" class="cli-codex" class:primary={defaultCli === "codex"} onclick={() => runSetup("codex")}>codex</button>
+                <button type="button" class="ghost" onclick={() => (askCli = false)}>cancel</button>
+            </div>
         {:else}
-            <button type="button" class="setup" class:primary={needsSetup} onclick={() => (askCli = true)}>Run the setup agent</button>
+            <button
+                type="button"
+                class="setup"
+                class:primary={needsSetup && !resumePrimary}
+                title={defaultCli ? `Starts the setup agent with ${defaultCli}, the CLI that the floor defaults name.` : "Choose claude or codex, then the setup agent reads the project and proposes a team."}
+                onclick={clickSetup}
+            >
+                Run the setup agent
+            </button>
+            {#if defaultCli}
+                <button type="button" class="ghost other-cli" onclick={() => (askCli = true)}>other CLI</button>
+            {/if}
         {/if}
-        <button type="button" class="newlogo" aria-expanded={logoForm} disabled={busy} onclick={toggleLogoForm}>
-            {busy ? "Making a logo..." : "New logo"}
-        </button>
-        {#if resume.visible}
+        {#if !askCli}
+            <button type="button" class="newlogo" aria-expanded={logoForm} disabled={busy} onclick={toggleLogoForm}>
+                {busy ? "Making a logo..." : "New logo"}
+            </button>
+        {/if}
+        {#if resume.visible && !askCli}
             <button
                 type="button"
                 class="resume-team"
-                class:primary={!resume.busy}
+                class:primary={resumePrimary}
                 data-testid="resume-team"
                 disabled={resume.busy || resumeBusy}
                 aria-busy={resume.busy}
-                title="Resume the sessions that were live when the app closed, one by one"
+                title="Resume the sessions that were live when the app closed, one by one: {resumeLabels.join(', ')}"
                 onclick={resumeTeam}
             >
                 {#if resume.busy || resumeBusy}<Spinner size={11} />{/if}
@@ -126,6 +159,10 @@
             </button>
         {/if}
     </div>
+
+    {#if resume.visible && resumeLabels.length > 0 && !resume.busy}
+        <p class="hint who" data-testid="resume-who">Resumes: {resumeWho(resumeLabels)}</p>
+    {/if}
 
     {#if needsSetup}
         <p class="hint">This floor has no description yet. The setup agent reads the project and proposes a team.</p>
@@ -154,7 +191,7 @@
     {/if}
 
     {#if error}
-        <p class="error" role="alert" data-error="logo">{error}</p>
+        <p class="error" role="alert" data-error="logo">{tidyError(error)}</p>
         {#if noKey}
             <form
                 class="keyform"
@@ -180,9 +217,17 @@
     {/if}
 
     {#if view.employeeErrors.length > 0}
-        <ul class="errors" aria-label="Employee files that did not load">
+        <ul class="errors" aria-label="Employee files that did not load" data-testid="employee-errors">
             {#each view.employeeErrors as err (err)}
-                <li>{err}</li>
+                {@const e = splitFileError(err)}
+                <li>
+                    {#if e.file}
+                        <span class="e-file">{e.file}</span>: {e.message}
+                        <span class="e-folder">{e.folder}</span>
+                    {:else}
+                        {e.message}
+                    {/if}
+                </li>
             {/each}
         </ul>
     {/if}
@@ -201,8 +246,8 @@
     .logo {
         position: relative;
         flex: none;
-        width: 56px;
-        height: 56px;
+        width: 44px;
+        height: 44px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -225,10 +270,10 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        border: 4px solid #fff;
-        border-radius: 14px;
+        border: 3px solid #fff;
+        border-radius: 11px;
         background: #33487a;
-        font: 700 28px var(--display);
+        font: 700 22px var(--display);
     }
 
     .spinner {
@@ -259,7 +304,7 @@
 
     .name {
         font-family: var(--display);
-        font-size: 17px;
+        font-size: 15px;
         color: var(--text);
         text-transform: none;
         letter-spacing: 0.02em;
@@ -278,8 +323,8 @@
         color: var(--text);
         font-size: 12px;
         display: -webkit-box;
-        -webkit-line-clamp: 2;
-        line-clamp: 2;
+        -webkit-line-clamp: 1;
+        line-clamp: 1;
         -webkit-box-orient: vertical;
         overflow: hidden;
     }
@@ -304,6 +349,19 @@
     .ask {
         color: var(--dim);
         font-size: 12px;
+    }
+
+    /* The CLI choice fills its own row. */
+    .choose {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+    }
+
+    .hint.who {
+        margin-top: -2px;
     }
 
     .hint {
@@ -352,5 +410,17 @@
         border-radius: 6px;
         color: var(--danger);
         font-size: 12px;
+        overflow-wrap: anywhere;
+    }
+
+    .e-file {
+        font-weight: 700;
+    }
+
+    /* The folder is on its own line and wraps: the file name is the part that matters. */
+    .e-folder {
+        display: block;
+        color: var(--dim);
+        font-size: 11px;
     }
 </style>

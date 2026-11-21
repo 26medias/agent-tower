@@ -3,7 +3,7 @@
     // opens the floor. The open floor is bright and the others are dim. A missing floor is darker.
     // The dim comes from a dark overlay polygon on the storey (fill and fill-opacity). A CSS
     // `filter` on SVG child elements is not drawn by WebKitGTK, the webview of Tauri on Linux.
-    import { ART, T, buildingHeight, stickerTransform, storeyY } from "$lib/office-layout";
+    import { ART, BADGE, PLATE, T, buildingHeight, plateText, plateWidth, stickerTransform, storeyY } from "$lib/office-layout";
     import { store } from "$lib/store.svelte";
 
     // `scale`: screen pixels for one SVG unit, from the column (see buildingScale in sizes.ts).
@@ -44,7 +44,7 @@
         {#each store.floors as floor, i (floor.path)}
             {@const y = storeyY(i, count)}
             {@const logo = store.logos[floor.path]}
-            {@const questions = store.questionsIn(floor.path)}
+            {@const plate = floor.missing ? "missing" : plateText(nameOf(floor))}
             <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
             <g
                 class="storey"
@@ -77,14 +77,33 @@
                     {/if}
                 </g>
                 <polygon class="shade" points={HIT} transform="translate(0 {y})" />
-                {#if questions > 0}
-                    <g class="badge" transform="translate(1250 {y + 430})">
-                        <circle r="34" />
-                        <text y="14" text-anchor="middle">{questions}</text>
-                    </g>
-                {/if}
+                <!-- The name plate: the floor name under the sticker, on the same wall plane. -->
+                <g class="plate" data-plate={plate} transform={stickerTransform(y)}>
+                    <rect
+                        class="plate-bg"
+                        x={-plateWidth(plate) / 2}
+                        y={PLATE.top}
+                        width={plateWidth(plate)}
+                        height={PLATE.height}
+                        rx="16"
+                    />
+                    <text class="plate-text" x="0" y={PLATE.top + PLATE.height * 0.72} text-anchor="middle" font-size={PLATE.font}>{plate}</text>
+                </g>
                 <polygon class="hit" points={HIT} transform="translate(0 {y})" />
             </g>
+        {/each}
+        <!-- The badges are in a top layer: a storey above would cover the badge of a storey below. -->
+        {#each store.floors as floor, i (floor.path)}
+            {@const questions = store.questionsIn(floor.path)}
+            {#if questions > 0}
+                {@const y = storeyY(i, count)}
+                <g class="badge" data-path={floor.path} data-count={questions} transform="translate({T.cx - 190} {y + T.cy + T.slope * 190})">
+                    <title>{questions} {questions === 1 ? "agent asks" : "agents ask"} a question on {nameOf(floor)}</title>
+                    <circle class="halo" r={BADGE.r} />
+                    <circle class="disc" r={BADGE.r} />
+                    <text y={BADGE.font * 0.35} text-anchor="middle" font-size={BADGE.font}>{questions}</text>
+                </g>
+            {/if}
         {/each}
     </svg>
 {/if}
@@ -159,16 +178,70 @@
         pointer-events: none;
     }
 
-    .badge circle {
+    .plate {
+        pointer-events: none;
+    }
+
+    .plate-bg {
+        fill: #0b111c;
+        fill-opacity: 0.88;
+        stroke: #2b3a5c;
+        stroke-width: 4;
+    }
+
+    .plate-text {
+        font-family: var(--display);
+        font-weight: 700;
+        fill: #e6ecf8;
+    }
+
+    .storey.on .plate-text {
+        fill: #5ee0c0;
+    }
+
+    .storey.missing .plate-text {
+        fill: #ff7a90;
+    }
+
+    /* A floor with questions: a large amber badge with the count. It pulses with a ring. */
+    .badge {
+        pointer-events: none;
+    }
+
+    .badge .disc {
         fill: var(--st-question);
         stroke: #0b111c;
-        stroke-width: 6;
+        stroke-width: 8;
+    }
+
+    .badge .halo {
+        fill: var(--st-question);
+        opacity: 0;
     }
 
     .badge text {
-        font: 700 40px var(--display);
+        font-family: var(--display);
+        font-weight: 700;
         fill: #1a1400;
-        pointer-events: none;
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+        .badge .halo {
+            transform-box: fill-box;
+            transform-origin: center;
+            animation: badge-pulse 1.6s ease-out infinite;
+        }
+    }
+
+    @keyframes badge-pulse {
+        0% {
+            transform: scale(1);
+            opacity: 0.7;
+        }
+        100% {
+            transform: scale(1.8);
+            opacity: 0;
+        }
     }
 
     @media (prefers-reduced-motion: no-preference) {

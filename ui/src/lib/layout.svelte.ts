@@ -48,6 +48,8 @@ class Layout {
     workW = $state(960);
     /** Height that the office and the terminal area share. */
     space = $state(740);
+    /** The number of employees of the open floor. A crowded floor gets a taller office by default. */
+    employees = $state(0);
 
     /** Custom sizes. `null`: the default. */
     private custom = $state.raw<StoredSizes>({
@@ -61,7 +63,7 @@ class Layout {
     colRange = $derived(columnRange(this.winW));
     colW = $derived(resolveSize(this.custom.col, defaultColumn(this.winW), this.colRange));
     officeRangeNow = $derived(officeRange(this.space));
-    officeH = $derived(resolveSize(this.custom.office, defaultOffice(this.winH), this.officeRangeNow));
+    officeH = $derived(resolveSize(this.custom.office, defaultOffice(this.winH, this.winW, this.employees), this.officeRangeNow));
     infoRangeNow = $derived(infoRange(this.workW));
     // The default width follows the REAL height of the office (`officeH`), so a taller office gives
     // the room a wider box. A width that the operator set by hand (`custom.info`) is kept as it is.

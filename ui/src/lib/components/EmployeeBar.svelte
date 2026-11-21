@@ -1,5 +1,8 @@
 <script lang="ts">
     // The bar for the selected employee: name, role, CLI, model, and the buttons of the old cards.
+    // The selected employee and the active tab are the same: a click on a tab selects its employee.
+    // For the tab of the setup agent, the bar shows the setup session and its own "Stop the setup".
+    import { modelDisplay } from "$lib/models";
     import { store } from "$lib/store.svelte";
     import type { Employee } from "$lib/types";
     import ConfirmButton from "./ConfirmButton.svelte";
@@ -14,10 +17,39 @@
     // Which button was clicked, while its command runs. It shows a busy state until the command returns.
     const busyKind = $derived(emp ? store.busyKind(emp.slug) : null);
     const busy = $derived(busyKind !== null);
+    const setup = $derived(store.selectedSetup);
+    const setupLive = $derived(store.isLive(setup ?? undefined));
+    let stopping = $state(false);
+
+    // The model that the session will get: its own, the floor default, or the CLI default.
+    const modelText = $derived(emp ? modelDisplay(emp, store.floorView?.defaults) : "");
+
+    async function stopSetup(): Promise<void> {
+        if (!setup || stopping) return;
+        stopping = true;
+        await store.stopSession(setup.sessionId);
+        stopping = false;
+    }
 </script>
 
-<div class="bar" aria-label="Selected employee" data-slug={emp?.slug ?? ""}>
-    {#if emp}
+<div class="bar" aria-label="Selected employee" data-slug={emp?.slug ?? (setup ? "setup" : "")}>
+    {#if setup && !emp}
+        <div class="who">
+            <StatusDot status={setup.status} />
+            <span class="name">Setup agent</span>
+            <span class="role">reads the project and proposes a team</span>
+        </div>
+        <div class="meta">
+            <span class="state">{setup.status}</span>
+        </div>
+        <div class="actions">
+            {#if setupLive}
+                <button type="button" class="danger stop-session" data-testid="stop-setup-bar" disabled={stopping} onclick={stopSetup}>Stop the setup</button>
+            {:else}
+                <span class="state">The setup is stopped.</span>
+            {/if}
+        </div>
+    {:else if emp}
         <div class="who">
             <StatusDot status={session?.status ?? "stopped"} />
             <span class="name">{emp.name}</span>
@@ -25,12 +57,23 @@
         </div>
         <div class="meta">
             <span class="cli {emp.cli}">{emp.cli}</span>
-            <span class="model">{emp.model ?? "default model"}</span>
+            <span class="model" data-testid="bar-model">{modelText}</span>
             <span class="state">{session?.status ?? "no session"}</span>
         </div>
         <div class="actions">
             {#if live && session}
-                <button type="button" class="danger stop" onclick={() => store.stopSession(session.sessionId)}>stop</button>
+                {#if session.status === "working"}
+                    <!-- A working session loses its turn when it stops: ask first. -->
+                    <ConfirmButton
+                        class="danger stop"
+                        label="stop"
+                        confirmLabel="{emp.name} is working. Stop?"
+                        title="Stop {emp.name}. The session is working now."
+                        onconfirm={() => store.stopSession(session.sessionId)}
+                    />
+                {:else}
+                    <button type="button" class="danger stop" onclick={() => store.stopSession(session.sessionId)}>stop</button>
+                {/if}
             {:else}
                 <button
                     type="button"
@@ -65,7 +108,7 @@
             />
         </div>
     {:else}
-        <p class="hint">{store.floorView ? "Click a character to select an employee." : "Open a floor to see its employees."}</p>
+        <p class="hint">{store.floorView ? "Click a character or a tab to select an employee." : "Open a floor to see its employees."}</p>
     {/if}
     {#if store.floorView}
         <button type="button" class="add" onclick={onadd}>+ employee</button>

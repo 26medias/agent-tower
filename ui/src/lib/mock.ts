@@ -51,6 +51,8 @@ interface MockFloor {
     resumeProgress: ResumeProgress | null;
     /** When set, `task_merge` is blocked with this reason (a conflict, another branch). */
     mergeBlock: string | null;
+    /** `FloorView.employeeErrors`: employee files that did not load. */
+    employeeErrors: string[];
 }
 
 interface MockTask {
@@ -118,6 +120,20 @@ export interface MockControl {
     setResumable(path: string, slugs: string[]): void;
     /** The next `team_resume` start of this employee fails (a notice follows). */
     failResume(slug: string): void;
+    /** Stop the automatic status changes of all sessions (`true`), or let them run (`false`). A check that needs a fixed status uses it. */
+    freeze(on: boolean): void;
+    /** Set the status of a session now, like the real CLI does. `session-changed` follows. */
+    setStatus(sessionId: string, status: Status): void;
+    /** Start the session of an employee with no toast, as `session_start` does. Returns the session ID. */
+    startSession(path: string, slug: string): string;
+    /** Add `count` employees (engineers of the Project Manager) to a floor, with no model. A floor event follows. */
+    addEmployees(path: string, count: number): void;
+    /** Send the `notice` event, as the Rust side does for a blocked merge. The UI shows it as an error toast. */
+    notice(path: string, text: string): void;
+    /** The employee files that did not load (`FloorView.employeeErrors`). A floor event follows. */
+    setEmployeeErrors(path: string, errors: string[]): void;
+    /** Change the defaults or one employee of a floor. A floor event follows. */
+    patchFloor(path: string, change: { defaults?: Partial<FloorDefaults>; employee?: { slug: string; patch: Partial<Employee> } }): void;
 }
 
 const config = (): MockConfig => ((globalThis as Record<string, unknown>).__towerMockConfig ?? {}) as MockConfig;
@@ -235,6 +251,8 @@ export function createMockBackend(): Backend {
     const failOnce = new Set(["start:eng-sam", "resume:pm"]);
     // Employees whose start in `team_resume` fails one time (`MockControl.failResume`).
     const failResume = new Set<string>();
+    // `MockControl.freeze`: no automatic status change while this is true.
+    let frozen = false;
 
     const settings: Settings = { openaiKeySet: false, openaiKeySource: null, imageModel: "gpt-image-2.6-sunburst" };
     // The custom models of the app config (`[models]`).
@@ -288,6 +306,7 @@ export function createMockBackend(): Backend {
             resumable: [],
             resumeProgress: null,
             mergeBlock: null,
+            employeeErrors: [],
         };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
@@ -510,7 +529,7 @@ export function createMockBackend(): Backend {
             path: floor.path,
             name: floor.name,
             employees: structuredClone(floor.employees),
-            employeeErrors: [],
+            employeeErrors: [...floor.employeeErrors],
             sessions: structuredClone(floor.sessions),
             description: floor.description,
             logoPrompt: floor.logoPrompt,
@@ -570,6 +589,7 @@ export function createMockBackend(): Backend {
     function schedule(s: MockSession): void {
         if (s.timer) clearTimeout(s.timer);
         s.timer = null;
+        if (frozen) return;
         // The setup session goes to `working` and then waits for its own timer (see `startSetup`).
         const next: [Status, number] | undefined =
             s.view.status === "starting"
@@ -1129,6 +1149,8 @@ export function createMockBackend(): Backend {
                     const rule = raw.trim();
                     const bad = checkAllowRule(rule);
                     if (bad !== null) throw `the rule "${rule}" is refused: ${bad}`;
+                    // A rule that the client check accepts and that the "server" refuses, for the e2e check.
+                    if (rule.includes("server-says-no")) throw `the rule "${rule}" is refused by the server: this word is on its list.`;
                     if (!clean.includes(rule)) clean.push(rule);
                 }
                 if (clean.length > ALLOW_RULES_MAX) throw `there are ${clean.length} rules, and the limit is ${ALLOW_RULES_MAX}`;
@@ -1227,6 +1249,48 @@ export function createMockBackend(): Backend {
         },
         failResume(slug) {
             failResume.add(slug);
+        },
+        freeze(on) {
+            frozen = on;
+            if (on) {
+                for (const s of sessions.values()) {
+                    if (s.timer) clearTimeout(s.timer);
+                    s.timer = null;
+                }
+            }
+        },
+        setStatus(sessionId, status) {
+            setStatus(sessionById(sessionId), status);
+        },
+        startSession(path, slug) {
+            return startSession(path, slug).sessionId;
+        },
+        addEmployees(path, count) {
+            const floor = floorOf(path);
+            const start = floor.employees.length;
+            const pm = floor.employees.find((e) => e.role === "Project Manager")?.slug ?? floor.employees[0].slug;
+            for (let i = 0; i < count; i++) {
+                const e = employee(`gen-${start + i}`, `Worker ${String(start + i).padStart(2, "0")}`, "Engineer", pm, "claude");
+                e.model = null;
+                floor.employees.push(e);
+            }
+            emit("floor-changed", { path });
+        },
+        notice(path, text) {
+            emit("notice", { path, kind: "task_blocked", text });
+        },
+        setEmployeeErrors(path, errors) {
+            floorOf(path).employeeErrors = [...errors];
+            emit("floor-changed", { path });
+        },
+        patchFloor(path, change) {
+            const floor = floorOf(path);
+            if (change.defaults) floor.defaults = { ...floor.defaults, ...change.defaults };
+            if (change.employee) {
+                const e = floor.employees.find((x) => x.slug === change.employee?.slug);
+                if (e) Object.assign(e, change.employee.patch);
+            }
+            emit("floor-changed", { path });
         },
     } satisfies MockControl;
 

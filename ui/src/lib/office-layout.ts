@@ -55,6 +55,34 @@ export function stickerTransform(y: number): string {
     return `matrix(1 ${-T.slope} 0 1 ${T.cx} ${T.cy + y})`;
 }
 
+// ---- the name plate of a storey ----
+
+/** The most characters of a floor name on the plate of its storey. A longer name is cut with an ellipsis. */
+export const PLATE_MAX = 10;
+
+/** The text on the plate of a storey: the floor name, cut. */
+export function plateText(name: string): string {
+    const clean = name.trim();
+    const chars = [...clean];
+    return chars.length > PLATE_MAX ? chars.slice(0, PLATE_MAX - 1).join("") + "…" : clean;
+}
+
+/**
+ * The plate sits under the sticker, on the same wall plane (it uses the transform of the sticker).
+ * `top`: where the plate starts under the middle of the sticker. `font` and `height`: the text size
+ * and the plate height. All in SVG units. At the natural size of the building (about 0.18 px for
+ * one unit) the text is about 10 px high.
+ */
+export const PLATE = { top: 104, font: 56, height: 72, char: 35, pad: 30 } as const;
+
+/** Width of the plate for a text. */
+export function plateWidth(text: string): number {
+    return [...text].length * PLATE.char + PLATE.pad;
+}
+
+/** The badge of a floor with questions, in SVG units. The radius gives about 25 px at the natural size. */
+export const BADGE = { r: 72, font: 84 } as const;
+
 // ---- the office ----
 
 export interface Grid {
@@ -184,8 +212,12 @@ const TAG_ROLE_MAX = 16;
 /** Font size of the role line before scaling, in SVG units. */
 export const TAG_ROLE_FONT = 20;
 
-/** The tags show the role line up to this number of employees. Above it, taller tags cover the characters. */
-export const TAG_ROLE_MAX_EMPLOYEES = 8;
+/**
+ * The tags show the role line up to this number of employees. Above it, a taller tag covers the
+ * characters behind it. The role then shows in a small box above the tag, only for the selected
+ * employee or when the pointer is on the tag. The CEO and the Project Manager keep a chip.
+ */
+export const TAG_ROLE_MAX_EMPLOYEES = 5;
 
 /** The job title in the tag, in capitals. A long title is cut. */
 export function tagRole(role: string): string {
@@ -193,9 +225,33 @@ export function tagRole(role: string): string {
     return chars.length > TAG_ROLE_MAX ? chars.slice(0, TAG_ROLE_MAX - 1).join("") + "…" : chars.join("");
 }
 
-/** Width of the tag for the name label and the role line: the wider of the two. */
-export function tagBoxWidth(label: string, role: string): number {
-    return Math.max(tagWidth(label), 28 + [...role].length * 14.5);
+/** A small chip on the tag of the CEO ("CEO", gold) and of the Project Manager ("PM", blue). */
+export interface RoleChip {
+    text: string;
+    /** Fill of the chip. */
+    color: string;
+}
+
+export function roleChip(role: string): RoleChip | null {
+    const r = role.trim().toLowerCase();
+    if (r === "ceo") return { text: "CEO", color: "#ffd166" };
+    if (r === "project manager") return { text: "PM", color: "#7cc4ff" };
+    return null;
+}
+
+/** Width of a chip in SVG units, with the gap before it. */
+export function chipWidth(chip: RoleChip | null): number {
+    return chip ? 16 + [...chip.text].length * 14 : 0;
+}
+
+/** Width of the tag for the name label, the role line and the chip: the wider of the lines. */
+export function tagBoxWidth(label: string, role: string, chip: RoleChip | null = null): number {
+    return Math.max(tagWidth(label) + chipWidth(chip), 28 + [...role].length * 14.5);
+}
+
+/** Width of the small box that shows the role above a tag that has no role line. */
+export function rolePopWidth(role: string): number {
+    return 28 + [...role].length * 14.5;
 }
 
 /** Colour of the role line. The CEO and the Project Manager have their own colour. */

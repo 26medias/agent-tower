@@ -94,3 +94,58 @@ export function pickActive(
 export function employeeStartedText(payload: Pick<EmployeeStartedPayload, "byName" | "name">): string {
     return `${payload.byName} started ${payload.name}`;
 }
+
+/** Sessions that went from `working` to `idle` or `done` between two states: a turn that finished. */
+export function finishedTurns(prev: SessionState, next: SessionState): TrackedSession[] {
+    return Object.values(next.byId).filter((s) => {
+        const before = prev.byId[s.sessionId];
+        return !!before && before.status === "working" && (s.status === "idle" || s.status === "done");
+    });
+}
+
+/**
+ * Keep the order in which sessions started to ask a question. A session that asks and has no number
+ * gets the next one. A session that does not ask any more, or is gone, loses its number. The result
+ * is the same object when nothing changed. Lower is older.
+ */
+export function trackQuestions(
+    since: Record<string, number>,
+    state: SessionState,
+    seq: number,
+): { since: Record<string, number>; seq: number } {
+    const next = { ...since };
+    let n = seq;
+    let changed = false;
+    for (const s of Object.values(state.byId)) {
+        if (s.status === "question") {
+            if (!(s.sessionId in next)) {
+                next[s.sessionId] = ++n;
+                changed = true;
+            }
+        } else if (s.sessionId in next) {
+            delete next[s.sessionId];
+            changed = true;
+        }
+    }
+    for (const id of Object.keys(next)) {
+        if (!state.byId[id]) {
+            delete next[id];
+            changed = true;
+        }
+    }
+    return changed ? { since: next, seq: n } : { since, seq };
+}
+
+/** The sessions in `question` on all floors, the oldest first. */
+export function questionOrder(since: Record<string, number>, state: SessionState): TrackedSession[] {
+    return Object.values(state.byId)
+        .filter((s) => s.status === "question")
+        .sort((a, b) => (since[a.sessionId] ?? 0) - (since[b.sessionId] ?? 0));
+}
+
+/** The question that "Open" opens now: the one after `last` in the list, wrapping. With no `last`, the oldest. */
+export function nextAfter<T extends { sessionId: string }>(list: T[], last: string | null): T | null {
+    if (list.length === 0) return null;
+    const at = list.findIndex((q) => q.sessionId === last);
+    return list[(at + 1) % list.length];
+}

@@ -6,8 +6,6 @@
         STATUS_CHOICES,
         canDiscard,
         canMerge,
-        diffPlaceholder,
-        diffText,
         eventText,
         formatTime,
         hasBranch,
@@ -39,18 +37,8 @@
     let gitBusy = $state(false);
     let lastMerge = $state<{ id: number; result: TaskMerge } | null>(null);
 
-    const diffOpen = $derived(
-        task !== null && store.taskDiff !== null && store.taskDiff.path === store.openPath && store.taskDiff.id === task.id,
-    );
-    const diff = $derived(diffOpen ? (store.taskDiff?.diff ?? null) : null);
-    const diffError = $derived(diffOpen ? (store.taskDiff?.error ?? null) : null);
+    // The diff and the report open in a large overlay (TaskReader), not in this narrow column.
     const merged = $derived(task !== null && lastMerge !== null && lastMerge.id === task.id ? lastMerge.result : null);
-
-    async function toggleDiff(): Promise<void> {
-        if (!task) return;
-        if (diffOpen) store.hideDiff();
-        else await store.showDiff(task.id);
-    }
 
     async function merge(): Promise<void> {
         if (!task || gitBusy) return;
@@ -137,8 +125,8 @@
                     <dd class="mono" data-testid="detail-worktree">{wt ?? "removed"}</dd>
                 </dl>
                 <div class="git-actions">
-                    <button type="button" data-testid="show-diff" aria-expanded={diffOpen} onclick={toggleDiff}>
-                        {diffOpen ? "Hide diff" : "Show diff"}
+                    <button type="button" data-testid="show-diff" aria-haspopup="dialog" onclick={() => void store.openReader("diff", task.id)}>
+                        Show diff
                     </button>
                     {#if canMerge(task)}
                         <button
@@ -149,7 +137,7 @@
                             title="Merge the branch into {task.baseBranch}. The app removes the worktree and sets the task to done."
                             onclick={merge}
                         >
-                            Merge
+                            Merge into {task.baseBranch}
                         </button>
                     {/if}
                     {#if canDiscard(task)}
@@ -166,20 +154,6 @@
                     <p class="merge-note" class:blocked={!merged.merged} data-testid="merge-result" data-merged={merged.merged}>
                         {merged.message}
                     </p>
-                {/if}
-                {#if diffOpen}
-                    {#if diffError}
-                        <p class="error">{diffError}</p>
-                    {:else if diff === null}
-                        <p class="dim">Loading the diff...</p>
-                    {:else}
-                        {@const placeholder = diffPlaceholder(diff)}
-                        {#if placeholder}
-                            <p class="dim" data-testid="diff-placeholder">{placeholder}</p>
-                        {:else}
-                            <pre class="diff" aria-label="Diff text" data-testid="diff-box">{diffText(diff)}</pre>
-                        {/if}
-                    {/if}
                 {/if}
             {/if}
 
@@ -212,33 +186,37 @@
                 {:else if current?.report === undefined}
                     <p class="dim">Loading the report...</p>
                 {:else if current?.report !== null}
-                    <pre class="report" aria-label="Report text">{current.report}</pre>
+                    <button type="button" data-testid="open-report" aria-haspopup="dialog" onclick={() => void store.openReader("report", task.id)}>
+                        Open the report
+                    </button>
                 {/if}
             {/if}
 
             <h4>Operator</h4>
             <div class="controls">
-                <label class="row">
-                    <span>Assign to</span>
-                    <select bind:value={assignTo} aria-label="Assign to">
-                        <option value="" disabled>Choose an employee</option>
-                        {#each store.orderedEmployees as emp (emp.slug)}
-                            <option value={emp.slug} title={emp.role}>{emp.name}</option>
-                        {/each}
-                    </select>
-                    <button type="button" disabled={busy || assignTo === "" || assignTo === task.assignee} onclick={assign}>
-                        Assign
-                    </button>
-                </label>
+                <div class="field">
+                    <label for="assign-to">Assign to</label>
+                    <div class="row">
+                        <select id="assign-to" bind:value={assignTo} aria-label="Assign to">
+                            <option value="" disabled>Choose an employee</option>
+                            {#each store.orderedEmployees as emp (emp.slug)}
+                                <option value={emp.slug} title={emp.role}>{emp.name}</option>
+                            {/each}
+                        </select>
+                        <button type="button" disabled={busy || assignTo === "" || assignTo === task.assignee} onclick={assign}>
+                            Assign
+                        </button>
+                    </div>
+                </div>
                 <form class="status-form" onsubmit={apply}>
-                    <label class="row">
-                        <span>Status</span>
-                        <select bind:value={statusChoice} aria-label="Status">
+                    <div class="field">
+                        <label for="task-status">Status</label>
+                        <select id="task-status" bind:value={statusChoice} aria-label="Status">
                             {#each STATUS_CHOICES as s (s)}
                                 <option value={s}>{statusLabel(s)}</option>
                             {/each}
                         </select>
-                    </label>
+                    </div>
                     <textarea rows="2" placeholder="Add a note (optional)" aria-label="Note" bind:value={note}></textarea>
                     <button type="submit" class="primary" disabled={busy || (statusChoice === task.status && note.trim() === "")}>
                         {statusChoice === task.status ? "Add the note" : "Set the status"}
@@ -373,20 +351,6 @@
         color: var(--dim);
     }
 
-    .report {
-        max-height: 220px;
-        margin: 4px 0 0;
-        padding: 8px;
-        overflow: auto;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-        font-family: var(--mono);
-        font-size: 12px;
-        background: var(--bg-deep);
-        border: 1px solid var(--line);
-        border-radius: 6px;
-    }
-
     .error {
         margin: 0;
         color: var(--danger);
@@ -399,20 +363,27 @@
         gap: 8px;
     }
 
+    /* The label is above the field, so that the select has the whole width of the column. */
+    .field {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .field label {
+        color: var(--dim);
+        font-size: 11px;
+    }
+
     .row {
         display: flex;
         align-items: center;
         gap: 6px;
     }
 
-    .row span {
-        flex: none;
-        width: 62px;
-        color: var(--dim);
-    }
-
     .row select {
         flex: 1;
+        min-width: 0;
     }
 
     .git-actions {
@@ -430,20 +401,6 @@
 
     .merge-note.blocked {
         color: var(--danger);
-    }
-
-    /* Plain text, monospace, with a scroll in both directions. */
-    .diff {
-        max-height: 260px;
-        margin: 6px 0 0;
-        padding: 8px;
-        overflow: auto;
-        white-space: pre;
-        font-family: var(--mono);
-        font-size: 11px;
-        background: var(--bg-deep);
-        border: 1px solid var(--line);
-        border-radius: 6px;
     }
 
     .status-form {

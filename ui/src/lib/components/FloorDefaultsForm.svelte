@@ -3,7 +3,9 @@
     // select has "(not set)" first. The model list is the list of the selected CLI. With no CLI
     // the model and effort selects are disabled and their values go to null.
     import { untrack } from "svelte";
+    import { onDestroy } from "svelte";
     import { afterCliChange, afterModelChange, effortChoices, effortList, listFor, modelChoices } from "$lib/models";
+    import { POLICY_IDS, POLICY_INFO } from "$lib/policies";
     import { store } from "$lib/store.svelte";
     import type { CliKind, FloorDefaults, Policy } from "$lib/types";
 
@@ -14,6 +16,10 @@
     let effort = $state(initial?.effort ?? "");
     let policy = $state<Policy | "">(initial?.policy ?? "");
     let busy = $state(false);
+    // "Saved" shows for 2 s after a good save.
+    let savedNote = $state(false);
+    let savedTimer: ReturnType<typeof setTimeout> | undefined;
+    onDestroy(() => clearTimeout(savedTimer));
 
     const list = $derived(cli === "" ? [] : listFor(store.models, cli));
     const modelOptions = $derived(modelChoices(list, model));
@@ -55,8 +61,13 @@
     async function save(): Promise<void> {
         if (busy || !dirty) return;
         busy = true;
-        await store.setFloorDefaults(wanted);
+        const ok = await store.setFloorDefaults(wanted);
         busy = false;
+        if (ok) {
+            savedNote = true;
+            clearTimeout(savedTimer);
+            savedTimer = setTimeout(() => (savedNote = false), 2000);
+        }
     }
 </script>
 
@@ -81,15 +92,15 @@
             <span>Policy</span>
             <select name="defaultPolicy" value={policy} onchange={(e) => (policy = e.currentTarget.value as Policy | "")}>
                 <option value="">(not set)</option>
-                <option value="read_only">read_only</option>
-                <option value="edit_in_worktree">edit_in_worktree</option>
-                <option value="ask_always">ask_always</option>
+                {#each POLICY_IDS as id (id)}
+                    <option value={id}>{POLICY_INFO[id].label}</option>
+                {/each}
             </select>
         </label>
         <label>
             <span>Model</span>
             <select name="defaultModel" disabled={cli === ""} value={model} onchange={(e) => changeModel(e.currentTarget.value)}>
-                <option value="">(not set)</option>
+                <option value="">{cli === "" ? "Choose a CLI first" : "(not set)"}</option>
                 {#each modelOptions as choice (choice.value)}
                     <option value={choice.value}>{choice.label}</option>
                 {/each}
@@ -98,7 +109,7 @@
         <label>
             <span>Effort</span>
             <select name="defaultEffort" disabled={cli === ""} value={effort} onchange={(e) => (effort = e.currentTarget.value)}>
-                <option value="">(not set)</option>
+                <option value="">{cli === "" ? "Choose a CLI first" : "(not set)"}</option>
                 {#each effortOptions as choice (choice.value)}
                     <option value={choice.value}>{choice.label}</option>
                 {/each}
@@ -109,6 +120,11 @@
         An employee with no model or effort of its own gets these. With a CLI set, only employees of that CLI get them.
     </p>
     <div class="buttons">
+        {#if savedNote}
+            <span class="saved" role="status" data-testid="defaults-saved">Saved</span>
+        {:else if !dirty}
+            <span class="reason" data-testid="defaults-reason">No change to save.</span>
+        {/if}
         <button type="submit" class="primary" disabled={!dirty || busy}>save defaults</button>
     </div>
 </form>
@@ -152,6 +168,18 @@
 
     .buttons {
         display: flex;
+        align-items: center;
         justify-content: flex-end;
+        gap: 8px;
+    }
+
+    .saved {
+        color: var(--ok);
+        font-weight: 700;
+    }
+
+    .reason {
+        color: var(--dim);
+        font-size: 12px;
     }
 </style>

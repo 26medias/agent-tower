@@ -102,3 +102,17 @@ export function afterModelChange(list: ModelOption[], model: string, effort: str
 export function floorDefaultLabel(defaults: FloorDefaults | null | undefined, cli: CliKind): string {
     return `floor default (${defaultModelFor(defaults, cli) ?? "CLI default"})`;
 }
+
+/**
+ * The model text for an employee: the model that its session will get. A model of its own wins.
+ * With none, the floor default applies when it is set for this CLI (see `defaultModelFor`):
+ * "haiku (floor default)". Otherwise the CLI picks its own model: "CLI default".
+ */
+export function modelDisplay(
+    employee: { cli: CliKind; model: string | null },
+    defaults: FloorDefaults | null | undefined,
+): string {
+    if (employee.model) return employee.model;
+    const fallback = defaultModelFor(defaults, employee.cli);
+    return fallback ? `${fallback} (floor default)` : "CLI default";
+}

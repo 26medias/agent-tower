@@ -115,6 +115,34 @@ textarea {
     min-width: 0;
 }
 
+/* One look for the selects and the inputs. The native GTK select has a grey gradient. */
+select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.5 3.2 L5 6.8 L8.5 3.2' fill='none' stroke='%2393a2c2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    background-size: 10px 10px;
+    cursor: pointer;
+}
+
+select:disabled {
+    cursor: default;
+}
+
+option {
+    background: var(--bg-deep);
+    color: var(--text);
+}
+
+/* A browser with no `inert` attribute: modal.ts marks the page behind a modal with this. */
+[data-inert-fallback],
+[data-inert-fallback] * {
+    pointer-events: none !important;
+    user-select: none;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
@@ -123,7 +151,9 @@ textarea:focus {
 }
 
 button:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+select:focus-visible,
+input[type="checkbox"]:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
 }

@@ -1,8 +1,12 @@
 // The one store of the UI: floors, the open floor, sessions by ID, the active tab, the selected
 // employee, logos, settings, toasts.
 // Svelte 5 runes. The pure state changes live in ./reducers.ts.
+import { tick } from "svelte";
 import * as ipc from "./ipc";
+import { describeError, type ErrorAction } from "./messages";
+import { modalOpen } from "./modal";
 import { orderEmployees } from "./order";
+import { focusTerminal } from "./terminal";
 import { taskLabel } from "./tasks";
 import {
     applyFloorView,
@@ -10,9 +14,13 @@ import {
     dismissTab,
     emptySessionState,
     employeeStartedText,
+    finishedTurns,
     isLive,
+    nextAfter,
     pickActive,
     questionCount,
+    questionOrder,
+    trackQuestions,
     sessionOf,
     tabSessions,
     upsertSession,
@@ -44,19 +52,58 @@ export interface Toast {
     text: string;
     /** `info` is a plain notice. No kind is an error. */
     kind?: "info";
+    /** A button that the toast offers, for an error that the operator can fix in the UI. */
+    action?: { label: string; run: () => void };
+}
+
+/** A session that waits for an answer, with the words that the attention bar shows. */
+export interface Question {
+    sessionId: string;
+    path: string;
+    slug: string;
+    /** "Eli (Engineer)", or "Setup agent". */
+    label: string;
+    floorName: string;
+}
+
+/** The title of the window. `(2) Agent Tower` while two sessions ask a question. */
+export function windowTitleFor(questions: number): string {
+    return questions > 0 ? `(${questions}) Agent Tower` : "Agent Tower";
 }
 
 /** What a button was clicked to do. A start, a resume or the setup agent. */
 export type LaunchKind = "start" | "resume" | "setup";
 
 const LAST_FLOOR_KEY = "agent-tower:last-floor";
-const TOAST_MS = 9000;
+const DEBUG_KEY = "agent-tower:debug";
+/** An information toast closes by itself after this time. An error toast stays until the operator closes it. */
+export const TOAST_INFO_MS = 6000;
+/** The overlay shows this many toasts, the newest first. */
+export const TOASTS_VISIBLE = 4;
+/** The store keeps this many toasts. The oldest go first. */
+const TOASTS_KEPT = 20;
 
 function readLastFloor(): string | null {
     try {
         return localStorage.getItem(LAST_FLOOR_KEY);
     } catch {
         return null;
+    }
+}
+
+function readDebug(): boolean {
+    try {
+        return localStorage.getItem(DEBUG_KEY) === "1";
+    } catch {
+        return false;
+    }
+}
+
+function writeDebug(on: boolean): void {
+    try {
+        localStorage.setItem(DEBUG_KEY, on ? "1" : "0");
+    } catch {
+        // Storage can be blocked. The choice works for this run only.
     }
 }
 
@@ -81,6 +128,23 @@ class Store {
     models = $state.raw<ModelCatalog | null>(null);
     /** The settings panel is open. */
     settingsOpen = $state(false);
+    /** A section of the settings panel to scroll to when it opens. */
+    settingsSection = $state<string | null>(null);
+    /** The debug paste bar shows under the terminal. Off by default: the operator does not need it. */
+    debugVisible = $state(readDebug());
+    /** The reader overlay of the open task: the report text or the diff. */
+    reader = $state<"report" | "diff" | null>(null);
+    /** The employees of each floor that the UI opened. The attention bar names sessions of any floor with it. */
+    employeesByPath = $state.raw<Record<string, Employee[]>>({});
+    /** The order in which sessions started to ask a question, by session ID. Lower is older. */
+    private questionSince = $state.raw<Record<string, number>>({});
+    private questionSeq = 0;
+    /** Sessions that finished a turn while their tab was not in view, by session ID. */
+    private unread = $state.raw<Record<string, true>>({});
+    /** The session that the operator typed in last. */
+    private lastInputId: string | null = null;
+    /** The question that "Open" opened last. The next click opens the next one. */
+    private lastOpenedQuestion = $state<string | null>(null);
     /** Logo of each floor as a `data:` URL, by floor path. A floor without a logo has no entry. */
     logos = $state.raw<Record<string, string>>({});
     /** The employee that the operator selected, by floor path. */
@@ -153,6 +217,13 @@ class Store {
         return slug ? (this.orderedEmployees.find((e) => e.slug === slug) ?? null) : null;
     });
 
+    /** The live or last setup session of the open floor, when the operator selected it (its tab). */
+    selectedSetup = $derived.by((): TrackedSession | null => {
+        const path = this.openPath;
+        if (!path || this.selectedByPath[path] !== SETUP_SLUG) return null;
+        return sessionOf(this.sessionState, path, SETUP_SLUG) ?? null;
+    });
+
     private employeeIndex(slug: string): number {
         const i = this.orderedEmployees.findIndex((e) => e.slug === slug);
         return i < 0 ? Number.MAX_SAFE_INTEGER : i;
@@ -165,7 +236,7 @@ class Store {
         try {
             this.unlisten.push(
                 await ipc.onSessionChanged((payload) => {
-                    this.sessionState = applySessionChanged(this.sessionState, payload);
+                    this.commitSessions(applySessionChanged(this.sessionState, payload));
                 }),
                 // The tab and the status of the new session come from `session-changed`, as for a
                 // session that the operator starts. This event adds only the notice. It does not
@@ -207,10 +278,38 @@ class Store {
 
     // ---- toasts ----
 
+    /**
+     * Show a toast. An information toast closes after `TOAST_INFO_MS`. An error toast stays until
+     * the operator closes it. An error is shown as text for a person (see messages.ts), and a
+     * problem with a program path offers a button for Settings. The same text twice shows once.
+     */
     toast(text: string, kind?: "info"): void {
         const id = ++this.toastId;
-        this.toasts = [...this.toasts, { id, text, kind }];
-        setTimeout(() => this.dismissToast(id), TOAST_MS);
+        let shown = text;
+        let action: Toast["action"];
+        if (kind !== "info") {
+            const described = describeError(text);
+            shown = described.text;
+            action = this.actionFor(described.action);
+        }
+        const same = this.toasts.filter((t) => !(t.text === shown && t.kind === kind));
+        this.toasts = [...same, { id, text: shown, kind, action }].slice(-TOASTS_KEPT);
+        if (kind === "info") setTimeout(() => this.dismissToast(id), TOAST_INFO_MS);
+    }
+
+    private actionFor(kind: ErrorAction): Toast["action"] {
+        if (kind === "settings-programs") return { label: "Open Settings", run: () => this.openSettings("programs") };
+        return undefined;
+    }
+
+    openSettings(section: string | null = null): void {
+        this.settingsSection = section;
+        this.settingsOpen = true;
+    }
+
+    setDebugVisible(on: boolean): void {
+        this.debugVisible = on;
+        writeDebug(on);
     }
 
     dismissToast(id: number): void {
@@ -234,8 +333,109 @@ class Store {
 
     private applyView(view: FloorView): void {
         this.floorView = view;
-        this.sessionState = applyFloorView(this.sessionState, view);
+        this.employeesByPath = { ...this.employeesByPath, [view.path]: view.employees };
+        this.commitSessions(applyFloorView(this.sessionState, view));
         this.syncLogos();
+    }
+
+    // ---- what the operator must see: questions, unread marks, finished turns ----
+
+    /**
+     * Put a new session state in place. It compares the old and the new state to keep the
+     * question order and the unread marks, and to tell the operator about a turn that finished.
+     */
+    private commitSessions(next: SessionState): void {
+        const prev = this.sessionState;
+        const tracked = trackQuestions(this.questionSince, next, this.questionSeq);
+        this.questionSeq = tracked.seq;
+        if (tracked.since !== this.questionSince) this.questionSince = tracked.since;
+        const finished = finishedTurns(prev, next);
+        this.sessionState = next;
+        for (const s of finished) this.turnFinished(s);
+        this.markRead();
+    }
+
+    /** The tab of this session is in front of the operator now. */
+    private inView(s: { path: string; sessionId: string }): boolean {
+        return s.path === this.openPath && s.sessionId === this.activeId;
+    }
+
+    private turnFinished(s: TrackedSession): void {
+        if (this.inView(s)) return;
+        this.unread = { ...this.unread, [s.sessionId]: true };
+        // One notice, for the session that the operator last typed in.
+        if (s.sessionId === this.lastInputId) this.toast(`${this.sessionLabel(s)} finished a turn`, "info");
+    }
+
+    /** Clear the unread mark of the tab that is in view. */
+    private markRead(): void {
+        const id = this.activeId;
+        if (id && this.unread[id]) {
+            const next = { ...this.unread };
+            delete next[id];
+            this.unread = next;
+        }
+    }
+
+    /** True when the session finished a turn and its tab is not in view. */
+    isUnread(sessionId: string): boolean {
+        const s = this.sessionState.byId[sessionId];
+        return !!this.unread[sessionId] && !!s && !this.inView(s);
+    }
+
+    /** The operator typed or pasted in the terminal of this session. */
+    noteInput(sessionId: string): void {
+        this.lastInputId = sessionId;
+        // The operator answers a session: it is read.
+        if (this.unread[sessionId]) {
+            const next = { ...this.unread };
+            delete next[sessionId];
+            this.unread = next;
+        }
+    }
+
+    /** "Eli (Engineer)", or "Setup agent". Works for a session of any floor that the UI opened. */
+    sessionLabel(s: { path: string; slug: string }): string {
+        if (s.slug === SETUP_SLUG) return "Setup agent";
+        const emp = (this.employeesByPath[s.path] ?? []).find((e) => e.slug === s.slug);
+        return emp ? `${emp.name} (${emp.role})` : s.slug;
+    }
+
+    /** The sessions in `question` on all floors that the UI knows, the oldest first. */
+    questions = $derived.by((): Question[] =>
+        questionOrder(this.questionSince, this.sessionState).map((s) => {
+            const floor = this.floors.find((f) => f.path === s.path);
+            return {
+                sessionId: s.sessionId,
+                path: s.path,
+                slug: s.slug,
+                label: this.sessionLabel(s),
+                floorName: floor?.name ?? s.path.split("/").filter((p) => p !== "").pop() ?? s.path,
+            };
+        }),
+    );
+
+    /** The question that "Open" opens now: the one after the last opened one, or the oldest. */
+    nextQuestion = $derived(nextAfter(this.questions, this.lastOpenedQuestion));
+
+    windowTitle = $derived(windowTitleFor(this.questions.length));
+
+    /**
+     * Open a session that asks a question: open its floor when it is not the open one, select the
+     * employee (this makes its tab the active tab), and put the keyboard focus in its terminal.
+     */
+    async openQuestion(sessionId: string): Promise<void> {
+        const s = this.sessionState.byId[sessionId];
+        if (!s) return;
+        this.lastOpenedQuestion = sessionId;
+        if (s.path !== this.openPath && !(await this.openFloor(s.path))) return;
+        this.selectedByPath = { ...this.selectedByPath, [s.path]: s.slug };
+        this.selectTab(sessionId);
+        await tick();
+        // The pane shows after the tab change. A modal that is open keeps the focus.
+        requestAnimationFrame(() => {
+            if (!modalOpen()) focusTerminal(sessionId);
+        });
     }
 
     /** Forget the text of a rejected `logo_generate` call: of one floor, or of all floors. */
@@ -308,6 +508,7 @@ class Store {
             this.pendingCreate = null;
             this.switchTo(view);
             this.applyView(view);
+            this.syncSelection();
             writeLastFloor(view.path);
             void this.loadTasks(view.path);
             await this.loadFloors();
@@ -329,6 +530,7 @@ class Store {
             this.pendingCreate = null;
             this.switchTo(view);
             this.applyView(view);
+            this.syncSelection();
             writeLastFloor(view.path);
             void this.loadTasks(view.path);
             await this.loadFloors();
@@ -424,6 +626,7 @@ class Store {
         this.openTaskByPath = { ...this.openTaskByPath, [path]: id };
         this.taskDetail = null;
         this.taskDiff = null;
+        this.reader = null;
         void this.loadTaskDetail(path, id);
     }
 
@@ -435,6 +638,7 @@ class Store {
         this.openTaskByPath = next;
         this.taskDetail = null;
         this.taskDiff = null;
+        this.reader = null;
     }
 
     /** Show the diff box of a task. The box is empty ("loading") until the command answers. */
@@ -454,6 +658,18 @@ class Store {
 
     hideDiff(): void {
         this.taskDiff = null;
+        if (this.reader === "diff") this.reader = null;
+    }
+
+    /** Open the report or the diff of the open task in the large reader overlay. */
+    async openReader(kind: "report" | "diff", id: number): Promise<void> {
+        this.reader = kind;
+        if (kind === "diff") await this.showDiff(id);
+    }
+
+    closeReader(): void {
+        if (this.reader === "diff") this.taskDiff = null;
+        this.reader = null;
     }
 
     /**
@@ -467,6 +683,7 @@ class Store {
         try {
             const result = await ipc.taskMerge(path, id);
             this.taskDiff = null;
+            this.reader = null;
             if (result.merged) this.toast(result.message, "info");
             await this.loadTasks(path);
             return result;
@@ -483,6 +700,7 @@ class Store {
         try {
             await ipc.taskDiscard(path, id);
             this.taskDiff = null;
+            this.reader = null;
             this.toast(`${taskLabel(id)} is discarded.`, "info");
             await this.loadTasks(path);
             return true;
@@ -661,18 +879,38 @@ class Store {
         return questionCount(this.sessionState, path);
     }
 
+    /** The number of live sessions of a floor (every status but `stopped`). */
+    liveIn(path: string): number {
+        return Object.values(this.sessionState.byId).filter((s) => s.path === path && isLive(s)).length;
+    }
+
+    /** Make a tab the active tab. The employee of the tab is the selected employee: the bar and the tab agree. */
     selectTab(sessionId: string): void {
         const path = this.openPath;
         if (!path) return;
         this.activeByPath = { ...this.activeByPath, [path]: sessionId };
+        const session = this.sessionState.byId[sessionId];
+        if (session && session.path === path) this.selectedByPath = { ...this.selectedByPath, [path]: session.slug };
+        this.markRead();
+    }
+
+    /** The selected employee follows the active tab of the open floor. */
+    private syncSelection(): void {
+        const path = this.openPath;
+        const id = this.activeId;
+        const session = id ? this.sessionState.byId[id] : undefined;
+        if (path && session && session.path === path) this.selectedByPath = { ...this.selectedByPath, [path]: session.slug };
+        this.markRead();
     }
 
     closeTab(sessionId: string): void {
-        this.sessionState = dismissTab(this.sessionState, sessionId);
+        this.commitSessions(dismissTab(this.sessionState, sessionId));
+        // The tab that is active now (a closed tab never was) is the employee in the bar.
+        this.syncSelection();
     }
 
     private adopt(path: string, session: SessionView): void {
-        this.sessionState = upsertSession(this.sessionState, path, session);
+        this.commitSessions(upsertSession(this.sessionState, path, session));
         // Show the new tab only when the operator still looks at the same floor.
         if (this.openPath === path) this.selectTab(session.sessionId);
     }

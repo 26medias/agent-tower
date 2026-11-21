@@ -19,6 +19,12 @@ import {
     statusLabel,
     taskLabel,
     upsertTask,
+    DONE_KEEP,
+    NO_FILTER,
+    UNASSIGNED,
+    filterTasks,
+    isFiltering,
+    splitDone,
 } from "./tasks";
 import type { TaskEvent, TaskStatus, TaskView } from "./types";
 
@@ -217,5 +223,62 @@ describe("the git branch of a task (docs/ipc-m3.md)", () => {
             line: "The app made the branch task/T-7-add-login",
             note: "Branch task/T-7-add-login from main at 0123456789ab.",
         });
+    });
+});
+
+describe("filterTasks", () => {
+    const list = [
+        task(1, "todo", { title: "Write the login form", assignee: "eng-lin" }),
+        task(2, "done", { title: "Fix the build", description: "Linux only", assignee: "eng-sam" }),
+        task(3, "review", { title: "Plan the release", assignee: null }),
+    ];
+    const names = { "eng-lin": "Lin", "eng-sam": "Sam" };
+    const ids = (l: TaskView[]) => l.map((t) => t.id);
+
+    it("keeps all tasks with no filter", () => {
+        expect(filterTasks(list, NO_FILTER, names)).toEqual(list);
+        expect(isFiltering(NO_FILTER)).toBe(false);
+        expect(isFiltering({ assignee: "", query: "  " })).toBe(false);
+        expect(isFiltering({ assignee: "x", query: "" })).toBe(true);
+    });
+
+    it("filters by assignee, and by no assignee", () => {
+        expect(ids(filterTasks(list, { assignee: "eng-sam", query: "" }, names))).toEqual([2]);
+        expect(ids(filterTasks(list, { assignee: UNASSIGNED, query: "" }, names))).toEqual([3]);
+    });
+
+    it("searches title, description, label, assignee name and status, ignoring case", () => {
+        expect(ids(filterTasks(list, { assignee: "", query: "LOGIN" }, names))).toEqual([1]);
+        expect(ids(filterTasks(list, { assignee: "", query: "linux" }, names))).toEqual([2]);
+        expect(ids(filterTasks(list, { assignee: "", query: "t-3" }, names))).toEqual([3]);
+        expect(ids(filterTasks(list, { assignee: "", query: "sam" }, names))).toEqual([2]);
+        expect(ids(filterTasks(list, { assignee: "", query: "review" }, names))).toEqual([3]);
+    });
+
+    it("needs every word of the query, and combines with the assignee", () => {
+        expect(ids(filterTasks(list, { assignee: "", query: "the build" }, names))).toEqual([2]);
+        expect(ids(filterTasks(list, { assignee: "", query: "the zzz" }, names))).toEqual([]);
+        expect(ids(filterTasks(list, { assignee: "eng-lin", query: "build" }, names))).toEqual([]);
+    });
+});
+
+describe("splitDone", () => {
+    it("keeps the 3 newest tasks in view, newest first, and folds the rest", () => {
+        const done = [1, 2, 3, 4, 5].map((id) => task(id, "done", { updatedAt: id === 2 ? 99_000 : id * 1000 }));
+        const { recent, older } = splitDone(done);
+        expect(DONE_KEEP).toBe(3);
+        expect(recent.map((t) => t.id)).toEqual([2, 5, 4]);
+        expect(older.map((t) => t.id)).toEqual([3, 1]);
+    });
+
+    it("has no older tasks when 3 or fewer are done", () => {
+        const { recent, older } = splitDone([task(1, "done"), task(2, "done")]);
+        expect(recent.map((t) => t.id)).toEqual([2, 1]);
+        expect(older).toEqual([]);
+    });
+
+    it("breaks a tie of the time by the ID", () => {
+        const { recent } = splitDone([task(1, "done", { updatedAt: 5 }), task(2, "done", { updatedAt: 5 })]);
+        expect(recent.map((t) => t.id)).toEqual([2, 1]);
     });
 });

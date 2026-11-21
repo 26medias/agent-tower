@@ -139,3 +139,50 @@ export function upsertTask(list: TaskView[], task: TaskView): TaskView[] {
     const next = list.some((t) => t.id === task.id) ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
     return next.sort((a, b) => a.id - b.id);
 }
+
+// ---- the filter and the done group of the board ----
+
+/** What the board shows: all tasks, or the tasks of one assignee, or the tasks that match a text. */
+export interface TaskFilter {
+    /** "" = everyone. `UNASSIGNED` = tasks with no assignee. Else an employee slug. */
+    assignee: string;
+    /** Matches the title, the description, the label (`T-12`), the assignee name and the status words. Ignores case. */
+    query: string;
+}
+
+export const UNASSIGNED = "(unassigned)";
+
+export const NO_FILTER: TaskFilter = { assignee: "", query: "" };
+
+export function isFiltering(filter: TaskFilter): boolean {
+    return filter.assignee !== "" || filter.query.trim() !== "";
+}
+
+/** The tasks that pass the filter. A blank query matches all. Every word of the query must match. */
+export function filterTasks(tasks: TaskView[], filter: TaskFilter, names: Record<string, string> = {}): TaskView[] {
+    const words = filter.query.toLowerCase().split(/\s+/).filter((w) => w !== "");
+    return tasks.filter((t) => {
+        if (filter.assignee === UNASSIGNED) {
+            if (t.assignee !== null) return false;
+        } else if (filter.assignee !== "" && t.assignee !== filter.assignee) {
+            return false;
+        }
+        if (words.length === 0) return true;
+        const hay = [taskLabel(t.id), t.title, t.description, personName(t.assignee, names), statusLabel(t.status)]
+            .join("\n")
+            .toLowerCase();
+        return words.every((w) => hay.includes(w));
+    });
+}
+
+/** The board keeps this many of the newest done tasks in view. The rest of the group folds. */
+export const DONE_KEEP = 3;
+
+/**
+ * Split the done tasks: the newest `keep` (by the time of the last change, then by ID), newest
+ * first, and the older rest (newest first too).
+ */
+export function splitDone(tasks: TaskView[], keep = DONE_KEEP): { recent: TaskView[]; older: TaskView[] } {
+    const sorted = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id);
+    return { recent: sorted.slice(0, keep), older: sorted.slice(keep) };
+}

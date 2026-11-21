@@ -18,3 +18,9 @@ export function resumeButton(resumable: string[], progress: ResumeProgress | nul
     if (resumable.length === 0) return { visible: false, text: "", busy: false };
     return { visible: true, text: `Resume the last team (${resumable.length})`, busy: false };
 }
+
+/** Who the button resumes: "Ada (CEO), Maya (Project Manager) and 2 more". At most `max` names show. */
+export function resumeWho(labels: string[], max = 2): string {
+    if (labels.length <= max) return labels.join(", ");
+    return `${labels.slice(0, max).join(", ")} and ${labels.length - max} more`;
+}

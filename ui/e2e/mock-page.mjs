@@ -4,16 +4,22 @@
 //      screenshots go next to it with the suffixes -5 and -13),
 //      E2E_CHROME (path of a chromium or chrome binary; default: the Playwright cache),
 //      E2E_SETTINGS_SHOTS (folder for the screenshots of the settings panel and the employee
-//      form; default /tmp/agent-tower-review/settings).
+//      form; default /tmp/agent-tower-review/settings),
+//      E2E_REPAIR_SHOTS (folder for the screenshots of e2e/repair-checks.mjs; default
+//      /tmp/agent-tower-review/final-b-repair).
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { repairChecks } from "./repair-checks.mjs";
 
 const url = process.env.E2E_URL ?? "http://127.0.0.1:1420";
 const shot = process.env.E2E_SHOT ?? "mock-page.png";
 const settingsShots = process.env.E2E_SETTINGS_SHOTS ?? "/tmp/agent-tower-review/settings";
 mkdirSync(settingsShots, { recursive: true });
+// The screenshots of the repair checks (e2e/repair-checks.mjs).
+const repairShots = process.env.E2E_REPAIR_SHOTS ?? "/tmp/agent-tower-review/final-b-repair";
+mkdirSync(repairShots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -113,7 +119,15 @@ function insideDiamond({ x, y }) {
     return u >= 0 && u <= 1 && v >= 0 && v <= 1;
 }
 
+// Toasts are an overlay over the top of the task board. A check that clicks the board closes them first.
+async function clearToasts() {
+    const dismiss = page.locator('.toast button[aria-label="Dismiss"]');
+    while ((await dismiss.count()) > 0) await dismiss.first().click();
+}
+
 async function openDebug() {
+    // The debug paste bar is hidden by default. Ctrl+Shift+D shows it.
+    if ((await page.locator("details.debug-area").count()) === 0) await page.keyboard.press("Control+Shift+D");
     if ((await page.locator("details.debug-area[open]").count()) === 0) await page.click("details.debug-area > summary");
 }
 
@@ -211,7 +225,7 @@ try {
             (await page.locator(".roster .row").count()) === (await page.locator(".emp").count()),
     );
     check("mock badge shown", await page.locator(".mock").isVisible());
-    check("the debug area is collapsed", (await page.locator("details.debug-area[open]").count()) === 0);
+    check("the debug paste bar is hidden by default (P4)", (await page.locator("details.debug-area").count()) === 0);
     const box1280 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox() };
     // The old fixed rules ("at most 42%") became the default sizes. The operator can change them now (section 16).
     check("at 1280 x 800 the default office height is 42% of the window (336 px)", Math.abs(box1280.office.height - 336) <= 1, `office ${box1280.office.height}`);
@@ -419,14 +433,21 @@ try {
     await bar.locator("button.start").click();
     await page.waitForSelector(".toast");
     const toastText = await page.locator(".toast .text").first().innerText();
-    check("a rejected start shows its error text in a toast", toastText.includes("cannot start eng-sam"), toastText);
+    // Changed on purpose (D10, P3): the text starts with a capital letter now.
+    check("a rejected start shows its error text in a toast", toastText.includes("Cannot start eng-sam"), toastText);
     const toastBox = await page.locator(".toast").first().boundingBox();
     const officeBox = await page.locator(".office").boundingBox();
-    const debugBox = await page.locator(".debug-area").boundingBox();
+    const areaBoxT = await page.locator(".area").boundingBox();
+    // Changed on purpose (D10): a toast is an overlay at the top right. It does not move the office,
+    // and it stays above the terminal area (so it never covers the terminal input).
     check(
-        "the toast does not cover the office or the debug paste bar",
-        toastBox.y + toastBox.height <= officeBox.y + 1 && toastBox.y + toastBox.height < debugBox.y,
-        `toast y=${toastBox.y} h=${toastBox.height}, office y=${officeBox.y}, debug y=${debugBox.y}`,
+        "the toast is an overlay at the top right: the office has not moved, and the terminal area is free",
+        (await page.locator(".toast").first().evaluate((el) => getComputedStyle(el.parentElement).position)) === "fixed" &&
+            toastBox.x + toastBox.width > 1280 - 40 &&
+            toastBox.y + toastBox.height < areaBoxT.y &&
+            officeBox.y === 0 &&
+            Math.abs(officeBox.height - 336) <= 1,
+        `toast ${JSON.stringify(toastBox)}, office y=${officeBox.y} h=${officeBox.height}`,
     );
     check(
         "after a rejected start: no new tab, no new terminal, no session state on the bar",
@@ -468,7 +489,8 @@ try {
     // 9. Add employee form, edit and remove from the bar.
     await page.click(".bar button.add");
     await page.fill('input[name="name"]', "Zed Zebra");
-    check("slug is made from the name", (await page.locator(".slug code").innerText()) === "zed-zebra");
+    // Changed on purpose (P19): the form says "File name: zed-zebra.md", not "slug".
+    check("the file name is made from the name", (await page.locator(".slug code").innerText()) === "zed-zebra.md");
     // The model select shows the list of the selected CLI, and the effort select the efforts of
     // the selected model (docs/ipc-settings.md, section 6).
     const opts = (sel) => page.$$eval(`${sel} option`, (os) => os.map((o) => o.textContent.trim()));
@@ -534,7 +556,7 @@ try {
     check("with 5 employees every character anchor is inside the floor diamond", (await anchors()).every(insideDiamond));
     const sprite = await emp("zed-zebra").locator("image.sprite").getAttribute("href");
     check("another role gets a sprite from 2 to 5", /agent-[2-5]\.webp$/.test(sprite ?? ""), sprite ?? "");
-    while ((await page.locator(".toast button").count()) > 0) await page.locator(".toast button").first().click();
+    while ((await page.locator('.toast button[aria-label="Dismiss"]').count()) > 0) await page.locator('.toast button[aria-label="Dismiss"]').first().click();
     if ((await page.locator("details.debug-area[open]").count()) > 0) await page.click("details.debug-area > summary");
     await page.waitForTimeout(100);
     const officeBox2 = await page.locator(".office").boundingBox();
@@ -631,9 +653,10 @@ try {
     await page.click(".logoform button.primary");
     await page.waitForSelector('[data-error="logo"]');
     const noKeyText = await page.locator('[data-error="logo"]').innerText();
+    // Changed on purpose (P3): the error has no code prefix and starts with a capital letter.
     check(
-        "without a key the error starts with NO_KEY: and the busy state ends",
-        noKeyText.startsWith("NO_KEY:") && (await page.locator(".office .logo.busy").count()) === 0,
+        "without a key the error says that no key is known (no NO_KEY: code) and the busy state ends",
+        noKeyText.startsWith("No OpenAI key is known.") && !noKeyText.includes("NO_KEY") && (await page.locator(".office .logo.busy").count()) === 0,
         noKeyText,
     );
     check("the NO_KEY error shows the OpenAI key field", await page.locator("#openai-key").isVisible());
@@ -740,7 +763,7 @@ try {
 
     // 14. A floor can be forgotten from the floor list, also a missing one.
     await page.click("details.floors > summary");
-    const forget = page.locator('.floors li[data-path="/home/demo/gone"] button');
+    const forget = page.locator('.floors li[data-path="/home/demo/gone"] button:not(.floor-text)');
     await forget.click();
     await forget.click();
     await page.waitForFunction(() => document.querySelectorAll(".storey").length === 4);
@@ -775,10 +798,11 @@ try {
     const opened = await dialog.waitFor({ timeout: 3000 }).then(() => true, () => false);
     check("the Settings button opens the settings panel", opened);
     if (!opened) throw new Error("the settings panel did not open");
+    // Changed on purpose (P4): a seventh section, "interface", has the switch of the debug paste bar.
     check(
-        "the settings panel has the 6 sections",
+        "the settings panel has the 7 sections",
         JSON.stringify(await page.$$eval('[role="dialog"] section', (s) => s.map((x) => x.dataset.section))) ===
-            JSON.stringify(["keys", "image", "models", "defaults", "permissions", "programs"]),
+            JSON.stringify(["keys", "image", "models", "defaults", "permissions", "programs", "interface"]),
     );
     await page.keyboard.press("Escape");
     check("Escape closes the settings panel", await gone());
@@ -792,7 +816,7 @@ try {
 
     // API keys. A key was saved in the "New logo" flow above.
     await openSettings();
-    check("the key state says set (app config)", (await dialog.locator(".state").innerText()) === "set (app config)");
+    check("the key state says set in the app config file", (await dialog.locator(".state").innerText()) === "set in the app config file");
     const setsBefore = await count("settings_set");
     await dialog.locator("button.remove-key").click();
     await page.waitForFunction(() => document.querySelector('[role="dialog"] .state')?.textContent === "not set");
@@ -805,7 +829,7 @@ try {
     check("the key field is a password field", (await dialog.locator("#settings-openai-key").getAttribute("type")) === "password");
     await dialog.locator("#settings-openai-key").fill("sk-panel-secret-1");
     await dialog.locator(".keyform button.primary").click();
-    await page.waitForFunction(() => document.querySelector('[role="dialog"] .state')?.textContent === "set (app config)");
+    await page.waitForFunction(() => document.querySelector('[role="dialog"] .state')?.textContent === "set in the app config file");
     check(
         "after set the panel shows no key text and the field is empty",
         !(await dialog.innerText()).includes("sk-panel-secret-1") &&
@@ -1653,9 +1677,9 @@ try {
             JSON.stringify(await groupNames()));
         check("a group shows its count",
             (await page.locator('.board .group[data-status="done"] .g-count').innerText()) === "1");
-        check("done is collapsed at the start: its card is not shown",
-            (await cardIds("done")).length === 0 &&
-            (await page.locator('.board .group[data-status="done"] .group-head').getAttribute("aria-expanded")) === "false");
+        // Changed on purpose (D6c): the board keeps the 3 newest done tasks in view. The mock has one.
+        check("done shows its newest tasks at the start (the one done task is in view)",
+            (await cardIds("done")).join() === "1");
         check("the other groups show their cards", (await cardIds("in_progress")).join() === "2" && (await cardIds("review")).join() === "3" &&
             (await cardIds("blocked")).join() === "4" && (await cardIds("todo")).join() === "5");
         const card2 = page.locator('.board .card[data-task="2"]');
@@ -1668,17 +1692,14 @@ try {
         const colours = await page.$$eval(".board .card", (els) =>
             Object.fromEntries(els.map((e) => [e.dataset.status, getComputedStyle(e).borderLeftColor])));
         check("each status has its own colour on the card",
-            new Set(Object.values(colours)).size === 4 && colours.in_progress === "rgb(90, 169, 242)" && colours.review === "rgb(255, 197, 107)" &&
+            new Set(Object.values(colours)).size === 5 && colours.done === "rgb(111, 208, 140)" && colours.in_progress === "rgb(90, 169, 242)" && colours.review === "rgb(255, 197, 107)" &&
             colours.blocked === "rgb(255, 122, 144)" && colours.todo === "rgb(147, 162, 194)", JSON.stringify(colours));
-        await page.locator('.board .group[data-status="done"] .group-head').click();
-        check("a click on the done group shows its card", (await cardIds("done")).join() === "1");
-        await page.locator('.board .group[data-status="done"] .group-head').click();
-        check("a second click collapses it again", (await cardIds("done")).length === 0);
+        check("a done group with 3 tasks or fewer has nothing to fold", (await page.locator('[data-testid="done-older"]').count()) === 0);
         check("the header counts the open tasks (not done)", (await page.locator(".board .open-count").innerText()) === "4 open");
 
         // 19c. A click opens the detail panel.
         await page.locator('.board .card[data-task="3"]').click();
-        await page.waitForSelector('.board [aria-label="Task detail"] pre.report');
+        await page.waitForSelector('.board [aria-label="Task detail"] [data-testid="open-report"]');
         const detail = page.locator('.board [aria-label="Task detail"]');
         check("a click on a card opens the detail panel and hides the list", (await page.locator(".board .group").count()) === 0 && (await detail.count()) === 1);
         check("the detail shows the ID, the title, the status and the assignee",
@@ -1693,9 +1714,18 @@ try {
             eventLines[1].includes("Maya gave the task to Sam") && eventLines[2].includes("Sam set the status to Review") &&
             eventLines[3].includes("The app made the branch task/T-3-check-the-build-on-linux"),
             JSON.stringify(eventLines));
-        check("the report text shows in a scroll box as plain text",
-            (await detail.locator("pre.report").innerText()).startsWith("# T-3 report") &&
-            (await detail.locator("pre.report").evaluate((e) => getComputedStyle(e).overflow)) === "auto");
+        // Changed on purpose (P30): the report opens in a large overlay, not in the 260 px column.
+        check("the detail has no report box in the narrow column", (await detail.locator("pre").count()) === 0);
+        await detail.locator('[data-testid="open-report"]').click();
+        const reader = page.locator('[data-testid="reader"]');
+        await reader.waitFor();
+        check("the report text shows in a large overlay as plain text",
+            (await reader.locator("pre.report").innerText()).startsWith("# T-3 report") &&
+            (await reader.locator("pre.report").evaluate((e) => getComputedStyle(e).whiteSpace)) === "pre-wrap" &&
+            (await reader.boundingBox()).width >= 900);
+        await page.screenshot({ path: join(boardShots, "2-report-overlay.png") });
+        await page.keyboard.press("Escape");
+        await reader.waitFor({ state: "detached" });
         check("the report was read with task_report", (await calls("task_report")).some((c) => c.args.path === FLOOR && c.args.id === 3));
         check("the detail has the controls of the operator: assign, status and note",
             (await detail.locator('select[aria-label="Assign to"]').count()) === 1 &&
@@ -1729,9 +1759,10 @@ try {
             noteCall.args.status === "done" && noteCall.args.note === "One more thing", JSON.stringify(noteCall.args));
         check("the button for a note with no status change is off while the note is empty",
             await detail.getByRole("button", { name: "Add the note" }).isDisabled());
+        await clearToasts();
         await detail.getByRole("button", { name: /Back/ }).click();
         check("Back shows the list again, with the changed task in the done group",
-            (await cardIds("done")).length === 0 && (await page.locator('.board .group[data-status="done"] .g-count').innerText()) === "2" &&
+            (await cardIds("done")).join() === "3,1" && (await page.locator('.board .group[data-status="done"] .g-count').innerText()) === "2" &&
             (await page.locator(".board .open-count").innerText()) === "3 open");
 
         // 19e. The form makes a task.
@@ -1749,6 +1780,7 @@ try {
             (await page.locator('[data-testid="detail-status"]').innerText()) === "To do" &&
             (await page.locator('[data-testid="detail-assignee"]').innerText()) === "Unassigned" &&
             (await page.locator(".board .title").innerText()) === "Ship the demo");
+        await clearToasts();
         await page.getByRole("button", { name: /Back/ }).click();
         check("the new task is a card in the To do group", (await cardIds("todo")).join() === "5,6");
 
@@ -1775,6 +1807,7 @@ try {
         await page.evaluate(() => window.__towerMock.taskByEmployee("/home/demo/second", "ceo", { create: "Other floor" }));
         await page.waitForTimeout(200);
         check("an event of another floor does not read this floor again", (await calls("task_list")).length === before2);
+        await clearToasts();
         await page.getByRole("button", { name: /Back/ }).click();
 
         // 19g. The resize handle, like the other panes.
@@ -1858,7 +1891,8 @@ try {
             await page.waitForSelector('.board [aria-label="Task detail"] .title');
         };
         const back = async () => {
-            await detail.getByRole("button", { name: /Back/ }).click();
+            await clearToasts();
+        await detail.getByRole("button", { name: /Back/ }).click();
             await page.waitForSelector(".board .group");
         };
         // A task with a branch, in a state, made by an employee through the mock control.
@@ -1892,12 +1926,14 @@ try {
         check("a task in progress has Show diff and Discard, and no Merge button",
             (await detail.locator('[data-testid="show-diff"]').count()) === 1 && (await detail.locator('[data-testid="merge"]').count()) === 0 &&
             (await detail.getByRole("button", { name: "Discard" }).count()) === 1);
-        check("the diff box is closed at the start", (await detail.locator('[data-testid="diff-box"]').count()) === 0);
+        check("the diff box is closed at the start", (await page.locator('[data-testid="diff-box"]').count()) === 0);
         await detail.locator('[data-testid="show-diff"]').click();
-        await detail.locator('[data-testid="diff-box"]').waitFor();
+        // Changed on purpose (P31): the diff opens in a large overlay (the page root), not in the column.
+        await page.locator('[data-testid="reader"] [data-testid="diff-box"]').waitFor();
+        check("the diff overlay is wide", (await page.locator('[data-testid="reader"]').boundingBox()).width >= 900);
         const diffCall = (await calls("task_diff")).pop();
         check("Show diff calls task_diff with path and id", JSON.stringify(diffCall.args) === JSON.stringify({ path: FLOOR, id: 2 }), JSON.stringify(diffCall.args));
-        const diffInfo = await detail.locator('[data-testid="diff-box"]').evaluate((e) => ({
+        const diffInfo = await page.locator('[data-testid="diff-box"]').evaluate((e) => ({
             text: e.textContent,
             tag: e.tagName,
             overflow: getComputedStyle(e).overflow,
@@ -1905,11 +1941,12 @@ try {
             ws: getComputedStyle(e).whiteSpace,
         }));
         check("the diff box is plain text with the stat and the patch", diffInfo.tag === "PRE" && diffInfo.text.includes("a.txt | 1 +") && diffInfo.text.includes("+++ b/a.txt") && diffInfo.text.includes("+A"), JSON.stringify(diffInfo.text));
-        check("the diff box is monospace, with a scroll and no wrap", /mono|Mono|Courier/.test(diffInfo.font) && diffInfo.overflow === "auto" && diffInfo.ws === "pre", JSON.stringify(diffInfo));
+        check("the diff box is monospace, with no wrap", /mono|Mono|Courier/.test(diffInfo.font) && diffInfo.ws === "pre", JSON.stringify(diffInfo));
+        check("the diff lines are coloured: an added line is green", await page.locator('[data-testid="diff-box"] .add').count() >= 1);
         await page.screenshot({ path: join(m3Shots, "2-detail-diff.png") });
-        await detail.locator('[data-testid="show-diff"]').click();
+        await page.keyboard.press("Escape");
         await page.waitForFunction(() => !document.querySelector('[data-testid="diff-box"]'));
-        check("Hide diff closes the box", (await detail.locator('[data-testid="show-diff"]').innerText()) === "Show diff");
+        check("Escape closes the diff overlay, and the focus is back on Show diff", await page.evaluate(() => document.activeElement?.getAttribute("data-testid") === "show-diff"));
         await back();
 
         // 20c. A task with no branch has no git section.
@@ -1984,6 +2021,8 @@ try {
         const sets = () => calls("floor_permissions_set");
         await page.click("button.settings");
         await section.waitFor();
+        // Changed on purpose (P41): the long text is behind "More...". The hook note (M6) is always visible.
+        await section.locator('[data-testid="rules-more"]').click();
         check("the section is in the settings panel and says that the rules apply at the next start",
             /commands with no question/i.test(await section.locator("h3").innerText()) &&
             /only to a session that starts after you save/.test(await section.innerText()));
@@ -2009,17 +2048,17 @@ try {
         await field.fill("Bash(cargo test:*)");
         await addButton.click();
         check("a rule that is in the list already is refused", /already/.test(await section.locator('[data-testid="rule-error"]').innerText()) && (await section.locator("li[data-rule]").count()) === 1);
-        await field.fill("Read");
+        await field.fill("Read(./src/**)");
         await addButton.click();
-        await section.locator('li[data-rule="Read"]').waitFor();
+        await section.locator('li[data-rule="Read(./src/**)"]').waitFor();
         await page.screenshot({ path: join(m3Shots, "5-permissions.png") });
         await section.getByRole("button", { name: "Remove Bash(cargo test:*)" }).click();
         await page.waitForFunction(() => !document.querySelector('li[data-rule="Bash(cargo test:*)"]'));
         const removeCall = (await sets()).pop();
-        check("remove calls floor_permissions_set without that rule", JSON.stringify(removeCall.args) === JSON.stringify({ path: FLOOR, allow: ["Read"] }) && (await section.locator("li[data-rule]").count()) === 1, JSON.stringify(removeCall.args));
+        check("remove calls floor_permissions_set without that rule", JSON.stringify(removeCall.args) === JSON.stringify({ path: FLOOR, allow: ["Read(./src/**)"] }) && (await section.locator("li[data-rule]").count()) === 1, JSON.stringify(removeCall.args));
         await page.click('button[aria-label="Close settings"]');
         await page.click("button.settings");
-        await section.locator('li[data-rule="Read"]').waitFor();
+        await section.locator('li[data-rule="Read(./src/**)"]').waitFor();
         check("the list is read again when the panel opens", (await section.locator("li[data-rule]").count()) === 1);
         await page.click('button[aria-label="Close settings"]');
 
@@ -2050,6 +2089,9 @@ try {
         check("the button goes away when no employee waits", (await resumeBtn.count()) === 0);
         check("ceo has a live session after the resume", (await page.locator('.emp[data-slug="ceo"]').getAttribute("data-status")) !== "stopped");
     }
+
+    // 21. The repairs of the review "final-b" (B1, D1 to D3, D6 to D10, M6, the polish list).
+    await repairChecks({ page, check, url, shots: repairShots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

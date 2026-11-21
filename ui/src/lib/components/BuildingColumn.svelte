@@ -15,6 +15,8 @@
     let areaW = $state(0);
     let areaH = $state(0);
     const scale = $derived(buildingScale(areaW - 16, areaH, store.floors.length));
+    // On a tall window the column has room: the list of floors is open at the start.
+    let floorsOpen = $state(typeof window !== "undefined" && window.innerHeight >= 1000);
 
     function basename(path: string): string {
         const parts = path.split(/[\\/]/).filter((p) => p !== "");
@@ -103,7 +105,7 @@
             </div>
         </form>
 
-        {#if store.pendingCreate}
+        {#if store.pendingCreate && store.floorView}
             <form
                 class="create"
                 onsubmit={(e) => {
@@ -123,15 +125,31 @@
             </form>
         {/if}
 
-        <details class="floors">
+        <details class="floors" bind:open={floorsOpen}>
             <summary>Floors ({store.floors.length})</summary>
             <ul class="list" aria-label="Floors">
                 {#each store.floors as floor (floor.path)}
+                    {@const live = store.liveIn(floor.path)}
+                    {@const asks = store.questionsIn(floor.path)}
                     <li class:open={floor.path === store.openPath} class:missing={floor.missing} data-path={floor.path}>
-                        <span class="floor-text" title={floor.path}>
+                        <!-- A click on the row opens the floor. "forget" has its own click. -->
+                        <button
+                            type="button"
+                            class="floor-text ghost"
+                            title={floor.missing ? `${floor.path} (the folder is missing)` : `Open ${floor.name ?? basename(floor.path)}\n${floor.path}`}
+                            disabled={floor.missing}
+                            aria-current={floor.path === store.openPath}
+                            data-testid="floor-open"
+                            onclick={() => void store.openFloor(floor.path)}
+                        >
                             <span class="floor-name">{floor.name ?? basename(floor.path)}</span>
                             <span class="floor-path">{floor.missing ? "missing" : floor.path}</span>
-                        </span>
+                            {#if !floor.missing && (live > 0 || asks > 0)}
+                                <span class="floor-live" data-testid="floor-live">
+                                    {live} live{#if asks > 0}, <span class="floor-asks">{asks} {asks === 1 ? "asks" : "ask"}</span>{/if}
+                                </span>
+                            {/if}
+                        </button>
                         <ConfirmButton
                             class="ghost"
                             label="forget"
@@ -301,6 +319,26 @@
         min-width: 0;
         display: flex;
         flex-direction: column;
+        align-items: flex-start;
+        padding: 1px 4px;
+        text-align: left;
+        text-transform: none;
+        color: var(--text);
+    }
+
+    .floor-text:disabled {
+        opacity: 1;
+        cursor: default;
+    }
+
+    .floor-live {
+        color: var(--dim);
+        font-size: 11px;
+    }
+
+    .floor-asks {
+        color: var(--st-question);
+        font-weight: 700;
     }
 
     .floor-name {
@@ -308,6 +346,7 @@
     }
 
     .floor-path {
+        max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;

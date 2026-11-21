@@ -63,6 +63,28 @@ describe("officeRange and defaultOffice", () => {
     });
 });
 
+describe("defaults for a wide window", () => {
+    it("gives a wide window a taller office, up to 760 px", () => {
+        expect(defaultOffice(1400, 2560)).toBe(700);
+        expect(defaultOffice(2000, 2560)).toBe(760);
+        expect(defaultOffice(800, 1280)).toBe(336);
+        expect(defaultOffice(1400, 1799)).toBe(588);
+    });
+
+    it("gives a crowded floor (more than 12 employees) a taller office", () => {
+        expect(defaultOffice(800, 1280, 12)).toBe(336);
+        expect(defaultOffice(800, 1280, 13)).toBe(416);
+        expect(defaultOffice(2000, 1280, 25)).toBe(640);
+        expect(defaultOffice(1400, 2560, 25)).toBe(760);
+    });
+
+    it("keeps the info panel under 38% of a wide office", () => {
+        expect(defaultInfo(1940, 700)).toBe(Math.round(1940 * 0.38));
+        expect(defaultInfo(1940, 700)).toBeLessThan(1940 - 700 * 1.5);
+        expect(defaultInfo(1499, 336)).toBe(1499 - 504);
+    });
+});
+
 describe("infoRange and defaultInfo", () => {
     it("keeps 200 px for the info panel and 120 px for the room", () => {
         expect(infoRange(960)).toEqual({ min: 200, max: 840 });

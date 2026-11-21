@@ -1,5 +1,6 @@
 <script lang="ts">
-    import { onDestroy, onMount } from "svelte";
+    import { onDestroy, onMount, tick } from "svelte";
+    import AttentionBar from "$lib/components/AttentionBar.svelte";
     import DebugPaste from "$lib/components/DebugPaste.svelte";
     import BuildingColumn from "$lib/components/BuildingColumn.svelte";
     import EmployeeForm from "$lib/components/EmployeeForm.svelte";
@@ -8,8 +9,10 @@
     import SettingsPanel from "$lib/components/SettingsPanel.svelte";
     import Tabs from "$lib/components/Tabs.svelte";
     import TaskBoard from "$lib/components/TaskBoard.svelte";
+    import TaskReader from "$lib/components/TaskReader.svelte";
     import TerminalArea from "$lib/components/TerminalArea.svelte";
     import Toasts from "$lib/components/Toasts.svelte";
+    import { setWindowTitle } from "$lib/ipc";
     import { layout } from "$lib/layout.svelte";
     import { store } from "$lib/store.svelte";
     import type { Employee } from "$lib/types";
@@ -21,7 +24,7 @@
 
     /**
      * Tell the layout the size of the window and of the area that the office and the terminal
-     * share: the height of the work area minus the rows around them (toasts, tabs, debug bar).
+     * share: the height of the work area minus the rows around them (attention bar, tabs, debug bar).
      */
     function measure(): void {
         if (!work) return;
@@ -47,13 +50,34 @@
     });
 
     onDestroy(() => store.dispose());
+
+    // The debug bar adds or removes a row of the work area. Measure again after it.
+    $effect(() => {
+        void store.debugVisible;
+        void tick().then(measure);
+    });
+
+    // The window title shows how many sessions ask a question: "(2) Agent Tower".
+    $effect(() => {
+        void setWindowTitle(store.windowTitle);
+    });
+
+    // Ctrl+Shift+D shows or hides the debug paste bar. The capture phase keeps the key from the
+    // terminal: xterm would send it to the CLI as a control character.
+    function onKeyCapture(e: KeyboardEvent): void {
+        if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "d") {
+            e.preventDefault();
+            e.stopPropagation();
+            store.setDebugVisible(!store.debugVisible);
+        }
+    }
 </script>
 
 <svelte:head>
-    <title>Agent Tower</title>
+    <title>{store.windowTitle}</title>
 </svelte:head>
 
-<svelte:window onresize={measure} />
+<svelte:window onresize={measure} onkeydowncapture={onKeyCapture} />
 
 <div class="app" style:--col-w="{layout.colW}px" style:--board-w="{layout.boardW}px">
     <BuildingColumn />
@@ -68,14 +92,22 @@
         onreset={() => layout.resetColumn()}
     />
     <main class="work" bind:this={work}>
-        <Toasts />
+        <AttentionBar />
         <Office onedit={(emp) => (form = emp)} onadd={() => (form = null)} />
         <Tabs />
         <TerminalArea />
-        <DebugPaste />
+        {#if store.debugVisible}
+            <DebugPaste />
+        {/if}
     </main>
     <TaskBoard />
 </div>
+
+<Toasts />
+
+{#if store.reader !== null}
+    <TaskReader />
+{/if}
 
 {#if store.settingsOpen}
     <SettingsPanel onclose={() => (store.settingsOpen = false)} />

@@ -4,34 +4,45 @@
     // between the info panel and the room with the handle between them (see layout.svelte.ts).
     import { layout } from "$lib/layout.svelte";
     import type { Employee } from "$lib/types";
+    import { store } from "$lib/store.svelte";
     import EmployeeBar from "./EmployeeBar.svelte";
+    import EmptyOffice from "./EmptyOffice.svelte";
     import OfficeHeader from "./OfficeHeader.svelte";
     import OfficeRoom from "./OfficeRoom.svelte";
     import ResizeHandle from "./ResizeHandle.svelte";
     import Roster from "./Roster.svelte";
 
     let { onedit, onadd }: { onedit: (employee: Employee) => void; onadd: () => void } = $props();
+
+    // The default height of the office depends on the number of employees.
+    $effect(() => {
+        layout.employees = store.orderedEmployees.length;
+    });
 </script>
 
 <section class="office" aria-label="Office" style:--office-h="{layout.officeH}px" style:--info-w="{layout.infoW}px">
-    <div class="info">
-        <OfficeHeader />
-        <EmployeeBar {onedit} {onadd} />
-        <Roster />
-    </div>
-    <div class="room">
-        <OfficeRoom />
-    </div>
-    <ResizeHandle
-        orientation="vertical"
-        label="Resize the info panel and the room"
-        value={layout.infoW}
-        min={layout.infoRangeNow.min}
-        max={layout.infoRangeNow.max}
-        place="left: var(--info-w)"
-        onchange={(px) => layout.setInfo(px)}
-        onreset={() => layout.resetInfo()}
-    />
+    {#if !store.floorView && store.ready}
+        <EmptyOffice />
+    {:else}
+        <div class="info">
+            <OfficeHeader />
+            <EmployeeBar {onedit} {onadd} />
+            <Roster />
+        </div>
+        <div class="room">
+            <OfficeRoom />
+        </div>
+        <ResizeHandle
+            orientation="vertical"
+            label="Resize the info panel and the room"
+            value={layout.infoW}
+            min={layout.infoRangeNow.min}
+            max={layout.infoRangeNow.max}
+            place="left: var(--info-w)"
+            onchange={(px) => layout.setInfo(px)}
+            onreset={() => layout.resetInfo()}
+        />
+    {/if}
     <ResizeHandle
         orientation="horizontal"
         label="Resize the office"

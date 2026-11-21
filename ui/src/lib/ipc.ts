@@ -89,6 +89,22 @@ export function errorText(error: unknown): string {
     }
 }
 
+/**
+ * Set the title of the window. Inside Tauri this sets the real window title (the permission
+ * `core:window:allow-set-title` is in src-tauri/capabilities/default.json). In a browser it sets
+ * `document.title`, which the browser shows in the tab.
+ */
+export async function setWindowTitle(title: string): Promise<void> {
+    if (typeof document !== "undefined") document.title = title;
+    if (!isTauri()) return;
+    try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().setTitle(title);
+    } catch {
+        // The title is a help for the operator. A refusal must not break the UI.
+    }
+}
+
 // ---- Commands (docs/ipc-m1.md, "Commands") ----
 
 export const floorList = () => call<FloorEntry[]>("floor_list");

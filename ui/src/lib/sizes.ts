@@ -60,10 +60,23 @@ export function officeRange(space: number): Range {
     return { min: OFFICE_MIN, max: Math.max(OFFICE_MIN, Math.floor(space - TERMINAL_MIN)) };
 }
 
-/** The old fixed height: 42% of the window, from 220 to 640 px. */
-export function defaultOffice(winH: number): number {
-    return Math.round(clamp(winH * 0.42, 220, 640));
+/**
+ * The old fixed height: 42% of the window, from 220 to 640 px. A wide window (1800 px or more)
+ * gets 50% and up to 760 px: the room picture is wide there and a low office would leave it small.
+ * `winW` and `employees` are optional. With none of them the old rule applies.
+ */
+export function defaultOffice(winH: number, winW = 0, employees = 0): number {
+    const wide = winW >= WIDE_WINDOW;
+    // A crowded floor gets 10 points more: the characters would be too small otherwise.
+    const share = (wide ? 0.5 : 0.42) + (employees > CROWDED ? 0.1 : 0);
+    return Math.round(clamp(winH * share, 220, wide ? 760 : 640));
 }
+
+/** A floor with more employees than this gets a taller office by default. */
+export const CROWDED = 12;
+
+/** From this window width on, the defaults give the room more space. */
+export const WIDE_WINDOW = 1800;
 
 /** The info panel keeps `INFO_MIN`. The room keeps `ROOM_MIN`. */
 export function infoRange(officeW: number): Range {
@@ -79,8 +92,14 @@ export const INFO_DEFAULT_MIN = 300;
  * the office taller. The info panel takes the rest, but never less than `INFO_DEFAULT_MIN`.
  */
 export function defaultInfo(officeW: number, officeH: number): number {
-    return Math.max(INFO_DEFAULT_MIN, Math.round(officeW - officeH * 1.5));
+    const rest = Math.round(officeW - officeH * 1.5);
+    // A wide office: the info panel is at most 38% of it. The room gets the rest.
+    const capped = officeW >= WIDE_OFFICE ? Math.min(rest, Math.round(officeW * 0.38)) : rest;
+    return Math.max(INFO_DEFAULT_MIN, capped);
 }
+
+/** From this office width on, the info panel stops at 38% of the width. */
+export const WIDE_OFFICE = 1500;
 
 /**
  * The width range of the open task board. The terminal keeps `WORK_MIN`: the board is at most

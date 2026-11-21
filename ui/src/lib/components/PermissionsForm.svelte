@@ -3,32 +3,36 @@
     // `[permissions] allow` of the open floor. A list, a field to add a rule, and a remove button
     // for each rule. A bad rule is refused before the call, with the reason.
     import { onMount } from "svelte";
-    import { addRule, removeRule } from "$lib/permissions";
+    import { EXAMPLE_RULES, addRule, removeRule } from "$lib/permissions";
     import { store } from "$lib/store.svelte";
 
     let draft = $state("");
     let error = $state<string | null>(null);
     let busy = $state(false);
+    let more = $state(false);
 
     const rules = $derived(store.permissions);
+    // The examples that are not in the list yet. A click adds one.
+    const examples = $derived(EXAMPLE_RULES.filter((r) => !(rules ?? []).includes(r)));
 
     onMount(() => {
         void store.loadPermissions();
     });
 
-    async function add(): Promise<void> {
+    async function add(raw: string = draft): Promise<void> {
         if (busy || rules === null) return;
-        const next = addRule(rules, draft);
+        const next = addRule(rules, raw);
         if (next.error) {
             error = next.error;
             return;
         }
         busy = true;
-        // The Rust side checks again. A refusal shows here, in the form, with the same reason.
+        // The Rust side checks again and is the judge. A refusal shows here, in the form, with the
+        // text of the server.
         const refused = await store.savePermissions(next.list);
         busy = false;
         error = refused;
-        if (refused === null) draft = "";
+        if (refused === null && raw === draft) draft = "";
     }
 
     async function remove(rule: string): Promise<void> {
@@ -41,10 +45,23 @@
 
 <div class="permissions">
     <p class="hint">
-        A rule lets a Claude employee run a command with no question. For example, <code>Bash(cargo test:*)</code> lets
-        it run <code>cargo test</code> with any arguments. The rules apply to the Claude employees of this floor
-        (not to a seat that asks always) and only to a session that starts after you save them. A session that runs
-        keeps its old rules. A rule for every command, such as <code>Bash(*)</code>, is refused.
+        A rule lets a Claude employee run a command with no question. For example, <code>Bash(cargo test:*)</code> lets it run
+        <code>cargo test</code> with any arguments.
+        <button type="button" class="link" aria-expanded={more} data-testid="rules-more" onclick={() => (more = !more)}>
+            {more ? "Less" : "More..."}
+        </button>
+    </p>
+    {#if more}
+        <p class="hint" data-testid="rules-more-text">
+            The rules apply to the Claude employees of this floor (not to an employee that asks before each action) and only to a
+            session that starts after you save them. A session that runs keeps its old rules. The app refuses a rule that is too wide:
+            a rule for every command, a shell, an interpreter, <code>rm</code>, <code>curl</code>, <code>git push</code> and more.
+            The server decides, and its reason shows here.
+        </p>
+    {/if}
+    <p class="hint" data-testid="rules-hook-note">
+        A rule must match the command as the CLI sees it. If a hook on this machine rewrites commands (for example
+        <code>cargo test</code> becomes <code>rtk cargo test</code>), write the rule for the rewritten command.
     </p>
 
     {#if rules === null}
@@ -84,6 +101,14 @@
         </form>
         {#if error}
             <p class="error" role="alert" data-testid="rule-error">{error}</p>
+        {/if}
+        {#if examples.length > 0}
+            <div class="examples" aria-label="Example rules">
+                <span class="hint">Click to add:</span>
+                {#each examples as rule (rule)}
+                    <button type="button" class="chip" data-example={rule} disabled={busy} onclick={() => void add(rule)}>{rule}</button>
+                {/each}
+            </div>
         {/if}
     {/if}
 </div>
@@ -145,5 +170,27 @@
         margin: 0;
         color: var(--danger);
         overflow-wrap: anywhere;
+    }
+
+    .link {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--accent);
+        font-size: 11px;
+        text-decoration: underline;
+    }
+
+    .examples {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 6px;
+    }
+
+    .chip {
+        padding: 1px 8px;
+        border-radius: 10px;
+        font: 11px var(--mono);
     }
 </style>

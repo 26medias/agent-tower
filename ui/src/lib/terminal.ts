@@ -16,6 +16,19 @@ export interface TerminalHooks {
     onSize(rows: number, cols: number): void;
     /** Called one time, when the first output bytes (scrollback or live) reach the terminal. */
     onOutput?(): void;
+    /** Called when the operator types or pastes in this terminal (not for the answers that xterm sends by itself). */
+    onInput?(): void;
+}
+
+/** The terminals that are alive, by session ID. `focusTerminal` uses it. */
+const registry = new Map<string, SessionTerminal>();
+
+/** Put the keyboard focus in the terminal of a session. False when there is no such terminal. */
+export function focusTerminal(sessionId: string): boolean {
+    const t = registry.get(sessionId);
+    if (!t) return false;
+    t.focus();
+    return true;
 }
 
 /**
@@ -76,6 +89,11 @@ export class SessionTerminal {
         });
         this.term.loadAddon(this.fitAddon);
         this.term.open(host);
+        registry.set(sessionId, this);
+        // `onData` also carries the answers that xterm gives to the CLI by itself. Only a key press
+        // or a paste is the operator.
+        this.term.onKey(() => this.hooks.onInput?.());
+        this.term.textarea?.addEventListener("paste", () => this.hooks.onInput?.());
 
         this.queue = new WriteQueue(
             (data) => ipc.ptyWrite(sessionId, data),
@@ -184,6 +202,7 @@ export class SessionTerminal {
 
     dispose(): void {
         this.disposed = true;
+        if (registry.get(this.sessionId) === this) registry.delete(this.sessionId);
         if (this.frame) cancelAnimationFrame(this.frame);
         if (this.resizeTimer) clearTimeout(this.resizeTimer);
         this.observer.disconnect();

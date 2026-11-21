@@ -1,48 +1,56 @@
 import { describe, expect, it } from "vitest";
-import { orderEmployees } from "./order";
+import { orderEmployees, roleRank } from "./order";
 import type { Employee } from "./types";
 
-function emp(slug: string, name: string, manager: string | null): Employee {
-    return { slug, name, role: "R", manager, cli: "claude", model: null, effort: null, policy: "read_only", roleText: "" };
+function emp(slug: string, name: string, manager: string | null, role = "R"): Employee {
+    return { slug, name, role, manager, cli: "claude", model: null, effort: null, policy: "read_only", roleText: "" };
 }
 
 const slugs = (list: Employee[]) => list.map((e) => e.slug);
 
 const team = [
-    emp("eng-sam", "Sam", "pm"),
-    emp("pm", "Maya", "ceo"),
-    emp("eng-lin", "Lin", "pm"),
-    emp("ceo", "Ada", null),
+    emp("eng-sam", "Sam", "pm", "Engineer"),
+    emp("pm", "Maya", "ceo", "Project Manager"),
+    emp("eng-lin", "Lin", "pm", "Engineer"),
+    emp("ceo", "Ada", null, "CEO"),
 ];
 
+describe("roleRank", () => {
+    it("ranks the CEO first, the Project Manager second, and ignores case and spaces", () => {
+        expect(roleRank("CEO")).toBe(0);
+        expect(roleRank("  ceo ")).toBe(0);
+        expect(roleRank("project manager")).toBe(1);
+        expect(roleRank("Engineer")).toBe(2);
+    });
+});
+
 describe("orderEmployees", () => {
-    it("puts the root first, then the reports, depth first, siblings by name", () => {
+    it("puts the CEO first, then the Project Manager, then the others by name", () => {
         expect(slugs(orderEmployees(team))).toEqual(["ceo", "pm", "eng-lin", "eng-sam"]);
     });
 
-    it("goes depth first: a whole branch comes before the next sibling", () => {
+    it("puts the CEO and the PM first even when their names sort last", () => {
+        const list = [emp("a", "Ann", "pm", "Engineer"), emp("pm", "Zed", "ceo", "Project Manager"), emp("ceo", "Zoe", null, "CEO")];
+        expect(slugs(orderEmployees(list))).toEqual(["ceo", "pm", "a"]);
+    });
+
+    it("groups the others by the depth of their manager chain, then by name", () => {
         const list = [
-            emp("a", "Ann", null),
-            emp("b", "Bob", "a"),
-            emp("c", "Cy", "a"),
-            emp("d", "Di", "b"),
+            emp("ceo", "Ada", null, "CEO"),
+            emp("pm", "Maya", "ceo", "Project Manager"),
+            emp("deep", "Abe", "lead", "Engineer"), // depth 3
+            emp("lead", "Zoe", "pm", "Tech lead"), // depth 2
+            emp("eng-b", "Bob", "pm", "Engineer"), // depth 2
+            emp("eng-a", "Al", "pm", "Engineer"), // depth 2
+            emp("boss", "Yan", "ceo", "Advisor"), // depth 1
         ];
-        expect(slugs(orderEmployees(list))).toEqual(["a", "b", "d", "c"]);
+        expect(slugs(orderEmployees(list))).toEqual(["ceo", "pm", "boss", "eng-a", "eng-b", "lead", "deep"]);
     });
 
     it("does not depend on the input order", () => {
         const a = slugs(orderEmployees(team));
         expect(slugs(orderEmployees([...team].reverse()))).toEqual(a);
         expect(slugs(orderEmployees([team[2], team[0], team[3], team[1]]))).toEqual(a);
-    });
-
-    it("keeps the order of the others when an unrelated employee is added", () => {
-        const before = slugs(orderEmployees(team));
-        const added = slugs(orderEmployees([...team, emp("zed", "Zed", null)]));
-        expect(added).toEqual([...before, "zed"]);
-        // A new report under a leaf does not move the others either.
-        const withReport = slugs(orderEmployees([...team, emp("intern", "Ivy", "eng-sam")]));
-        expect(withReport.filter((s) => s !== "intern")).toEqual(before);
     });
 
     it("breaks name ties by slug, ignoring case", () => {

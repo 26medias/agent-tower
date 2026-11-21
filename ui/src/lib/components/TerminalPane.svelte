@@ -5,6 +5,7 @@
     // output byte on (the CLI can show a trust dialog during the start, and the overlay must not
     // hide it). The overlay takes no pointer events, so the terminal stays usable.
     import { untrack } from "svelte";
+    import { modalOpen } from "$lib/modal";
     import { store } from "$lib/store.svelte";
     import {
         SLOW_HINT_TEXT,
@@ -64,6 +65,7 @@
             onError: (text) => store.toast(text),
             onSize: (rows, cols) => store.reportSize(rows, cols),
             onOutput: () => (hasOutput = true),
+            onInput: () => store.noteInput(id),
         });
         controller = c;
         return () => {
@@ -82,13 +84,21 @@
             void c.show().then(() => {
                 // Do not take the focus from a field that the operator uses.
                 const a = document.activeElement;
-                if (isActive && (!a || a === document.body || a.closest(".xterm"))) c.focus();
+                // A modal that is open keeps the focus: the terminal must not take it.
+                if (isActive && !modalOpen() && (!a || a === document.body || a.closest(".xterm"))) c.focus();
             });
         }
     });
 </script>
 
 <div class="pane" class:hidden={!isActive} bind:this={host} data-session={id}></div>
+
+{#if status === "stopped"}
+    <!-- The CLI prints its own "resume with" line. This line says what to do in the app. -->
+    <div class="stopped-note" class:hidden={!isActive} data-role="stopped-note" role="status">
+        Stopped. Use "resume" or "start" in the bar of the employee to continue.
+    </div>
+{/if}
 
 {#if view.mode === "centre"}
     <div class="starting centre" class:hidden={!isActive} data-starting="centre" data-session-overlay={id}>
@@ -121,6 +131,26 @@
     }
 
     .pane.hidden {
+        visibility: hidden;
+    }
+
+    .stopped-note {
+        position: absolute;
+        z-index: 5;
+        left: 50%;
+        bottom: 14px;
+        transform: translateX(-50%);
+        max-width: 90%;
+        padding: 3px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(24, 35, 58, 0.95);
+        color: var(--dim);
+        font-size: 12px;
+        pointer-events: none;
+    }
+
+    .stopped-note.hidden {
         visibility: hidden;
     }
 

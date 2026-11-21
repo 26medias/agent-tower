@@ -3,15 +3,36 @@
     import { SETUP_SLUG } from "$lib/types";
     import StatusDot from "./StatusDot.svelte";
 
+    // Two employees with the same name get their role in the tab, so that the tabs differ.
+    const doubles = $derived.by(() => {
+        const seen = new Set<string>();
+        const twice = new Set<string>();
+        for (const e of store.floorView?.employees ?? []) {
+            const key = e.name.trim().toLowerCase();
+            if (seen.has(key)) twice.add(key);
+            seen.add(key);
+        }
+        return twice;
+    });
+
     function nameOf(slug: string): string {
         if (slug === SETUP_SLUG) return "Setup";
-        return store.floorView?.employees.find((e) => e.slug === slug)?.name ?? slug;
+        const emp = store.floorView?.employees.find((e) => e.slug === slug);
+        if (!emp) return slug;
+        return doubles.has(emp.name.trim().toLowerCase()) ? `${emp.name} (${emp.role})` : emp.name;
     }
 </script>
 
 <div class="tabs" role="tablist" aria-label="Sessions">
     {#each store.tabs as tab (tab.sessionId)}
-        <div class="tab" class:active={tab.sessionId === store.activeId} class:stopped={tab.status === "stopped"} data-session={tab.sessionId}>
+        <div
+            class="tab"
+            class:active={tab.sessionId === store.activeId}
+            class:stopped={tab.status === "stopped"}
+            class:asking={tab.status === "question"}
+            data-session={tab.sessionId}
+            data-status={tab.status}
+        >
             <button
                 type="button"
                 class="main"
@@ -21,6 +42,11 @@
             >
                 <StatusDot status={tab.status} spin />
                 <span class="label">{nameOf(tab.slug)}</span>
+                {#if tab.status === "question"}
+                    <span class="asks" data-testid="tab-asks">asks</span>
+                {:else if store.isUnread(tab.sessionId)}
+                    <span class="unread" data-testid="tab-unread" title="This session finished a turn. Open the tab to read it." role="img" aria-label="Finished a turn, not read yet"></span>
+                {/if}
             </button>
             {#if tab.messageWaiting}
                 <button
@@ -91,6 +117,63 @@
 
     .tab.stopped .label {
         color: var(--dim);
+    }
+
+    /* A session that waits for an answer: an amber tab with the word "asks". It pulses slowly. */
+    .tab.asking,
+    .tab.asking.active {
+        background: var(--st-question);
+        border-color: var(--st-question);
+        color: var(--accent-ink);
+    }
+
+    .tab.asking .label {
+        color: #1a1400;
+        font-weight: 700;
+    }
+
+    /* The dot is amber too: on the amber tab it turns dark. */
+    .tab.asking :global(.dot) {
+        background: #1a1400;
+        border-color: #1a1400;
+        animation: none;
+    }
+
+    .asks {
+        padding: 0 5px;
+        border-radius: 8px;
+        background: #1a1400;
+        color: var(--st-question);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+
+    .unread {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 2px rgba(94, 224, 192, 0.25);
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+        .tab.asking {
+            animation: ask-pulse 2.4s ease-in-out infinite;
+        }
+    }
+
+    @keyframes ask-pulse {
+        0%,
+        100% {
+            background: #ffc56b;
+            box-shadow: 0 0 0 0 rgba(255, 197, 107, 0);
+        }
+        50% {
+            background: #ffe0a3;
+            box-shadow: 0 0 8px 1px rgba(255, 197, 107, 0.7);
+        }
     }
 
     .main {

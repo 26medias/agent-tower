@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resumeButton } from "./resume";
+import { resumeButton, resumeWho } from "./resume";
 
 describe("resumeButton", () => {
     it("is hidden when no team waits and none resumes", () => {
@@ -21,5 +21,15 @@ describe("resumeButton", () => {
             busy: true,
         });
         expect(resumeButton(["pm"], { done: 5, total: 3 }).text).toBe("Resuming the team (3/3)");
+    });
+});
+
+describe("resumeWho", () => {
+    it("lists the names, and counts the rest", () => {
+        expect(resumeWho([])).toBe("");
+        expect(resumeWho(["Ada (CEO)"])).toBe("Ada (CEO)");
+        expect(resumeWho(["A", "B"])).toBe("A, B");
+        expect(resumeWho(["A", "B", "C", "D"])).toBe("A, B and 2 more");
+        expect(resumeWho(["A", "B", "C"], 3)).toBe("A, B, C");
     });
 });

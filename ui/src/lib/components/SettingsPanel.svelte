@@ -1,8 +1,9 @@
 <script lang="ts">
     // The settings panel (docs/ipc-settings.md, section 6): API keys, the logo image model, the
     // model lists, the floor defaults and the program paths. Escape and a click on the backdrop
-    // close it.
-    import { onMount } from "svelte";
+    // close it. It is a modal (see modal.ts): the focus stays inside, and the page behind is inert.
+    import { onMount, tick } from "svelte";
+    import { modal } from "$lib/modal";
     import { store } from "$lib/store.svelte";
     import FloorDefaultsForm from "./FloorDefaultsForm.svelte";
     import ModelListEditor from "./ModelListEditor.svelte";
@@ -18,14 +19,20 @@
         // The Codex file can change while the app runs: read the lists again.
         void store.loadModels();
         void store.loadSettings();
+        // A toast can ask for one section, for example the program paths.
+        const want = store.settingsSection;
+        store.settingsSection = null;
+        if (want) {
+            void tick().then(() => document.querySelector(`[data-section="${want}"]`)?.scrollIntoView({ block: "start" }));
+        }
     });
 
     const keyText = $derived(
         !store.settings || !store.settings.openaiKeySet
             ? "not set"
             : store.settings.openaiKeySource === "env"
-              ? "set (environment)"
-              : "set (app config)",
+              ? "set by the environment variable OPENAI_API_KEY"
+              : "set in the app config file",
     );
 
     const imageChoices = $derived.by(() => {
@@ -58,9 +65,7 @@
     );
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && onclose()} />
-
-<div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
+<div class="backdrop" role="presentation" use:modal={{ onclose }} onclick={(e) => e.target === e.currentTarget && onclose()}>
     <div class="panel" role="dialog" aria-modal="true" aria-label="Settings">
         <header>
             <h2>Settings</h2>
@@ -94,7 +99,10 @@
                     <button type="button" class="danger remove-key" disabled={keyBusy} onclick={() => void removeKey()}>remove</button>
                 {/if}
             </form>
-            <p class="hint">The panel never shows the key. The key is stored in the app config file.</p>
+            <p class="hint">
+                The panel never shows the key. A key that you paste here is stored in the app config file. The app uses it before the
+                environment variable.
+            </p>
         </section>
 
         <section data-section="image" aria-label="Logo image model">
@@ -146,6 +154,19 @@
         <section data-section="programs" aria-label="Programs">
             <h3>Programs</h3>
             <ProgramsPanel />
+        </section>
+
+        <section data-section="interface" aria-label="Interface">
+            <h3>Interface</h3>
+            <label class="check">
+                <input
+                    type="checkbox"
+                    name="debugBar"
+                    checked={store.debugVisible}
+                    onchange={(e) => store.setDebugVisible(e.currentTarget.checked)}
+                />
+                <span>Show the debug paste bar under the terminal (Ctrl+Shift+D)</span>
+            </label>
         </section>
     </div>
 </div>
@@ -253,5 +274,11 @@
     select {
         align-self: flex-start;
         max-width: 100%;
+    }
+
+    .check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
     }
 </style>

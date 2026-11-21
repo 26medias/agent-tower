@@ -12,19 +12,23 @@
 {#if employees.length > 0}
     <ul class="roster" aria-label="Employees">
         {#each employees as emp (emp.slug)}
+            {@const status = store.sessionOfEmployee(emp.slug)?.status ?? "stopped"}
             <li>
                 <button
                     type="button"
                     class="row"
                     class:selected={emp.slug === selectedSlug}
+                    class:asking={status === "question"}
+                    data-status={status}
                     aria-pressed={emp.slug === selectedSlug}
                     data-slug={emp.slug}
-                    title="{emp.name}, {emp.role}"
+                    title="{emp.name}, {emp.role}, {status}"
                     onclick={() => store.selectEmployee(emp.slug)}
                 >
-                    <StatusDot status={store.sessionOfEmployee(emp.slug)?.status ?? "stopped"} />
+                    <StatusDot {status} />
                     <span class="r-name">{emp.name}</span>
-                    <span class="r-role" style:color={roleColor(emp.role)}>{emp.role}</span>
+                    <span class="r-role" style:color={status === "question" ? "inherit" : roleColor(emp.role)}>{emp.role}</span>
+                    {#if status === "question"}<span class="r-asks" data-testid="roster-asks">asks</span>{/if}
                 </button>
             </li>
         {/each}
@@ -61,6 +65,41 @@
 
     .row.selected {
         border-color: var(--accent);
+    }
+
+    /* A session that waits for an answer: an amber row, not only a dot. */
+    .row.asking {
+        background: var(--st-question);
+        border-color: #b3822e;
+        color: #1a1400;
+    }
+
+    .row.asking .r-name {
+        color: #1a1400;
+    }
+
+    .row.asking.selected {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    .row.asking :global(.dot) {
+        background: #1a1400;
+        border-color: #1a1400;
+        animation: none;
+    }
+
+    .r-asks {
+        flex: none;
+        margin-left: auto;
+        padding: 0 6px;
+        border-radius: 8px;
+        background: #1a1400;
+        color: var(--st-question);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
     }
 
     .r-name {

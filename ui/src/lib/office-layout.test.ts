@@ -14,6 +14,10 @@ import {
     stickerTransform,
     storeyY,
     roleColor,
+    TAG_ROLE_MAX_EMPLOYEES,
+    chipWidth,
+    rolePopWidth,
+    roleChip,
     tagBoxWidth,
     tagLabel,
     tagRole,
@@ -209,6 +213,21 @@ describe("role line of the tag", () => {
     it("makes the tag as wide as the wider line", () => {
         expect(tagBoxWidth("Ada", "CEO")).toBe(tagWidth("Ada"));
         expect(tagBoxWidth("Ada", "PROJECT MANAGER")).toBeGreaterThan(tagWidth("Ada"));
+    });
+
+    it("gives a chip to the CEO and the Project Manager only, and widens the tag for it", () => {
+        expect(roleChip("CEO")).toEqual({ text: "CEO", color: "#ffd166" });
+        expect(roleChip(" Project Manager ")).toEqual({ text: "PM", color: "#7cc4ff" });
+        expect(roleChip("Engineer")).toBeNull();
+        expect(chipWidth(null)).toBe(0);
+        const chip = roleChip("CEO");
+        expect(tagBoxWidth("Ada", "", chip)).toBe(tagWidth("Ada") + chipWidth(chip));
+        expect(tagBoxWidth("Ada", "", null)).toBe(tagWidth("Ada"));
+        expect(rolePopWidth("ENGINEER")).toBeGreaterThan(rolePopWidth("QA"));
+    });
+
+    it("shows the role line only for a small team", () => {
+        expect(TAG_ROLE_MAX_EMPLOYEES).toBe(5);
     });
 
     it("gives the CEO and the Project Manager their own colour", () => {

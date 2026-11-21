@@ -5,10 +5,14 @@ import {
     dismissTab,
     emptySessionState,
     employeeStartedText,
+    finishedTurns,
+    nextAfter,
     pickActive,
     questionCount,
+    questionOrder,
     sessionOf,
     tabSessions,
+    trackQuestions,
 } from "./reducers";
 import type { FloorView, SessionView } from "./types";
 
@@ -196,5 +200,62 @@ describe("a session that an employee started (the UI did not start it)", () => {
 
     it("the toast text names who started whom", () => {
         expect(employeeStartedText({ byName: "Tomas", name: "Kenji" })).toBe("Tomas started Kenji");
+    });
+});
+
+describe("finishedTurns", () => {
+    const state = (...list: [string, SessionView["status"]][]) =>
+        list.reduce((st, [id, status]) => applySessionChanged(st, { path: P, session: session({ sessionId: id, slug: id, status }) }), emptySessionState);
+
+    it("finds a session that went from working to idle or done", () => {
+        const prev = state(["a", "working"], ["b", "working"], ["c", "working"], ["d", "idle"]);
+        const next = state(["a", "idle"], ["b", "done"], ["c", "question"], ["d", "idle"]);
+        expect(finishedTurns(prev, next).map((s) => s.sessionId)).toEqual(["a", "b"]);
+    });
+
+    it("ignores a new session, an unchanged session and a start", () => {
+        const prev = state(["a", "idle"], ["s", "starting"]);
+        const next = state(["a", "idle"], ["s", "idle"], ["new", "idle"]);
+        expect(finishedTurns(prev, next)).toEqual([]);
+    });
+});
+
+describe("question order", () => {
+    const state = (...list: [string, SessionView["status"]][]) =>
+        list.reduce((st, [id, status]) => applySessionChanged(st, { path: P, session: session({ sessionId: id, slug: id, status }) }), emptySessionState);
+
+    it("numbers sessions in the order in which they started to ask, and keeps the number", () => {
+        let since: Record<string, number> = {};
+        let seq = 0;
+        const step = (st: ReturnType<typeof state>) => {
+            const r = trackQuestions(since, st, seq);
+            since = r.since;
+            seq = r.seq;
+            return questionOrder(since, st).map((s) => s.sessionId);
+        };
+        expect(step(state(["b", "question"], ["a", "idle"]))).toEqual(["b"]);
+        expect(step(state(["b", "question"], ["a", "question"]))).toEqual(["b", "a"]);
+        // b answers and asks again: it is the newest now.
+        expect(step(state(["b", "idle"], ["a", "question"]))).toEqual(["a"]);
+        expect(step(state(["b", "question"], ["a", "question"]))).toEqual(["a", "b"]);
+        // A session that is gone loses its number.
+        expect(step(state(["a", "question"]))).toEqual(["a"]);
+        expect(Object.keys(since)).toEqual(["a"]);
+    });
+
+    it("returns the same object when nothing changed", () => {
+        const st = state(["a", "question"]);
+        const first = trackQuestions({}, st, 0);
+        expect(trackQuestions(first.since, st, first.seq).since).toBe(first.since);
+    });
+
+    it("steps through the questions and wraps", () => {
+        const list = [{ sessionId: "a" }, { sessionId: "b" }, { sessionId: "c" }];
+        expect(nextAfter(list, null)?.sessionId).toBe("a");
+        expect(nextAfter(list, "a")?.sessionId).toBe("b");
+        expect(nextAfter(list, "c")?.sessionId).toBe("a");
+        expect(nextAfter(list, "gone")?.sessionId).toBe("a");
+        expect(nextAfter([{ sessionId: "x" }], "x")?.sessionId).toBe("x");
+        expect(nextAfter([], null)).toBeNull();
     });
 });
