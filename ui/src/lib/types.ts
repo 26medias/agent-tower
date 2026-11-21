@@ -75,6 +75,8 @@ export interface Settings {
     imageModel: string;
     /** `[interface] notify_on_question` of the app config. The default is true. */
     notifyOnQuestion: boolean;
+    /** `[codex] sandbox` of the app config. The default is false. It applies at the next start of a session. */
+    codexSandbox: boolean;
     /** The home folder of the app. The "Browse..." dialog opens there when no floor gives a better place. Null when unknown. */
     homeDir: string | null;
 }
@@ -115,6 +117,14 @@ export interface ProgramTestResult {
     path: string | null;
     /** The first line of the output, or the error text. At most 200 characters. */
     output: string;
+}
+
+/** Result of `codex_sandbox_probe`: `bwrap --unshare-user --ro-bind / / true` with the environment of a session. */
+export interface SandboxProbe {
+    /** `works`, `fails` (bwrap is there but it failed or hung), or `missing` (no bwrap in the PATH). */
+    state: "works" | "fails" | "missing";
+    /** One line: the path of bwrap, the first line of its error, or a short sentence. */
+    detail: string;
 }
 
 /** Message on the output channel of `session_attach`: base64 of the output bytes, in order. */

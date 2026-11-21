@@ -15,7 +15,7 @@
 //      /tmp/agent-tower-review/last3),
 //      E2E_TOAST_SHOTS (folder for the screenshots of e2e/toast-checks.mjs; default
 //      /tmp/agent-tower-review/toast),
-//      E2E_ONLY=toast runs the page checks and the toast checks only.
+//      E2E_ONLY=toast runs the page checks and the toast checks only. E2E_ONLY=sandbox runs the page checks and the Codex sandbox checks only.
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -24,6 +24,7 @@ import { fourChecks } from "./four-checks.mjs";
 import { last3Checks } from "./last3-checks.mjs";
 import { lastChecks } from "./last-checks.mjs";
 import { repairChecks } from "./repair-checks.mjs";
+import { sandboxChecks } from "./sandbox-checks.mjs";
 import { toastChecks } from "./toast-checks.mjs";
 
 const url = process.env.E2E_URL ?? "http://127.0.0.1:1420";
@@ -45,6 +46,10 @@ mkdirSync(last3Shots, { recursive: true });
 // The screenshots of the toast place and the three small items of the review "final-b5" (e2e/toast-checks.mjs).
 const toastShots = process.env.E2E_TOAST_SHOTS ?? "/tmp/agent-tower-review/toast";
 mkdirSync(toastShots, { recursive: true });
+
+// The screenshots of the Codex sandbox checks (e2e/sandbox-checks.mjs).
+const sandboxShots = process.env.E2E_SANDBOX_SHOTS ?? "/tmp/agent-tower-review/sandbox";
+mkdirSync(sandboxShots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -836,10 +841,11 @@ try {
     check("the Settings button opens the settings panel", opened);
     if (!opened) throw new Error("the settings panel did not open");
     // Changed on purpose (P4): a seventh section, "interface", has the switch of the debug paste bar.
+    // Changed on purpose (2026-11-21, decision O7): an eighth section, "codex-sandbox", before "interface".
     check(
-        "the settings panel has the 7 sections",
+        "the settings panel has the 8 sections",
         JSON.stringify(await page.$$eval('[role="dialog"] section', (s) => s.map((x) => x.dataset.section))) ===
-            JSON.stringify(["keys", "image", "models", "defaults", "permissions", "programs", "interface"]),
+            JSON.stringify(["keys", "image", "models", "defaults", "permissions", "programs", "codex-sandbox", "interface"]),
     );
     await page.keyboard.press("Escape");
     check("Escape closes the settings panel", await gone());
@@ -2133,17 +2139,20 @@ try {
     if (only === "") await repairChecks({ page, check, url, shots: repairShots });
 
     // 22. The last repairs of the review "final-b2" (N1 to N3, the one row of buttons, the Team activity list).
-    if (only !== "toast") await lastChecks({ page, check, url, shots: lastShots });
+    if (only !== "toast" && only !== "sandbox") await lastChecks({ page, check, url, shots: lastShots });
 
     // 23. The four items of 2026-11-21: Browse..., the notification switch, test and reset of the programs.
-    if (only !== "toast") await fourChecks({ page, check, url, shots: fourShots });
+    if (only !== "toast" && only !== "sandbox") await fourChecks({ page, check, url, shots: fourShots });
 
     // 24. The last repairs of the review "final-b4": the toast stack, the bar and the roster, the messages in Team activity.
-    if (only !== "toast") await last3Checks({ page, check, url, shots: last3Shots });
+    if (only !== "toast" && only !== "sandbox") await last3Checks({ page, check, url, shots: last3Shots });
 
     // 25. The toast place (top right of the terminal area), the toasts under a modal, the errors of refused actions inside the
     // modals, the fold of the status rows, "resume" in the bar, and the main button of the header at 200 px.
-    await toastChecks({ page, check, url, shots: toastShots });
+    if (only !== "sandbox") await toastChecks({ page, check, url, shots: toastShots });
+
+    // 26. The section "Codex sandbox" of Settings (decision O7, option A): the probe states, "Test again", the switch.
+    await sandboxChecks({ page, check, url, shots: sandboxShots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

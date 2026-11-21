@@ -19,6 +19,7 @@ import type {
     PermissionsSaved,
     ProgramName,
     ProgramTestResult,
+    SandboxProbe,
     Programs,
     SessionChangedPayload,
     NoticePayload,
@@ -184,8 +185,31 @@ export const settingsGet = () => call<Settings>("settings_get");
  * A null argument means "no change". An empty `openaiKey` removes the key from the app config.
  * `notifyOnQuestion` is the switch of the desktop notification (`[interface]` of the app config).
  */
-export const settingsSet = (openaiKey: string | null, imageModel: string | null, notifyOnQuestion: boolean | null = null) =>
-    call<Settings>("settings_set", { openaiKey, imageModel, notifyOnQuestion });
+export const settingsSet = (
+    openaiKey: string | null,
+    imageModel: string | null,
+    notifyOnQuestion: boolean | null = null,
+    codexSandbox: boolean | null = null,
+) => call<Settings>("settings_set", settingsSetArgs(openaiKey, imageModel, notifyOnQuestion, codexSandbox));
+
+/**
+ * The arguments of `settings_set`. `codexSandbox` is left out when it is null: an old call has no such argument, and
+ * the app reads a missing one as "no change". The other three always go, as before.
+ */
+export function settingsSetArgs(
+    openaiKey: string | null,
+    imageModel: string | null,
+    notifyOnQuestion: boolean | null,
+    codexSandbox: boolean | null,
+): Record<string, unknown> {
+    return { openaiKey, imageModel, notifyOnQuestion, ...(codexSandbox === null ? {} : { codexSandbox }) };
+}
+
+/**
+ * Runs `bwrap --unshare-user --ro-bind / / true` with the environment of a session (5 s at most). It starts no Codex
+ * session. `codexSandbox: true` in `settingsSet` runs this probe again, and the app refuses the switch unless it says `works`.
+ */
+export const codexSandboxProbe = () => call<SandboxProbe>("codex_sandbox_probe");
 
 // ---- Commands (docs/ipc-settings.md, section 4) ----
 

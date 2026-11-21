@@ -62,6 +62,7 @@ use super::{
 };
 use crate::hookrx::HookReply;
 use crate::model::Employee;
+use crate::model::PermissionPolicy;
 use crate::session::PasteRefused;
 use crate::status::Status;
 use crate::store::{KIND_TASK_ASSIGN, KIND_TASK_STATUS, MessageRecord, StoreError, TaskRecord};
@@ -700,6 +701,64 @@ pub(crate) fn team_instructions(employee: &Employee, team: &[Employee], floor: &
 - Send a message only when it carries work, a result or a question. Do not send thanks or other acknowledgements: they start endless chats and use the tokens of the operator.\n",
     );
     text.push_str(&task_instructions(employee, team, floor));
+    text
+}
+
+/// The part of the instructions about the limits of a Codex employee (spec 4.7, decision O7).
+/// The text follows the switch "Use the Codex sandbox" (`sandbox`) and the policy. `worktrees` is
+/// true when the floor is a git repository with worktrees. The text for a Claude employee is not
+/// needed: the app enforces the policy of Claude with permission rules.
+pub(crate) fn codex_permission_instructions(
+    employee: &Employee,
+    floor: &Path,
+    worktrees: bool,
+    sandbox: bool,
+) -> String {
+    let reports = floor.join(REPORTS_DIR);
+    let worktree_dir = floor.join(".swarm/worktrees");
+    let mut text = String::from("## Your limits\n\n");
+    if sandbox {
+        text.push_str(
+            "The CLI enforces your permission policy with a sandbox. The sandbox limits what your shell commands can write. A command that the sandbox blocks fails, or the CLI asks the operator to approve it. If the CLI asks, wait for the answer of the operator. Do not try to get around the sandbox. The operator sees each approval.\n",
+        );
+        match employee.permission {
+            PermissionPolicy::ReadOnly | PermissionPolicy::AskAlways => text.push_str(&format!(
+                "Your policy is read-only. You can read all files. You can write only in the reports folder `{}`. A command that writes in another place is blocked.\n",
+                reports.display()
+            )),
+            PermissionPolicy::EditInWorktree if worktrees => text.push_str(&format!(
+                "Your policy is edit-in-worktree. You can write in the folder of the task worktrees `{}`, in the reports folder `{}`, and in the temporary folders (`/tmp`). The main checkout is read-only. A git command that writes to the repository (for example `git add`) can fail: do not use it, the app commits for you.\n",
+                worktree_dir.display(),
+                reports.display()
+            )),
+            PermissionPolicy::EditInWorktree => text.push_str(&format!(
+                "Your policy is edit-in-worktree. This floor is not a git repository, so you edit the project folder `{}` directly. You can write there and in the temporary folders (`/tmp`).\n",
+                floor.display()
+            )),
+        }
+        text.push_str(
+            "Your commands have no network access. The tools of the MCP server `tower` are not limited by the sandbox.\n",
+        );
+    } else {
+        text.push_str(
+            "On this machine the CLI does not enforce your permission policy. Nothing blocks a file write or a command, so only this text limits you. Obey the limits below as strict orders. If you need to do more than they permit, stop and ask the operator.\n",
+        );
+        match employee.permission {
+            PermissionPolicy::ReadOnly | PermissionPolicy::AskAlways => text.push_str(&format!(
+                "Your policy is read-only. Do not edit or create a file, except the report files in the reports folder `{}`. Do not run a command that changes files, packages or the system.\n",
+                reports.display()
+            )),
+            PermissionPolicy::EditInWorktree if worktrees => text.push_str(&format!(
+                "Your policy is edit-in-worktree. Edit files only inside the worktree of your task (under `{}`) and write report files in `{}`. Never change a file of the main checkout.\n",
+                worktree_dir.display(),
+                reports.display()
+            )),
+            PermissionPolicy::EditInWorktree => text.push_str(&format!(
+                "Your policy is edit-in-worktree. This floor is not a git repository, so you edit the project folder `{}` directly.\n",
+                floor.display()
+            )),
+        }
+    }
     text
 }
 

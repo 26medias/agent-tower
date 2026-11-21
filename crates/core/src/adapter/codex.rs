@@ -4,10 +4,29 @@
 //! `-c 'projects={"<cwd>"={trust_level="trusted"}}'` (the inline-table form; the dotted form
 //! does not work). Codex has no flag for the session ID: it comes in the first hook event.
 //!
-//! Permission mapping (decision O7, option B): the Codex sandbox does not work on this machine,
-//! so each policy that exists gets `-a on-request -s danger-full-access`. The CLI does not
-//! enforce `read-only` or `edit-in-worktree`; only the instructions limit the agent. `ask-always`
-//! does not exist for Codex: the adapter returns an error.
+//! Permission mapping (decision O7). Two cases, chosen by `StartContext::codex_sandbox` (the
+//! switch "Use the Codex sandbox" in Settings, off by default):
+//!
+//! - Off (option B): each policy that exists gets `-a on-request -s danger-full-access`. The CLI
+//!   does not enforce `read-only` or `edit-in-worktree`; only the instructions limit the agent.
+//! - On (option A, needs the AppArmor profile for `bwrap`; NOT run live, see `docs/spec.md` 4.7):
+//!   `-a on-request` and a sandbox that the CLI enforces. An action outside the sandbox asks the
+//!   operator (`PermissionRequest`).
+//!
+//!   | Policy | Sandbox flags |
+//!   |---|---|
+//!   | `read-only` | a permission profile that extends `:read-only`, and `write` only for `.swarm/reports` |
+//!   | `edit-in-worktree`, git floor with worktrees | the same profile, with `write` for `.swarm/worktrees`, `.swarm/reports`, `:slash_tmp` and `:tmpdir` |
+//!   | `edit-in-worktree`, no git repository | `-s workspace-write` (the floor folder is the workspace) |
+//!
+//!   The mode `-s workspace-write` always makes the working folder writable, and the session runs
+//!   in the main checkout, so a git floor needs the profile: it is the only way to keep the main
+//!   checkout read-only (PROBED with `codex debug prompt-input`, which renders the sandbox that
+//!   Codex would use and starts no model). The profile is a beta feature of Codex.
+//!
+//! `ask-always` does not exist for Codex in either case: the adapter returns an error. `-a`
+//! has `on-request` and `never` only. `approval_policy = "untrusted"` ends with "no longer
+//! supported". `granular` only chooses which prompts may show; it does not ask before each action.
 //!
 //! Each `-c` value is TOML. The CLI uses the raw text when TOML parsing fails, so a wrong
 //! escape does not always give an error. Text values use `toml_string`.
@@ -139,10 +158,70 @@ fn build_args(ctx: &StartContext) -> Result<Vec<OsString>> {
             format!("model_reasoning_effort={}", toml_string(effort)),
         );
     }
-    for arg in ["-a", "on-request", "-s", "danger-full-access"] {
-        args.push(arg.into());
-    }
+    push_permissions(&mut args, ctx, cwd);
     Ok(args)
+}
+
+/// The name of the permission profile that the adapter defines with `-c`. A profile of the
+/// operator in `~/.codex/config.toml` with the same name would be replaced for the session.
+pub const PROFILE_NAME: &str = "agent_tower";
+
+/// The approval flags and the sandbox flags of the policy (see the module text). `cwd` is the
+/// working folder, which is the floor folder.
+fn push_permissions(args: &mut Vec<OsString>, ctx: &StartContext, cwd: &str) {
+    args.push("-a".into());
+    args.push("on-request".into());
+    if !ctx.codex_sandbox {
+        args.push("-s".into());
+        args.push("danger-full-access".into());
+        return;
+    }
+    let cwd = cwd.trim_end_matches('/');
+    let reports = format!("{cwd}/.swarm/reports");
+    let worktrees = format!("{cwd}/.swarm/worktrees");
+    match ctx.employee.permission {
+        PermissionPolicy::ReadOnly => push_profile(args, &[(&reports, "write")]),
+        PermissionPolicy::EditInWorktree if ctx.worktrees => push_profile(
+            args,
+            &[
+                (&reports, "write"),
+                (&worktrees, "write"),
+                (":slash_tmp", "write"),
+                (":tmpdir", "write"),
+            ],
+        ),
+        PermissionPolicy::EditInWorktree => {
+            args.push("-s".into());
+            args.push("workspace-write".into());
+        }
+        // `build_args` refuses `ask-always` before it gets here.
+        PermissionPolicy::AskAlways => {}
+    }
+}
+
+/// A permission profile that starts from `:read-only` (the filesystem is readable) and gives
+/// `write` to the listed paths. A path or a special token is a key of the `filesystem` table.
+/// Without `extends`, Codex does not read the project files through the sandbox.
+fn push_profile(args: &mut Vec<OsString>, writes: &[(&str, &str)]) {
+    push_config(
+        args,
+        format!("default_permissions={}", toml_string(PROFILE_NAME)),
+    );
+    push_config(
+        args,
+        format!("permissions.{PROFILE_NAME}.extends=\":read-only\""),
+    );
+    let entries: Vec<String> = writes
+        .iter()
+        .map(|(path, access)| format!("{}={}", toml_string(path), toml_string(access)))
+        .collect();
+    push_config(
+        args,
+        format!(
+            "permissions.{PROFILE_NAME}.filesystem={{{}}}",
+            entries.join(",")
+        ),
+    );
 }
 
 fn push_config(args: &mut Vec<OsString>, value: String) {

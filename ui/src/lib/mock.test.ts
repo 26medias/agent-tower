@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMockBackend, type MockControl } from "./mock";
-import type { FloorView, ProgramTestResult, Programs, Settings } from "./types";
+import { settingsSetArgs } from "./ipc";
+import type { FloorView, ProgramTestResult, Programs, SandboxProbe, Settings } from "./types";
 
 const FLOOR = "/home/demo/tower";
 const control = () => (globalThis as unknown as { __towerMock: MockControl }).__towerMock;
@@ -143,6 +144,46 @@ describe("mock: settings switch, program test and reset", () => {
         expect(nul.notifyOnQuestion).toBe(false);
         const on = await b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, notifyOnQuestion: true });
         expect(on.notifyOnQuestion).toBe(true);
+    });
+
+    it("has the Codex sandbox switch off by default and turns it on only when the probe says works", async () => {
+        const g = globalThis as Record<string, unknown>;
+        const b = createMockBackend();
+        const probe = () => b.invoke<SandboxProbe>("codex_sandbox_probe");
+        const set = (codexSandbox?: boolean | null) =>
+            b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, ...(codexSandbox === undefined ? {} : { codexSandbox }) });
+        try {
+            expect((await b.invoke<Settings>("settings_get")).codexSandbox).toBe(false);
+            // Each state of the probe.
+            g.__towerMockConfig = { sandboxProbe: { state: "fails" } };
+            expect(await probe()).toEqual({ state: "fails", detail: "bwrap: setting up uid map: Permission denied" });
+            g.__towerMockConfig = { sandboxProbe: { state: "missing" } };
+            expect(await probe()).toMatchObject({ state: "missing" });
+            g.__towerMockConfig = { sandboxProbe: { state: "works" } };
+            expect(await probe()).toMatchObject({ state: "works" });
+            // A probe that does not say works refuses the switch, with the text of the problem.
+            g.__towerMockConfig = { sandboxProbe: { state: "fails", detail: "bwrap: no way" } };
+            expect(await rejected(set(true))).toMatch(/does not work on this machine.*bwrap: no way/);
+            g.__towerMockConfig = { sandboxProbe: { state: "missing" } };
+            expect(await rejected(set(true))).toMatch(/cannot be turned on/);
+            expect((await b.invoke<Settings>("settings_get")).codexSandbox).toBe(false);
+            // A probe that says works accepts it. A missing argument and null change nothing. Off is always allowed.
+            g.__towerMockConfig = { sandboxProbe: { state: "works" } };
+            expect((await set(true)).codexSandbox).toBe(true);
+            expect((await set()).codexSandbox).toBe(true);
+            expect((await set(null)).codexSandbox).toBe(true);
+            g.__towerMockConfig = { sandboxProbe: { state: "fails" } };
+            expect((await set(false)).codexSandbox).toBe(false);
+        } finally {
+            delete g.__towerMockConfig;
+        }
+    });
+
+    it("sends codexSandbox in settings_set only when it has a value", () => {
+        expect(settingsSetArgs(null, null, false, null)).toEqual({ openaiKey: null, imageModel: null, notifyOnQuestion: false });
+        expect(Object.keys(settingsSetArgs(null, null, null, null))).not.toContain("codexSandbox");
+        expect(settingsSetArgs(null, null, null, true)).toEqual({ openaiKey: null, imageModel: null, notifyOnQuestion: null, codexSandbox: true });
+        expect(settingsSetArgs(null, null, null, false)).toMatchObject({ codexSandbox: false });
     });
 
     it("tests a program: a good result, a bad result and a program that is not found", async () => {

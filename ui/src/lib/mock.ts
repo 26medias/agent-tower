@@ -19,6 +19,7 @@ import type {
     ProgramName,
     Programs,
     ResumeProgress,
+    SandboxProbe,
     SessionView,
     Settings,
     Status,
@@ -93,6 +94,13 @@ export interface MockConfig {
     resumePauseMs?: number;
     /** How long `program_test` takes, in ms. Default 0. */
     programTestMs?: number;
+    /**
+     * What `codex_sandbox_probe` finds. Default `works`. `detail` is the text of the probe; the default for `fails` is the
+     * error of this machine ("bwrap: setting up uid map: Permission denied"). A change applies to the next call.
+     */
+    sandboxProbe?: { state: SandboxProbe["state"]; detail?: string };
+    /** How long `codex_sandbox_probe` takes, in ms. Default 0. */
+    sandboxProbeMs?: number;
     /** Text that the CLI has already printed when a session is made (it shows in the scrollback of the attach). */
     startingText?: string;
     /** `programs_get` finds the optional program `rtk` (the examples of the rules in Settings then use it). Default false. */
@@ -169,6 +177,19 @@ export interface MockControl {
     setDescription(path: string, text: string | null): void;
     /** Change the defaults or one employee of a floor. A floor event follows. */
     patchFloor(path: string, change: { defaults?: Partial<FloorDefaults>; employee?: { slug: string; patch: Partial<Employee> } }): void;
+}
+
+/** The result of `codex_sandbox_probe`, from the config of the mock. */
+function sandboxProbe(): SandboxProbe {
+    const set = config().sandboxProbe ?? { state: "works" as const };
+    const detail =
+        set.detail ??
+        (set.state === "works"
+            ? "bwrap works: /usr/bin/bwrap"
+            : set.state === "fails"
+              ? "bwrap: setting up uid map: Permission denied"
+              : "bwrap was not found in the PATH of a session");
+    return { state: set.state, detail };
 }
 
 const config = (): MockConfig => ((globalThis as Record<string, unknown>).__towerMockConfig ?? {}) as MockConfig;
@@ -299,6 +320,7 @@ export function createMockBackend(): Backend {
         openaiKeySource: null,
         imageModel: "gpt-image-2.6-sunburst",
         notifyOnQuestion: true,
+        codexSandbox: false,
         homeDir: "/home/demo",
     };
     // The custom models of the app config (`[models]`).
@@ -1070,11 +1092,21 @@ export function createMockBackend(): Backend {
                 return { ...settings };
             }
             case "settings_set": {
-                const a = args<{ openaiKey: string | null; imageModel: string | null; notifyOnQuestion?: boolean | null }>(
-                    raw,
-                    ["openaiKey", "imageModel"],
-                    ["notifyOnQuestion"],
-                );
+                const a = args<{
+                    openaiKey: string | null;
+                    imageModel: string | null;
+                    notifyOnQuestion?: boolean | null;
+                    codexSandbox?: boolean | null;
+                }>(raw, ["openaiKey", "imageModel"], ["notifyOnQuestion", "codexSandbox"]);
+                if (a.codexSandbox === true) {
+                    // Like the real app: it runs the probe, and it refuses the switch unless the probe says `works`.
+                    const probe = sandboxProbe();
+                    if (probe.state === "fails") {
+                        throw `the Codex sandbox does not work on this machine, so it cannot be turned on: ${probe.detail}`;
+                    }
+                    if (probe.state === "missing") throw `the Codex sandbox cannot be turned on: ${probe.detail}`;
+                }
+                if (a.codexSandbox !== undefined && a.codexSandbox !== null) settings.codexSandbox = a.codexSandbox;
                 if (a.notifyOnQuestion !== undefined && a.notifyOnQuestion !== null) {
                     settings.notifyOnQuestion = a.notifyOnQuestion;
                 }
@@ -1149,6 +1181,11 @@ export function createMockBackend(): Backend {
                     programs[name] = path.trim();
                 }
                 return { ...programs, overrides: { ...programs.overrides } };
+            }
+            case "codex_sandbox_probe": {
+                args(raw, []);
+                await sleep(config().sandboxProbeMs ?? 0);
+                return sandboxProbe();
             }
             case "program_test": {
                 const { name } = args<{ name: ProgramName }>(raw, ["name"]);

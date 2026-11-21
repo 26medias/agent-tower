@@ -358,6 +358,9 @@ pub struct Settings {
     pub image_model: String,
     /// `[interface] notify_on_question` of the app config (default `true`).
     pub notify_on_question: bool,
+    /// `[codex] sandbox` of the app config (default `false`): start Codex employees with the
+    /// Codex sandbox. It applies at the next start of a session.
+    pub codex_sandbox: bool,
     /// The home folder of the app, or `null` when it is not known. The UI opens the "Browse..."
     /// dialog there when no floor gives a better place.
     pub home_dir: Option<String>,
@@ -373,6 +376,7 @@ impl From<app::SettingsView> for Settings {
             }),
             image_model: view.image_model,
             notify_on_question: view.notify_on_question,
+            codex_sandbox: view.codex_sandbox,
             home_dir: view.home_dir.map(|home| text(&home)),
         }
     }
@@ -416,6 +420,24 @@ impl From<app::ProgramTest> for ProgramTestResult {
             ok: result.ok,
             path: result.path.map(|p| text(&p)),
             output: result.output,
+        }
+    }
+}
+
+/// `SandboxProbe`: the result of `codex_sandbox_probe`. `state` is `works`, `fails` or `missing`.
+/// `detail` is one line: the first line of the error for `fails`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxProbe {
+    pub state: String,
+    pub detail: String,
+}
+
+impl From<app::SandboxProbe> for SandboxProbe {
+    fn from(probe: app::SandboxProbe) -> SandboxProbe {
+        SandboxProbe {
+            state: probe.state.as_str().to_owned(),
+            detail: probe.detail,
         }
     }
 }
@@ -836,22 +858,24 @@ mod tests {
             openai_key_source: Some(KeySource::Env),
             image_model: "m".into(),
             notify_on_question: false,
+            codex_sandbox: false,
             home_dir: Some("/home/a".into()),
         };
         assert_eq!(
             to_json(&settings),
-            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "homeDir": "/home/a"})
+            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "codexSandbox": false, "homeDir": "/home/a"})
         );
         let none = Settings {
             openai_key_set: false,
             openai_key_source: None,
             image_model: "m".into(),
             notify_on_question: true,
+            codex_sandbox: true,
             home_dir: None,
         };
         assert_eq!(
             to_json(&none),
-            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "homeDir": null})
+            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "codexSandbox": true, "homeDir": null})
         );
         assert_eq!(to_json(&KeySource::Config), json!("config"));
     }

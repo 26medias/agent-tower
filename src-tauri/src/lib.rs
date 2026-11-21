@@ -97,6 +97,7 @@ pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         commands::setup_start,
         commands::settings_get,
         commands::settings_set,
+        commands::codex_sandbox_probe,
         commands::models_get,
         commands::models_set_custom,
         commands::floor_defaults_set,

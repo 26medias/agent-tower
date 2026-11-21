@@ -20,6 +20,8 @@
         // The Codex file can change while the app runs: read the lists again.
         void store.loadModels();
         void store.loadSettings();
+        // The switch of the Codex sandbox needs a fresh probe. It runs in the background.
+        void store.testSandbox();
         // A toast can ask for one section, for example the program paths.
         const want = store.settingsSection;
         store.settingsSection = null;
@@ -60,6 +62,23 @@
         await store.setOpenaiKey("");
         keyBusy = false;
     }
+
+    const probe = $derived(store.sandboxProbe);
+    const sandboxOn = $derived(store.settings?.codexSandbox ?? false);
+    // The switch can be turned ON only when the last probe says `works`. It can always be turned OFF.
+    const sandboxDisabled = $derived(!store.settings || store.sandboxTesting || (!sandboxOn && probe?.state !== "works"));
+    const sandboxReason = $derived(
+        !store.settings || sandboxOn || probe?.state === "works"
+            ? null
+            : store.sandboxTesting || !probe
+              ? "The switch needs the result of the test."
+              : "The switch stays off because the test did not pass.",
+    );
+    const sandboxHelp = $derived(
+        probe?.state === "missing"
+            ? "Install bubblewrap, so that the program bwrap is in the PATH of the sessions."
+            : "Codex needs an AppArmor profile that lets bwrap use user namespaces. See docs/spec.md, decision O7.",
+    );
 
     const codexNote = $derived(
         store.models?.codexSource === "cache" ? "from the Codex file models_cache.json" : "built-in list (no Codex file found)",
@@ -157,6 +176,53 @@
         <section data-section="programs" aria-label="Programs">
             <h3>Programs</h3>
             <ProgramsPanel />
+        </section>
+
+        <section data-section="codex-sandbox" aria-label="Codex sandbox">
+            <h3>Codex sandbox</h3>
+            <div class="sandbox-state" data-testid="sandbox-state" data-state={store.sandboxTesting ? "testing" : (probe?.state ?? "unknown")}>
+                {#if store.sandboxTesting}
+                    <span class="probe testing">Testing the sandbox...</span>
+                {:else if !probe}
+                    <span class="probe testing">Not tested yet.</span>
+                {:else if probe.state === "works"}
+                    <span class="probe ok">The Codex sandbox works on this machine.</span>
+                {:else}
+                    <span class="probe bad">{probe.detail}</span>
+                {/if}
+                <button type="button" class="ghost" name="sandboxTest" disabled={store.sandboxTesting} onclick={() => void store.testSandbox()}>
+                    Test again
+                </button>
+            </div>
+            {#if !store.sandboxTesting && probe && probe.state !== "works"}
+                <p class="hint" data-testid="sandbox-help">{sandboxHelp}</p>
+            {/if}
+            <label class="check">
+                <input
+                    type="checkbox"
+                    name="codexSandbox"
+                    checked={sandboxOn}
+                    disabled={sandboxDisabled}
+                    onchange={async (e) => {
+                        const box = e.currentTarget;
+                        const ok = await store.setCodexSandbox(box.checked);
+                        // A refusal leaves the stored value as it was: show that.
+                        if (!ok) box.checked = store.settings?.codexSandbox ?? false;
+                    }}
+                />
+                <span>Use the Codex sandbox for Codex employees</span>
+            </label>
+            {#if sandboxReason}
+                <p class="hint" data-testid="sandbox-reason">{sandboxReason}</p>
+            {/if}
+            <ActionError area="codex-sandbox" />
+            <p class="hint">
+                On: the Codex CLI enforces the policy of each Codex employee. A <em>read-only</em> employee can write only the
+                reports folder. An <em>edit-in-worktree</em> employee can write only the task worktrees, the reports folder and
+                the temporary folders. In a folder that is not a git repository it can write the project folder. The commands
+                have no network access. An action outside the policy asks you for approval. Off: the CLI enforces no policy, and
+                only the role text limits a Codex employee. The change applies at the next start of a session.
+            </p>
         </section>
 
         <section data-section="interface" aria-label="Interface">
@@ -289,6 +355,27 @@
     select {
         align-self: flex-start;
         max-width: 100%;
+    }
+
+    .sandbox-state {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        flex-wrap: wrap;
+    }
+
+    .sandbox-state .ok {
+        color: var(--ok);
+    }
+
+    .sandbox-state .bad {
+        color: var(--danger);
+        overflow-wrap: anywhere;
+        user-select: text;
+    }
+
+    .sandbox-state .testing {
+        color: var(--dim);
     }
 
     .check {

@@ -213,10 +213,18 @@ complete and that they can stop this session.
       example `Bash(cargo test:*)`. The operator sets these rules in Settings. They are not in
       the project folder. Do NOT write them anywhere, and do not ask the operator for them in the
       team proposal. They apply at the next start of a session.
-- **Permission with the CLI `codex`.** The CLI does not enforce `read-only` or
-  `edit-in-worktree` on this machine: only the role text limits the employee. So write the limit
-  as an order in the role text (for example "Do not edit files."). `ask-always` does not work
-  with `codex`.
+- **Permission with the CLI `codex`.** (Changed 2026-11-21.) The operator can turn the Codex
+  sandbox on in Settings ("Use the Codex sandbox for Codex employees"). It is off by default,
+  and you cannot see the switch. So write a text that is true in both cases:
+    - If the operator turned the Codex sandbox on in Settings, the CLI enforces the policy.
+      `read-only`: the employee can write only the report files in `.swarm/reports/`.
+      `edit-in-worktree`: the employee can write only in the task worktrees, the report files
+      and the temporary folders (in the project folder when it is not a git repository).
+      Commands have no network access. An action outside the policy asks the operator.
+    - If the switch is off, the CLI enforces no policy: only the role text limits the employee.
+    - In both cases, write the limit as an order in the role text too (for example "Do not
+      edit files."). The order is the only limit when the switch is off.
+    - `ask-always` does not work with `codex`, with the switch on or off.
 - **Tools of an employee.** An employee is a normal session of its CLI. It has the tools of that
   CLI on this machine: file read and edit, the shell (with the permission rules above), and the
   skills and MCP servers that the operator configured for the CLI. The app adds the tools of the

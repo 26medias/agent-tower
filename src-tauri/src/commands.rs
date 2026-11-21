@@ -14,8 +14,8 @@
 
 use crate::views::{
     AttachResult, Cli, Employee, FloorDefaults, FloorEntry, FloorView, ModelCatalog, OutputMessage,
-    PermissionsSaved, ProgramTestResult, Programs, ResumeProgress, SessionView, Settings,
-    TaskDetail, TaskDiff, TaskMerge, TaskStatus, TaskView,
+    PermissionsSaved, ProgramTestResult, Programs, ResumeProgress, SandboxProbe, SessionView,
+    Settings, TaskDetail, TaskDiff, TaskMerge, TaskStatus, TaskView,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -235,13 +235,25 @@ pub async fn settings_set(
     openai_key: Option<String>,
     image_model: Option<String>,
     notify_on_question: Option<bool>,
+    codex_sandbox: Option<bool>,
 ) -> Result<Settings, String> {
     blocking(&tower, move |t| {
+        // The sandbox switch goes first: a refusal (the probe does not say `works`) changes
+        // nothing else.
+        t.settings_set_codex(codex_sandbox)?;
         t.settings_set(openai_key, image_model)?;
         t.settings_set_interface(notify_on_question)
             .map(Settings::from)
     })
     .await
+}
+
+/// Test the Codex sandbox: run `bwrap --unshare-user --ro-bind / / true` with the environment of a
+/// session. It starts no Codex session. The result is `works`, `fails` (with the first line of
+/// the error) or `missing`.
+#[tauri::command]
+pub async fn codex_sandbox_probe(tower: State<'_, Shared>) -> Result<SandboxProbe, String> {
+    blocking(&tower, |t| t.codex_sandbox_probe().map(SandboxProbe::from)).await
 }
 
 /// The model lists. The Codex file is read again on each call.

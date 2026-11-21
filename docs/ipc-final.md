@@ -173,6 +173,39 @@ settings_set(openaiKey: string | null, imageModel: string | null, notifyOnQuesti
 `notify_on_question`. The default (`true`) has no key: the app removes the key (and an empty
 table) when the value is set to `true`. A value that is not a boolean is read as `true`.
 
+## `Settings.codexSandbox` and `codex_sandbox_probe` (2026-11-21, decision O7, option A)
+
+```ts
+interface Settings { /* ... all the old fields ... */ codexSandbox: boolean }  // default false
+
+// New optional fourth argument. A missing argument or null means "no change".
+settings_set(openaiKey: string | null, imageModel: string | null,
+             notifyOnQuestion?: boolean | null, codexSandbox?: boolean | null): Promise<Settings>
+
+codex_sandbox_probe(): Promise<{ state: "works" | "fails" | "missing"; detail: string }>
+```
+
+`codexSandbox` is stored in the app config file `programs.toml`, table `[codex]`, key `sandbox`.
+The default (`false`) has no key: the app removes the key (and an empty table) when the value is set
+to `false`. Other keys of `[codex]` stay. A value that is not a boolean is read as `false`. The
+switch applies at the next start of a session (the app reads it in `launch`). It never applies to
+a Claude employee or to the setup session.
+
+`codex_sandbox_probe` finds `bwrap` in the PATH of a session (the same environment as
+`program_test`), runs `bwrap --unshare-user --ro-bind / / true` with no shell and a time limit of
+5 s, and starts no Codex session. `works`: exit code 0 (`detail` is `bwrap works: <path>`).
+`fails`: `bwrap` ended with an error (`detail` is the first line of its error, for example
+`bwrap: setting up uid map: Permission denied`), or it did not end in 5 s. `missing`: no `bwrap` in
+the PATH.
+
+`settings_set` with `codexSandbox: true` runs the probe again and refuses the change unless it says
+`works`. The error text is `the Codex sandbox does not work on this machine, so it cannot be turned
+on: <detail>` (`fails`) or `the Codex sandbox cannot be turned on: <detail>` (`missing`). The
+command checks the switch first: a refusal changes nothing else of the same call. `codexSandbox:
+false` is always allowed. The UI shows the section "Codex sandbox" in Settings: the probe result, the
+button "Test again", and the switch, which is disabled unless the last test says `works` (or the
+switch is on already, so that it can be turned off).
+
 ## The desktop notification for a question
 
 When a session changes to `question`, the core sends `Observer::question_asked` (the data: the

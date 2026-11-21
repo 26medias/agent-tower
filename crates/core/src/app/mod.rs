@@ -44,6 +44,7 @@ mod models;
 mod notify;
 mod program_test;
 mod resume;
+mod sandbox_probe;
 mod settings;
 mod setup;
 mod tasks;
@@ -92,6 +93,7 @@ pub use models::{
 pub use notify::{NOTIFICATION_TITLE, QuestionAsked, question_body, should_notify};
 pub use program_test::{PROGRAM_TEST_TIMEOUT, ProgramTest};
 pub use resume::ResumeProgress;
+pub use sandbox_probe::{PROBE_TIMEOUT, SandboxProbe, SandboxState};
 pub use settings::{KeySource, SettingsView};
 pub use tools::{FAILURE_TTL, hook_candidates, locate_hook_program, workspace_root};
 
@@ -1187,6 +1189,63 @@ impl TowerCore {
         Ok(self.settings_get())
     }
 
+    /// The switch "Use the Codex sandbox for Codex employees" (`[codex] sandbox` of the app
+    /// config). `None` is "no change". Turning it ON runs the probe first (`codex_sandbox_probe`)
+    /// and refuses unless the probe says `works`. Turning it OFF is always allowed. It applies at
+    /// the next start of a session. Returns the settings.
+    pub fn settings_set_codex(&self, sandbox: Option<bool>) -> Result<SettingsView> {
+        if let Some(on) = sandbox {
+            if on {
+                let probe = self.codex_sandbox_probe()?;
+                match probe.state {
+                    SandboxState::Works => {}
+                    SandboxState::Fails => {
+                        return Err(other(format!(
+                            "the Codex sandbox does not work on this machine, so it cannot be turned on: {}",
+                            probe.detail
+                        )));
+                    }
+                    SandboxState::Missing => {
+                        return Err(other(format!(
+                            "the Codex sandbox cannot be turned on: {}",
+                            probe.detail
+                        )));
+                    }
+                }
+            }
+            settings::update(&self.logo_env.config_file, |table| {
+                settings::set_codex_sandbox(table, on);
+            })
+            .map_err(|e| io_message("cannot write the app config", e))?;
+        }
+        Ok(self.settings_get())
+    }
+
+    /// Test the sandbox of Codex: run `bwrap --unshare-user --ro-bind / / true` with the PATH
+    /// and the environment of a session, with a time limit of `PROBE_TIMEOUT`. It starts no
+    /// Codex session and no shell.
+    pub fn codex_sandbox_probe(&self) -> Result<SandboxProbe> {
+        self.codex_sandbox_probe_within(PROBE_TIMEOUT)
+    }
+
+    /// `codex_sandbox_probe` with another time limit (the tests use a short one).
+    #[doc(hidden)]
+    pub fn codex_sandbox_probe_within(&self, timeout: Duration) -> Result<SandboxProbe> {
+        let dirs: Vec<PathBuf> = {
+            let mut book = locked(&self.programs);
+            tools::PROGRAM_NAMES
+                .iter()
+                .filter_map(|each| book.resolve(each).ok())
+                .filter_map(|path| path.parent().map(Path::to_path_buf))
+                .collect()
+        };
+        // The same environment as a session (see `program_test_within`).
+        let env = build_env(&self.session_env.get(), &[], &dirs)
+            .map_err(|e| other(format!("cannot build the environment: {e}")))?;
+        let cwd = self.home.clone().unwrap_or_else(|| PathBuf::from("/"));
+        Ok(sandbox_probe::run(&env, &cwd, timeout))
+    }
+
     /// The model lists. It reads the Codex file and the app config again on each call.
     pub fn models_get(&self) -> ModelCatalog {
         models::catalog(&self.logo_env.config_file, self.codex_home.as_deref())
@@ -1380,11 +1439,27 @@ impl TowerCore {
         // Worktrees: only a floor that is the top of a git repository with a commit, on a
         // branch, gets them. The setup session never does (it writes `.swarm/` files).
         let worktrees = setup_cli.is_none()
-            && employee.cli == CliKind::Claude
             && matches!(
                 gitwork::repo_state(&floor.path),
                 gitwork::RepoState::Ready { .. }
             );
+        // The Codex sandbox (the switch in Settings, decision O7): only a Codex employee gets it,
+        // never the setup session. The switch is read now, so a change applies at the next start.
+        let codex_sandbox = setup_cli.is_none()
+            && employee.cli == CliKind::Codex
+            && settings::codex_sandbox(&self.logo_env.config_file);
+        if codex_sandbox && employee.permission != PermissionPolicy::AskAlways {
+            // The sandbox profile names these folders. A folder that does not exist yet (the
+            // worktrees folder, before the first task) must exist when the CLI starts.
+            for folder in [".swarm/reports", ".swarm/worktrees"] {
+                fs::create_dir_all(floor.path.join(folder)).map_err(|e| {
+                    io_message(
+                        &format!("cannot make the folder {folder} for the sandbox"),
+                        e,
+                    )
+                })?;
+            }
+        }
         if resume && previous.is_none() && employee.cli == CliKind::Claude {
             return Err(other(format!(
                 "{} has no stored Claude session to resume. Start a fresh session.",
@@ -1439,10 +1514,17 @@ impl TowerCore {
             }),
             worktrees,
             floor_allow,
+            codex_sandbox,
             instructions: Some(if setup_cli.is_some() {
-                instructions(&employee, None, &floor.path)
+                instructions(&employee, None, &floor.path, false, false)
             } else {
-                instructions(&employee, Some(&team), &floor.path)
+                instructions(
+                    &employee,
+                    Some(&team),
+                    &floor.path,
+                    worktrees,
+                    codex_sandbox,
+                )
             }),
             employee: employee.clone(),
             cwd: floor.path.clone(),
@@ -1984,7 +2066,13 @@ fn default_first_message(employee: &Employee) -> String {
 /// The instructions of a session (spec 4.6). `team` is `None` for the setup session: it gets
 /// the short text and its role text only. An employee also gets the team, and the rules for the
 /// tools of the app (`bus.rs`, `employee_start` and `send`).
-fn instructions(employee: &Employee, team: Option<&[Employee]>, floor: &Path) -> String {
+fn instructions(
+    employee: &Employee,
+    team: Option<&[Employee]>,
+    floor: &Path,
+    worktrees: bool,
+    codex_sandbox: bool,
+) -> String {
     let mut text = format!(
         "You are {}, the {} on this floor. The operator can type in your terminal at any time.",
         employee.name, employee.role
@@ -1992,6 +2080,15 @@ fn instructions(employee: &Employee, team: Option<&[Employee]>, floor: &Path) ->
     if let Some(team) = team {
         text.push_str("\n\n");
         text.push_str(&bus::team_instructions(employee, team, floor));
+        if employee.cli == CliKind::Codex {
+            text.push_str("\n\n");
+            text.push_str(&bus::codex_permission_instructions(
+                employee,
+                floor,
+                worktrees,
+                codex_sandbox,
+            ));
+        }
     }
     let role_text = employee.role_text.trim();
     if !role_text.is_empty() {

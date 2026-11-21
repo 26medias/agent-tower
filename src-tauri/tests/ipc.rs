@@ -122,6 +122,11 @@ fn app() -> App {
 
 /// An app whose Tower checks the floor folders every `watch` (`None`: no watcher).
 fn app_with(watch: Option<Duration>) -> App {
+    app_full(watch, None)
+}
+
+/// `app_with`, and `tools` (a folder with a `node` and a fake `bwrap`) first in the session PATH.
+fn app_full(watch: Option<Duration>, tools: Option<&Path>) -> App {
     let dir = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(dir.path()).unwrap();
     let cwd = base.join("project");
@@ -156,7 +161,12 @@ fn app_with(watch: Option<Duration>) -> App {
             .programs_set(name, bin("fake-cli").to_str().unwrap())
             .unwrap();
     }
-    tower.programs_set("node", "/bin/true").unwrap();
+    match tools {
+        Some(tools) => tower
+            .programs_set("node", tools.join("node").to_str().unwrap())
+            .unwrap(),
+        None => tower.programs_set("node", "/bin/true").unwrap(),
+    };
 
     let app = register_commands(mock_builder())
         .build(mock_context(noop_assets()))
@@ -492,7 +502,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
     // Settings. The arguments are camelCase, and a null is "no change".
     assert_eq!(
         app.call("settings_get", json!({})).unwrap(),
-        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "homeDir": "/tmp" })
+        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "codexSandbox": false, "homeDir": "/tmp" })
     );
     let set = app
         .call(
@@ -510,7 +520,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
         .unwrap();
     assert_eq!(
         set,
-        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "homeDir": "/tmp" })
+        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "codexSandbox": false, "homeDir": "/tmp" })
     );
     assert!(!set.to_string().contains("sk-test-1"));
     let set = app
@@ -1137,6 +1147,78 @@ fn the_notification_switch_is_in_settings_get_and_settings_set() {
         .unwrap();
     assert_eq!(on["notifyOnQuestion"], json!(true));
     assert_eq!(on["imageModel"], json!("m-1"));
+}
+
+/// A folder with a `node` and a fake `bwrap` that runs `body`.
+fn fake_tools(body: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = tempfile::tempdir().unwrap();
+    for (name, text) in [("node", "exit 0"), ("bwrap", body)] {
+        let path = tools.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{text}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    tools
+}
+
+/// The command `codex_sandbox_probe` and the argument `codexSandbox` of `settings_set`. The
+/// switch is off by default, a failing probe refuses it with the error text, a working probe
+/// accepts it, and an old call with no `codexSandbox` changes nothing.
+#[test]
+fn the_codex_sandbox_probe_and_switch_work_through_the_ipc() {
+    let failing = fake_tools("echo 'bwrap: setting up uid map: Permission denied' >&2; exit 1");
+    let app = app_full(None, Some(failing.path()));
+    assert_eq!(
+        app.call("settings_get", json!({})).unwrap()["codexSandbox"],
+        json!(false)
+    );
+    assert_eq!(
+        app.call("codex_sandbox_probe", json!({})).unwrap(),
+        json!({ "state": "fails", "detail": "bwrap: setting up uid map: Permission denied" })
+    );
+    let error = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": "m-2", "codexSandbox": true }),
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("does not work on this machine")
+            && error.contains("setting up uid map: Permission denied"),
+        "{error}"
+    );
+    // A refusal changes nothing else: the image model of the same call is not stored.
+    let now = app.call("settings_get", json!({})).unwrap();
+    assert_eq!(now["codexSandbox"], json!(false));
+    assert_ne!(now["imageModel"], json!("m-2"));
+
+    let working = fake_tools("exit 0");
+    let app = app_full(None, Some(working.path()));
+    let probe = app.call("codex_sandbox_probe", json!({})).unwrap();
+    assert_eq!(probe["state"], json!("works"));
+    let on = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "codexSandbox": true }),
+        )
+        .unwrap();
+    assert_eq!(on["codexSandbox"], json!(true));
+    // An old call (no `codexSandbox`) and a null: no change.
+    for args in [
+        json!({ "openaiKey": null, "imageModel": "m-3" }),
+        json!({ "openaiKey": null, "imageModel": null, "codexSandbox": null }),
+    ] {
+        let same = app.call("settings_set", args).unwrap();
+        assert_eq!(same["codexSandbox"], json!(true));
+    }
+    let off = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "codexSandbox": false }),
+        )
+        .unwrap();
+    assert_eq!(off["codexSandbox"], json!(false));
+    assert_eq!(off["imageModel"], json!("m-3"));
 }
 
 #[test]

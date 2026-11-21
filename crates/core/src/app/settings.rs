@@ -14,6 +14,13 @@
 //! notify_on_question = false   # a desktop notification when an agent asks a question; the default is true
 //! ```
 //!
+//! The Codex settings are in the table `[codex]` (since 2026-11-21):
+//!
+//! ```toml
+//! [codex]
+//! sandbox = true   # use the Codex sandbox for Codex employees; the default is false
+//! ```
+//!
 //! The rules of the floors for commands with no question (since 2026-11-21) are in the table
 //! `[floor_permissions]`. Each key is the real absolute path of a floor, and the value is the
 //! list of the rules. The file is in the config folder of the app, not in a project folder, so an
@@ -57,6 +64,9 @@ pub struct SettingsView {
     /// `[interface] notify_on_question`: show a desktop notification when an agent asks a
     /// question and the window has no focus. The default is `true`.
     pub notify_on_question: bool,
+    /// `[codex] sandbox`: start Codex employees with the Codex sandbox (decision O7, option A).
+    /// The default is `false`.
+    pub codex_sandbox: bool,
     /// The home folder of the app (`HOME` of its environment). The UI opens the folder dialog
     /// there when no floor gives a better place. `None` when `HOME` is not set.
     pub home_dir: Option<std::path::PathBuf>,
@@ -128,6 +138,7 @@ pub(crate) fn view(file: &Path, env: &EnvMap) -> SettingsView {
         openai_key_source: key.map(|(_, source)| source),
         image_model: image_model(file),
         notify_on_question: notify_on_question(file),
+        codex_sandbox: codex_sandbox(file),
         home_dir: env
             .get(std::ffi::OsStr::new("HOME"))
             .filter(|home| !home.is_empty())
@@ -165,6 +176,39 @@ pub(crate) fn set_notify_on_question(table: &mut toml::Table, on: bool) {
     };
     if now_empty {
         table.remove("interface");
+    }
+}
+
+/// `[codex] sandbox`. A missing file, a missing key or a value that is not a boolean gives the
+/// default: `false`.
+pub(crate) fn codex_sandbox(file: &Path) -> bool {
+    read_table(file)
+        .get("codex")
+        .and_then(toml::Value::as_table)
+        .and_then(|section| section.get("sandbox"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Set `[codex] sandbox`. The default value (`false`) removes the key, and an empty table goes
+/// too, so the file stays as small as it was. Other keys of `[codex]` stay.
+pub(crate) fn set_codex_sandbox(table: &mut toml::Table, on: bool) {
+    let section = table
+        .entry("codex")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let now_empty = match section.as_table_mut() {
+        Some(section) => {
+            if on {
+                section.insert("sandbox".to_owned(), toml::Value::Boolean(true));
+            } else {
+                section.remove("sandbox");
+            }
+            section.is_empty()
+        }
+        None => false,
+    };
+    if now_empty {
+        table.remove("codex");
     }
 }
 

@@ -241,6 +241,8 @@ pub struct Call {
     pub worktrees: bool,
     /// `StartContext::floor_allow`: the rules of the floor (from the app config) that the app gave.
     pub floor_allow: Vec<String>,
+    /// `StartContext::codex_sandbox`: the Codex sandbox switch at the start of this session.
+    pub codex_sandbox: bool,
 }
 
 #[derive(Default)]
@@ -348,6 +350,7 @@ impl TestAdapter {
             mcp: ctx.mcp.clone(),
             worktrees: ctx.worktrees,
             floor_allow: ctx.floor_allow.clone(),
+            codex_sandbox: ctx.codex_sandbox,
         });
         Ok(SpawnPlan {
             spec: SpawnSpec {

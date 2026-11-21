@@ -31,7 +31,7 @@ pub type Result<T> = std::result::Result<T, AdapterError>;
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
     /// Codex has two approval modes only (`on-request` and `never`), so `ask-always` does not
-    /// exist there (spec 4.7).
+    /// exist there, with the sandbox on or off (spec 4.7).
     #[error("the policy ask-always does not exist for Codex (spec 4.7)")]
     AskAlwaysUnsupported,
     /// A path that must be absolute is not.
@@ -118,11 +118,17 @@ pub struct StartContext {
     /// The floor folder is the top of a git repository, so the app makes a worktree for each task
     /// that it gives to an employee with the policy `edit-in-worktree` (spec 4.8). Claude then
     /// asks the operator for an edit in the main checkout. With `false` (no repository), the
-    /// mode `acceptEdits` stays for that policy, as in M1.
+    /// mode `acceptEdits` stays for that policy, as in M1. Codex uses it only when
+    /// `codex_sandbox` is on (the sandbox profile names the worktrees folder).
     pub worktrees: bool,
     /// The rules of the floor for commands with no question (from the app config). The caller has checked them
     /// (`model::valid_allow_rules`). Claude only. They are not used for the policy `ask-always`.
     pub floor_allow: Vec<String>,
+    /// Codex only: start the session with the Codex sandbox that the CLI enforces (the switch
+    /// "Use the Codex sandbox" in Settings; decision O7, option A). With `false` the session
+    /// gets `-s danger-full-access`, as before. `worktrees` tells the adapter if the floor is a git
+    /// repository with worktrees. Claude ignores this field.
+    pub codex_sandbox: bool,
 }
 
 /// What to start, and what the app learns at once.

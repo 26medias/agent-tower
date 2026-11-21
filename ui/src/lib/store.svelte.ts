@@ -51,6 +51,7 @@ import {
     type ProgramName,
     type ProgramTestResult,
     type Programs,
+    type SandboxProbe,
     type SessionView,
     type Settings,
     type TaskDetail,
@@ -154,6 +155,10 @@ class Store {
     /** A `program_test` runs now for this program. */
     programTesting = $state.raw<Record<ProgramName, boolean>>({ claude: false, codex: false, node: false });
     settings = $state.raw<Settings | null>(null);
+    /** The last `codex_sandbox_probe` result. Null until the first test ends. */
+    sandboxProbe = $state.raw<SandboxProbe | null>(null);
+    /** A `codex_sandbox_probe` runs now (it takes 5 s at most). */
+    sandboxTesting = $state(false);
     /** The model lists (docs/ipc-settings.md). Null until the first `models_get` answers. */
     models = $state.raw<ModelCatalog | null>(null);
     /** The settings panel is open. */
@@ -1428,6 +1433,38 @@ class Store {
             this.programTests = { ...this.programTests, [name]: { ok: false, path: null, output: ipc.errorText(e) } };
         } finally {
             this.programTesting = { ...this.programTesting, [name]: false };
+        }
+    }
+
+    /** Test the Codex sandbox (`bwrap`). The result shows in the section "Codex sandbox" of the settings. */
+    async testSandbox(clearError = true): Promise<void> {
+        if (this.sandboxTesting) return;
+        this.sandboxTesting = true;
+        if (clearError) this.setActionError("codex-sandbox", null);
+        try {
+            this.sandboxProbe = await ipc.codexSandboxProbe();
+        } catch (e) {
+            // A refusal of the command itself (not a failed bwrap). Show it as a failed test.
+            this.sandboxProbe = { state: "fails", detail: ipc.errorText(e) };
+        } finally {
+            this.sandboxTesting = false;
+        }
+    }
+
+    /**
+     * The switch "Use the Codex sandbox for Codex employees". The app runs the probe again when `on` is true, and it
+     * refuses the switch unless the probe says `works`. Returns true on success.
+     */
+    async setCodexSandbox(on: boolean): Promise<boolean> {
+        this.setActionError("codex-sandbox", null);
+        try {
+            this.settings = await ipc.settingsSet(null, null, null, on);
+            return true;
+        } catch (e) {
+            this.failIn("codex-sandbox", e);
+            // The refusal tells that the probe did not pass: read the state again, so the section shows it.
+            void this.testSandbox(false);
+            return false;
         }
     }
 

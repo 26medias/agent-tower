@@ -114,12 +114,12 @@ pub(crate) fn run_version(path: &Path, env: &EnvMap, cwd: &Path, timeout: Durati
 
 /// Reads a pipe in a thread, up to `READ_LIMIT` bytes (the rest is read and dropped, so the
 /// program never blocks on a full pipe).
-struct Collected {
+pub(crate) struct Collected {
     bytes: Arc<Mutex<Vec<u8>>>,
     reader: Option<thread::JoinHandle<()>>,
 }
 
-fn collect<R: Read + Send + 'static>(pipe: Option<R>) -> Collected {
+pub(crate) fn collect<R: Read + Send + 'static>(pipe: Option<R>) -> Collected {
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let reader = pipe.map(|mut pipe| {
         let bytes = Arc::clone(&bytes);
@@ -143,7 +143,7 @@ impl Collected {
     /// started a background process can hold the pipe open after it ended. The program has ended,
     /// so the bytes are in the pipe, and the reader only needs some time to take them (a busy
     /// machine can make it late).
-    fn take_text(self) -> String {
+    pub(crate) fn take_text(self) -> String {
         let grace = Instant::now() + Duration::from_millis(1000);
         if let Some(reader) = &self.reader {
             while !reader.is_finished() && Instant::now() < grace {
@@ -156,7 +156,7 @@ impl Collected {
 }
 
 /// The first line that has text, with the escape sequences of a terminal removed.
-fn first_line(text: &str) -> Option<String> {
+pub(crate) fn first_line(text: &str) -> Option<String> {
     text.lines()
         .map(clean_line)
         .find(|line| !line.trim().is_empty())
