@@ -6,7 +6,10 @@
 //!
 //! 1. the override path that the caller gives (the app config), which must be good;
 //! 2. the login shell: `$SHELL -lic 'command -v <name>'`, with a time limit;
-//! 3. a few known folders: `~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin`.
+//! 3. the folders of the `PATH` of the app itself (a start from a terminal has the full PATH);
+//! 4. known folders: `~/.local/bin`, `~/.cargo/bin`, the `bin` folder of each Node version of
+//!    nvm (newest first), the folders of bun, volta, npm and pnpm, `/usr/local/bin`,
+//!    `/opt/homebrew/bin`.
 //!
 //! A script that starts with `#!/usr/bin/env node` needs `node` on the session PATH.
 //! `Resolver::interpreter_dirs` reads the shebang and resolves the interpreter the same way.
@@ -61,21 +64,19 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// `$SHELL` (or `/bin/sh` when it is not set), and the known folders under `$HOME`.
+    /// `$SHELL` (or `/bin/sh` when it is not set), the folders of `$PATH`, and the known
+    /// folders under `$HOME`.
     pub fn from_env() -> Resolver {
         let shell = std::env::var_os("SHELL")
             .filter(|shell| !shell.is_empty())
             .or_else(|| Some("/bin/sh".into()));
-        let mut known_dirs = Vec::new();
-        if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-            let home = PathBuf::from(home);
-            known_dirs.push(home.join(".local/bin"));
-            known_dirs.push(home.join(".cargo/bin"));
-        }
-        known_dirs.push(PathBuf::from("/usr/local/bin"));
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from);
+        let path = std::env::var_os("PATH").unwrap_or_default();
         Resolver {
             shell,
-            known_dirs,
+            known_dirs: search_dirs(&path, home.as_deref()),
             shell_timeout: DEFAULT_SHELL_TIMEOUT,
         }
     }
@@ -191,6 +192,55 @@ pub fn is_executable_file(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+/// The folders for the steps 3 and 4 of the module text, in order, with no folder two times:
+/// the absolute folders of `path` (the value of `PATH`), then the known folders under `home`,
+/// then the known system folders.
+pub fn search_dirs(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    if let Some(home) = home {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".cargo/bin"));
+        dirs.extend(nvm_bin_dirs(&home.join(".nvm/versions/node")));
+        for known in [
+            ".bun/bin",
+            ".volta/bin",
+            ".npm-global/bin",
+            ".local/share/pnpm",
+        ] {
+            dirs.push(home.join(known));
+        }
+    }
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    dirs
+}
+
+/// The `bin` folder of each Node version that nvm installed, the newest version first.
+fn nvm_bin_dirs(versions: &Path) -> Vec<PathBuf> {
+    // `v24.10.0` gives [24, 10, 0]. A name that is not a version sorts last.
+    fn version(name: &str) -> Vec<u64> {
+        name.trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    }
+    let mut names: Vec<String> = std::fs::read_dir(versions)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort_by_key(|name| std::cmp::Reverse(version(name)));
+    names
+        .into_iter()
+        .map(|name| versions.join(name).join("bin"))
+        .collect()
 }
 
 /// Run `$SHELL -lic 'command -v <name>'` and parse the output. `None` on any failure.
@@ -337,6 +387,65 @@ mod tests {
     fn write_exe(path: &Path, text: &str) {
         fs::write(path, text).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn the_search_folders_are_the_path_then_the_known_folders_with_nvm_newest_first() {
+        let home = tempfile::tempdir().unwrap();
+        for version in ["v9.11.2", "v24.10.0", "v22.3.0"] {
+            fs::create_dir_all(
+                home.path()
+                    .join(".nvm/versions/node")
+                    .join(version)
+                    .join("bin"),
+            )
+            .unwrap();
+        }
+        let path =
+            std::env::join_paths(["/opt/tools/bin", "relative/bin", "/usr/local/bin"]).unwrap();
+        let dirs = search_dirs(&path, Some(home.path()));
+        let position = |dir: PathBuf| {
+            dirs.iter()
+                .position(|d| *d == dir)
+                .unwrap_or_else(|| panic!("{} is not in {dirs:?}", dir.display()))
+        };
+        // The PATH comes first, in its order. A relative folder is not used.
+        assert_eq!(position("/opt/tools/bin".into()), 0);
+        assert_eq!(position("/usr/local/bin".into()), 1);
+        assert!(!dirs.contains(&PathBuf::from("relative/bin")));
+        // No folder is there two times.
+        assert_eq!(
+            dirs.iter()
+                .filter(|d| **d == Path::new("/usr/local/bin"))
+                .count(),
+            1
+        );
+        let nvm = |version: &str| {
+            home.path()
+                .join(".nvm/versions/node")
+                .join(version)
+                .join("bin")
+        };
+        assert!(position(home.path().join(".local/bin")) < position(nvm("v24.10.0")));
+        assert!(position(nvm("v24.10.0")) < position(nvm("v22.3.0")));
+        assert!(position(nvm("v22.3.0")) < position(nvm("v9.11.2")));
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+    }
+
+    #[test]
+    fn a_program_in_an_nvm_folder_is_found_when_the_login_shell_finds_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".nvm/versions/node/v24.10.0/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let program = bin.join("codex");
+        fs::write(&program, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let resolver = Resolver {
+            shell: Some("/bin/false".into()),
+            known_dirs: search_dirs(OsStr::new("/usr/bin:/bin"), Some(home.path())),
+            shell_timeout: Duration::from_secs(1),
+        };
+        assert_eq!(resolver.resolve("codex", None).unwrap(), program);
     }
 
     /// A resolver with a fake login shell that prints `output` and ignores its arguments.
