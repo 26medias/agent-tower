@@ -16,25 +16,29 @@ import {
     upsertSession,
     type SessionState,
 } from "./reducers";
-import type {
-    CliKind,
-    Employee,
-    FloorDefaults,
-    FloorEntry,
-    FloorView,
-    ModelCatalog,
-    ModelKind,
-    ProgramName,
-    Programs,
-    SessionView,
-    Settings,
-    TrackedSession,
+import {
+    SETUP_SLUG,
+    type CliKind,
+    type Employee,
+    type FloorDefaults,
+    type FloorEntry,
+    type FloorView,
+    type ModelCatalog,
+    type ModelKind,
+    type ProgramName,
+    type Programs,
+    type SessionView,
+    type Settings,
+    type TrackedSession,
 } from "./types";
 
 export interface Toast {
     id: number;
     text: string;
 }
+
+/** What a button was clicked to do. A start, a resume or the setup agent. */
+export type LaunchKind = "start" | "resume" | "setup";
 
 const LAST_FLOOR_KEY = "agent-tower:last-floor";
 const TOAST_MS = 9000;
@@ -78,7 +82,9 @@ class Store {
     pendingCreate = $state.raw<{ path: string; message: string } | null>(null);
     backend = $state<"tauri" | "mock" | "">("");
     ready = $state(false);
-    private busy = $state.raw<Record<string, true>>({});
+    private busy = $state.raw<Record<string, LaunchKind>>({});
+    /** The CLI and the name that a start was made with, by floor path and slug. For the loading text. */
+    private launched = $state.raw<Record<string, { cli: CliKind; name: string }>>({});
 
     /** The size of the last terminal that fitted. New sessions start with it. */
     lastSize = { rows: 30, cols: 110 };
@@ -344,7 +350,9 @@ class Store {
 
     /** Start the setup agent of the open floor. */
     startSetup(cli: CliKind): Promise<void> {
-        return this.launch("setup", (path, rows, cols) => ipc.setupStart(path, cli, rows, cols));
+        return this.launch(SETUP_SLUG, "setup", { cli, name: "Setup" }, (path, rows, cols) =>
+            ipc.setupStart(path, cli, rows, cols),
+        );
     }
 
     // ---- employees ----
@@ -408,22 +416,35 @@ class Store {
 
     /** True while a start or a resume of this employee is running. The card disables its buttons. */
     isBusy(slug: string): boolean {
-        return this.busy[`${this.openPath}\u0000${slug}`] === true;
+        return this.busyKind(slug) !== null;
+    }
+
+    /** Which button was clicked for this employee, while its command runs. `null` when none runs. */
+    busyKind(slug: string): LaunchKind | null {
+        return this.busy[`${this.openPath}\u0000${slug}`] ?? null;
     }
 
     /**
      * Run a start or a resume. On failure the error shows in a toast, and nothing else
      * changes: no tab is made, and the card goes back to its normal state.
+     * `info` is the CLI and the name for the loading text of the new session.
      */
-    private async launch(slug: string, run: (path: string, rows: number, cols: number) => Promise<SessionView>): Promise<void> {
+    private async launch(
+        slug: string,
+        kind: LaunchKind,
+        info: { cli: CliKind; name: string },
+        run: (path: string, rows: number, cols: number) => Promise<SessionView>,
+    ): Promise<void> {
         const path = this.openPath;
         if (!path) return;
         const key = `${path}\u0000${slug}`;
         if (this.busy[key]) return;
-        this.busy = { ...this.busy, [key]: true };
+        this.busy = { ...this.busy, [key]: kind };
         try {
             const { rows, cols } = this.lastSize;
-            this.adopt(path, await run(path, rows, cols));
+            const session = await run(path, rows, cols);
+            this.launched = { ...this.launched, [key]: info };
+            this.adopt(path, session);
         } catch (e) {
             this.fail(e);
         } finally {
@@ -433,12 +454,29 @@ class Store {
         }
     }
 
+    /** The CLI and the name that the loading text of a session uses. A null CLI means "not known". */
+    describeSession(session: { path: string; slug: string }): { cli: CliKind | null; name: string } {
+        const known = this.launched[`${session.path}\u0000${session.slug}`];
+        if (session.slug === SETUP_SLUG) return { cli: known?.cli ?? null, name: "Setup" };
+        const emp = session.path === this.openPath ? this.orderedEmployees.find((e) => e.slug === session.slug) : undefined;
+        return { cli: emp?.cli ?? known?.cli ?? null, name: emp?.name ?? known?.name ?? session.slug };
+    }
+
+    private employeeInfo(slug: string): { cli: CliKind; name: string } {
+        const emp = this.orderedEmployees.find((e) => e.slug === slug);
+        return { cli: emp?.cli ?? "claude", name: emp?.name ?? slug };
+    }
+
     startSession(slug: string): Promise<void> {
-        return this.launch(slug, (path, rows, cols) => ipc.sessionStart(path, slug, null, rows, cols));
+        return this.launch(slug, "start", this.employeeInfo(slug), (path, rows, cols) =>
+            ipc.sessionStart(path, slug, null, rows, cols),
+        );
     }
 
     resumeSession(slug: string): Promise<void> {
-        return this.launch(slug, (path, rows, cols) => ipc.sessionResume(path, slug, null, rows, cols));
+        return this.launch(slug, "resume", this.employeeInfo(slug), (path, rows, cols) =>
+            ipc.sessionResume(path, slug, null, rows, cols),
+        );
     }
 
     async stopSession(sessionId: string): Promise<void> {

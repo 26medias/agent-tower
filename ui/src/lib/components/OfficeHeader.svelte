@@ -3,6 +3,7 @@
     // agent" and "New logo". A failed logo shows its error. `NO_KEY:` shows a field for the key.
     import { store } from "$lib/store.svelte";
     import { SETUP_SLUG, type CliKind } from "$lib/types";
+    import Spinner from "./Spinner.svelte";
 
     const view = $derived(store.floorView);
     const logo = $derived(view ? store.logos[view.path] : undefined);
@@ -13,6 +14,8 @@
     const liveSetup = $derived(store.sessionOfEmployee(SETUP_SLUG));
     const setupId = $derived(store.isLive(liveSetup) ? (liveSetup?.sessionId ?? null) : (view?.setupSessionId ?? null));
     const setupRunning = $derived(setupId !== null);
+    // True from the click on "claude" or "codex" until the command returns (see store.launch).
+    const setupBusy = $derived(store.isBusy(SETUP_SLUG));
     const needsSetup = $derived(view !== null && !view.description && !setupRunning);
 
     let askCli = $state(false);
@@ -82,6 +85,8 @@
     <div class="buttons">
         {#if setupRunning}
             <button type="button" class="setup stop-setup" disabled={stopping} onclick={stopSetup}>Stop the setup</button>
+        {:else if setupBusy}
+            <button type="button" class="setup busy-setup" disabled aria-busy="true"><Spinner size={11} /> starting...</button>
         {:else if askCli}
             <span class="ask">Run the setup agent with</span>
             <button type="button" class="primary cli-claude" onclick={() => runSetup("claude")}>claude</button>
@@ -261,6 +266,12 @@
 
     .buttons button {
         text-transform: none;
+    }
+
+    .buttons button.busy-setup {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
     }
 
     .ask {

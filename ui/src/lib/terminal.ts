@@ -14,7 +14,15 @@ export interface TerminalHooks {
     onError(text: string): void;
     /** Called with the size after each fit that was applied. */
     onSize(rows: number, cols: number): void;
+    /** Called one time, when the first output bytes (scrollback or live) reach the terminal. */
+    onOutput?(): void;
 }
+
+/**
+ * The size goes to the process this long after the last change. A drag of a handle changes the
+ * size on each frame. The process gets the last size one time, not each step.
+ */
+export const RESIZE_SEND_MS = 150;
 
 const THEME = {
     background: "#0b111c",
@@ -49,6 +57,10 @@ export class SessionTerminal {
     private live = true;
     private disposed = false;
     private frame = 0;
+    private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    /** The last size that went to the process. */
+    private sentSize: { rows: number; cols: number } | null = null;
+    private sawOutput = false;
 
     constructor(
         readonly sessionId: string,
@@ -76,14 +88,35 @@ export class SessionTerminal {
         this.term.onBinary((text) => {
             if (this.live) this.queue.push(binaryStringToBytes(text));
         });
-        this.term.onResize(({ rows, cols }) => {
-            if (this.live) {
-                ipc.ptyResize(sessionId, rows, cols).catch((e) => hooks.onError(ipc.errorText(e)));
-            }
+        this.term.onResize(() => {
+            if (!this.live) return;
+            if (this.resizeTimer) clearTimeout(this.resizeTimer);
+            this.resizeTimer = setTimeout(() => {
+                this.resizeTimer = null;
+                this.sendSize(false);
+            }, RESIZE_SEND_MS);
         });
 
         this.observer = new ResizeObserver(() => this.scheduleFit());
         this.observer.observe(host);
+    }
+
+    /** Send the size of the terminal to the process. `force`: also when it is the size sent last. */
+    private sendSize(force: boolean): void {
+        if (this.disposed || !this.live) return;
+        const { rows, cols } = this.term;
+        if (!force && this.sentSize && this.sentSize.rows === rows && this.sentSize.cols === cols) return;
+        this.sentSize = { rows, cols };
+        ipc.ptyResize(this.sessionId, rows, cols).catch((e) => this.hooks.onError(ipc.errorText(e)));
+    }
+
+    /** Write output bytes to the terminal. The first bytes tell the pane that output exists. */
+    private write(bytes: Uint8Array): void {
+        if (bytes.length > 0 && !this.sawOutput) {
+            this.sawOutput = true;
+            this.hooks.onOutput?.();
+        }
+        this.term.write(bytes);
     }
 
     setLive(live: boolean): void {
@@ -128,11 +161,11 @@ export class SessionTerminal {
             const result = await ipc.sessionAttach(this.sessionId, (message) => {
                 const bytes = base64ToBytes(message.data);
                 if (held) held.push(bytes);
-                else this.term.write(bytes);
+                else this.write(bytes);
             });
             if (this.disposed) return;
-            if (result.scrollback) this.term.write(base64ToBytes(result.scrollback));
-            for (const bytes of held) this.term.write(bytes);
+            if (result.scrollback) this.write(base64ToBytes(result.scrollback));
+            for (const bytes of held) this.write(bytes);
             held = null;
             this.attachState = "done";
         } catch (e) {
@@ -142,16 +175,17 @@ export class SessionTerminal {
             return;
         }
         // The process may have started with another size. Tell it the real one.
-        if (this.live) {
-            ipc.ptyResize(this.sessionId, this.term.rows, this.term.cols).catch((e) =>
-                this.hooks.onError(ipc.errorText(e)),
-            );
+        if (this.resizeTimer) {
+            clearTimeout(this.resizeTimer);
+            this.resizeTimer = null;
         }
+        this.sendSize(true);
     }
 
     dispose(): void {
         this.disposed = true;
         if (this.frame) cancelAnimationFrame(this.frame);
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
         this.observer.disconnect();
         this.term.dispose();
     }

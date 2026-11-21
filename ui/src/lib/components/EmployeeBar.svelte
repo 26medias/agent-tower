@@ -3,6 +3,7 @@
     import { store } from "$lib/store.svelte";
     import type { Employee } from "$lib/types";
     import ConfirmButton from "./ConfirmButton.svelte";
+    import Spinner from "./Spinner.svelte";
     import StatusDot from "./StatusDot.svelte";
 
     let { onedit, onadd }: { onedit: (employee: Employee) => void; onadd: () => void } = $props();
@@ -10,7 +11,9 @@
     const emp = $derived(store.selectedEmployee);
     const session = $derived(emp ? store.sessionOfEmployee(emp.slug) : undefined);
     const live = $derived(store.isLive(session));
-    const busy = $derived(emp ? store.isBusy(emp.slug) : false);
+    // Which button was clicked, while its command runs. It shows a busy state until the command returns.
+    const busyKind = $derived(emp ? store.busyKind(emp.slug) : null);
+    const busy = $derived(busyKind !== null);
 </script>
 
 <div class="bar" aria-label="Selected employee" data-slug={emp?.slug ?? ""}>
@@ -29,9 +32,27 @@
             {#if live && session}
                 <button type="button" class="danger stop" onclick={() => store.stopSession(session.sessionId)}>stop</button>
             {:else}
-                <button type="button" class="primary start" disabled={busy} onclick={() => store.startSession(emp.slug)}>start</button>
+                <button
+                    type="button"
+                    class="primary start"
+                    class:busy={busyKind === "start"}
+                    disabled={busy}
+                    aria-busy={busyKind === "start"}
+                    onclick={() => store.startSession(emp.slug)}
+                >
+                    {#if busyKind === "start"}<Spinner size={11} /> starting...{:else}start{/if}
+                </button>
                 {#if session?.canResume}
-                    <button type="button" class="resume" disabled={busy} onclick={() => store.resumeSession(emp.slug)}>resume</button>
+                    <button
+                        type="button"
+                        class="resume"
+                        class:busy={busyKind === "resume"}
+                        disabled={busy}
+                        aria-busy={busyKind === "resume"}
+                        onclick={() => store.resumeSession(emp.slug)}
+                    >
+                        {#if busyKind === "resume"}<Spinner size={11} /> resuming...{:else}resume{/if}
+                    </button>
                 {/if}
             {/if}
             <button type="button" class="edit" title="Edit {emp.name}" aria-label="Edit {emp.name}" onclick={() => onedit(emp)}>edit</button>
@@ -110,6 +131,12 @@
         display: flex;
         gap: 4px;
         align-items: center;
+    }
+
+    .actions button.busy {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
     }
 
     .add {

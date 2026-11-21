@@ -4,12 +4,17 @@
     // header opens the settings panel (it has the programs paths).
     import { tick } from "svelte";
     import { store } from "$lib/store.svelte";
+    import { buildingScale } from "$lib/sizes";
     import Building from "./Building.svelte";
     import ConfirmButton from "./ConfirmButton.svelte";
 
     let pathInput = $state("");
     let createName = $state("");
     let scroller: HTMLDivElement;
+    // Size of the area of the building (without the padding). The building fits it.
+    let areaW = $state(0);
+    let areaH = $state(0);
+    const scale = $derived(buildingScale(areaW - 16, areaH, store.floors.length));
 
     function basename(path: string): string {
         const parts = path.split(/[\\/]/).filter((p) => p !== "");
@@ -70,9 +75,9 @@
         </div>
     </header>
 
-    <div class="scroll" bind:this={scroller}>
+    <div class="scroll" bind:this={scroller} bind:clientWidth={areaW} bind:clientHeight={areaH}>
         <div class="tower">
-            <Building />
+            <Building {scale} />
         </div>
     </div>
 
@@ -195,13 +200,15 @@
         flex: 1;
         min-height: 0;
         overflow-y: auto;
+        scrollbar-gutter: stable;
         display: flex;
         flex-direction: column;
         padding: 0 8px;
     }
 
     .tower {
-        margin-top: auto;
+        /* At the bottom of the area, centred in the width. */
+        margin: auto auto 0;
     }
 
     .toolbar {

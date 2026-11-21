@@ -44,13 +44,39 @@ interface MockSession {
     channel: { onmessage: (m: OutputMessage) => void } | null;
     line: number[];
     timer: ReturnType<typeof setTimeout> | null;
+    /** Work that waits for the end of the status `starting`. Like the real CLI, a new session is silent until it is ready. */
+    onReady: (() => void)[];
 }
+
+/**
+ * Settings of the mock, read from `globalThis.__towerMockConfig` each time a session starts.
+ * The e2e check sets them to see the loading states.
+ */
+export interface MockConfig {
+    /** How long a new session stays in `starting`, in ms. Default 1500. A very large value holds it. */
+    startingMs?: number;
+    /** How long `session_start`, `session_resume` and `setup_start` take before they return, in ms. Default 0. */
+    startCallMs?: number;
+    /** Text that the CLI has already printed when a session is made (it shows in the scrollback of the attach). */
+    startingText?: string;
+}
+
+/** `globalThis.__towerMock`: a hand to the e2e check, to act on a session that is `starting`. */
+export interface MockControl {
+    /** Send text on the output channel of the session (also during `starting`). */
+    output(sessionId: string, text: string): void;
+    /** End the status `starting` at once. */
+    leaveStarting(sessionId: string): void;
+}
+
+const config = (): MockConfig => ((globalThis as Record<string, unknown>).__towerMockConfig ?? {}) as MockConfig;
+const startingMs = (): number => config().startingMs ?? 1500;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const LOG_MAX = 256 * 1024;
 const NEXT: Record<string, [Status, number]> = {
-    starting: ["idle", 1200],
     idle: ["working", 6000],
     working: ["question", 4000],
     question: ["idle", 8000],
@@ -311,7 +337,14 @@ export function createMockBackend(): Backend {
 
     function setStatus(s: MockSession, status: Status): void {
         if (s.view.status === status) return;
+        const wasStarting = s.view.status === "starting";
         s.view.status = status;
+        if (wasStarting && status !== "stopped") {
+            // The CLI is ready: its first output shows now.
+            const work = s.onReady;
+            s.onReady = [];
+            for (const fn of work) fn();
+        }
         // The setup session cannot resume.
         if (status === "stopped" && s.view.slug !== SETUP_SLUG) s.view.canResume = true;
         changed(s);
@@ -324,7 +357,11 @@ export function createMockBackend(): Backend {
         s.timer = null;
         // The setup session goes to `working` and then waits for its own timer (see `startSetup`).
         const next: [Status, number] | undefined =
-            s.view.slug === SETUP_SLUG ? (s.view.status === "starting" ? ["working", 1200] : undefined) : NEXT[s.view.status];
+            s.view.status === "starting"
+                ? [s.view.slug === SETUP_SLUG ? "working" : "idle", startingMs()]
+                : s.view.slug === SETUP_SLUG
+                  ? undefined
+                  : NEXT[s.view.status];
         if (!next) return;
         s.timer = setTimeout(() => setStatus(s, next[0]), next[1]);
     }
@@ -370,9 +407,11 @@ export function createMockBackend(): Backend {
             channel: null,
             line: [],
             timer: null,
+            onReady: [],
         };
         sessions.set(s.view.sessionId, s);
-        banner(s, emp);
+        if (config().startingText) text(s, config().startingText as string);
+        s.onReady.push(() => banner(s, emp));
         changed(s);
         schedule(s);
         return { ...s.view };
@@ -399,26 +438,31 @@ export function createMockBackend(): Backend {
             channel: null,
             line: [],
             timer: null,
+            onReady: [],
         };
         sessions.set(s.view.sessionId, s);
-        text(s, `\x1b[1;36mAgent Tower mock setup agent\x1b[0m (${cli}) in \x1b[1m${floor.name}\x1b[0m\r\n`);
-        text(s, "Reading CLAUDE.md, README.md and the top-level layout...\r\n");
+        if (config().startingText) text(s, config().startingText as string);
+        // Silent while `starting`. When the CLI is ready it prints, works for 2.3 s, and ends its turn.
+        s.onReady.push(() => {
+            text(s, `\x1b[1;36mAgent Tower mock setup agent\x1b[0m (${cli}) in \x1b[1m${floor.name}\x1b[0m\r\n`);
+            text(s, "Reading CLAUDE.md, README.md and the top-level layout...\r\n");
+            setTimeout(() => {
+                if (s.view.status === "stopped") return;
+                text(s, "I propose one ceo, one pm and one tester.\r\n");
+                text(s, "Writing .swarm/employees/qa.md and the [brand] table...\r\n");
+                if (!floor.employees.some((e) => e.slug === "qa")) {
+                    floor.employees.push(employee("qa", "Quinn", "Tester", "pm", cli));
+                }
+                floor.description ??= `The project in ${floor.name}.`;
+                floor.logoPrompt ??= `A friendly emblem for ${floor.name}.`;
+                text(s, "\x1b[32mThe setup is complete. You can stop this session.\x1b[0m\r\n");
+                showPrompt(s);
+                emit("floor-changed", { path });
+                setStatus(s, "idle");
+            }, 2300);
+        });
         changed(s);
         schedule(s);
-        setTimeout(() => {
-            if (s.view.status === "stopped") return;
-            text(s, "I propose one ceo, one pm and one tester.\r\n");
-            text(s, "Writing .swarm/employees/qa.md and the [brand] table...\r\n");
-            if (!floor.employees.some((e) => e.slug === "qa")) {
-                floor.employees.push(employee("qa", "Quinn", "Tester", "pm", cli));
-            }
-            floor.description ??= `The project in ${floor.name}.`;
-            floor.logoPrompt ??= `A friendly emblem for ${floor.name}.`;
-            text(s, "\x1b[32mThe setup is complete. You can stop this session.\x1b[0m\r\n");
-            showPrompt(s);
-            emit("floor-changed", { path });
-            setStatus(s, "idle");
-        }, 3500);
         return { ...s.view };
     }
 
@@ -541,6 +585,7 @@ export function createMockBackend(): Backend {
                     raw,
                     ["path", "slug", "firstMessage", "rows", "cols"],
                 );
+                await sleep(config().startCallMs ?? 0);
                 if (failOnce.delete(`start:${a.slug}`)) {
                     throw `cannot start ${a.slug}: the program "codex" was not found. Set its path in Programs.`;
                 }
@@ -551,6 +596,7 @@ export function createMockBackend(): Backend {
                     raw,
                     ["path", "slug", "message", "rows", "cols"],
                 );
+                await sleep(config().startCallMs ?? 0);
                 const old = floorOf(a.path).sessions.find((x) => x.slug === a.slug);
                 if (failOnce.delete(`resume:${a.slug}`)) {
                     throw `cannot resume ${a.slug}: the session never had a turn, so it has nothing to resume. Start it again.`;
@@ -575,15 +621,19 @@ export function createMockBackend(): Backend {
                 const result: AttachResult = { scrollback: bytesToBase64(s.log) };
                 if (s.view.status !== "stopped") {
                     // Live output after attach, with a multi-byte character split over two chunks.
+                    // A session that is still `starting` is silent: this waits for the end of the start.
                     const live = enc.encode("\r\n\x1b[2mchannel online ✓ café\x1b[0m\r\n");
                     const cut = live.indexOf(0xe2) + 1; // inside the 3 bytes of U+2713
-                    setTimeout(() => {
-                        output(s, live.slice(0, cut));
+                    const send = () =>
                         setTimeout(() => {
-                            output(s, live.slice(cut));
-                            showPrompt(s);
-                        }, 20);
-                    }, 80);
+                            output(s, live.slice(0, cut));
+                            setTimeout(() => {
+                                output(s, live.slice(cut));
+                                showPrompt(s);
+                            }, 20);
+                        }, 80);
+                    if (s.view.status === "starting") s.onReady.push(send);
+                    else send();
                 }
                 return result;
             }
@@ -670,6 +720,7 @@ export function createMockBackend(): Backend {
                     "rows",
                     "cols",
                 ]);
+                await sleep(config().startCallMs ?? 0);
                 return startSetup(a.path, a.cli);
             }
             case "settings_get": {
@@ -746,6 +797,16 @@ export function createMockBackend(): Backend {
                 throw `unknown command ${command}`;
         }
     }
+
+    (globalThis as Record<string, unknown>).__towerMock = {
+        output(sessionId, value) {
+            text(sessionById(sessionId), value);
+        },
+        leaveStarting(sessionId) {
+            const s = sessionById(sessionId);
+            if (s.view.status === "starting") setStatus(s, s.view.slug === SETUP_SLUG ? "working" : "idle");
+        },
+    } satisfies MockControl;
 
     return {
         kind: "mock",

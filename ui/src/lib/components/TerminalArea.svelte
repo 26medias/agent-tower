@@ -6,10 +6,14 @@
 <div class="area">
     <div class="stack">
         {#each store.allTabSessions as s (s.sessionId)}
+            {@const who = store.describeSession(s)}
             <TerminalPane
                 sessionId={s.sessionId}
                 live={s.status !== "stopped"}
                 active={s.sessionId === store.activeId && s.path === store.openPath}
+                status={s.status}
+                cli={who.cli}
+                name={who.name}
             />
         {/each}
         {#if !store.activeId}

@@ -47,6 +47,7 @@
 <div class="room" bind:clientWidth={boxW} bind:clientHeight={boxH}>
     <svg
         viewBox="0 0 {ART.w} {ART.h}"
+        preserveAspectRatio="xMidYMid meet"
         role="group"
         aria-label="Office of {store.floorView?.name ?? 'no floor'} with {employees.length} employees"
         data-count={employees.length}

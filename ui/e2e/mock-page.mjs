@@ -213,8 +213,10 @@ try {
     check("mock badge shown", await page.locator(".mock").isVisible());
     check("the debug area is collapsed", (await page.locator("details.debug-area[open]").count()) === 0);
     const box1280 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox() };
-    check("at 1280 x 800 the office is at most 42% of the height", box1280.office.height <= 800 * 0.42 + 1, `office ${box1280.office.height}`);
-    check("at 1280 x 800 the terminal area has at least half of the height", box1280.area.height >= 400, `area ${box1280.area.height}`);
+    // The old fixed rules ("at most 42%") became the default sizes. The operator can change them now (section 16).
+    check("at 1280 x 800 the default office height is 42% of the window (336 px)", Math.abs(box1280.office.height - 336) <= 1, `office ${box1280.office.height}`);
+    check("at 1280 x 800 the default sizes give the terminal area at least half of the height", box1280.area.height >= 400, `area ${box1280.area.height}`);
+    check("the bigger office toggle is gone", (await page.locator("button.size").count()) === 0 && (await page.getByText("bigger office").count()) === 0);
 
     // 1b. A click on a storey opens that floor (through the real hit test).
     await clickStorey("/home/demo/second");
@@ -1003,6 +1005,499 @@ try {
     await bar.locator("button.remove").click();
     await page.waitForSelector('.emp[data-slug="temp-tmp"]', { state: "detached" });
     check("the temporary employee is removed again", (await page.locator(".emp").count()) === 4);
+
+    // ================= 16. The handles: resize the containers (Feature A) =================
+    const resizeShots = process.env.E2E_RESIZE_SHOTS ?? "/tmp/agent-tower-review/resize";
+    mkdirSync(resizeShots, { recursive: true });
+    const H_COL = '[role="separator"][aria-label="Resize the building column"]';
+    const H_INFO = '[role="separator"][aria-label="Resize the info panel and the room"]';
+    const H_OFFICE = '[role="separator"][aria-label="Resize the office"]';
+    const sizeOf = async (sel) => {
+        const b = await page.locator(sel).first().boundingBox();
+        return { w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y) };
+    };
+    const colW = async () => (await sizeOf(".column")).w;
+    const officeH = async () => (await sizeOf(".office")).h;
+    const infoW = async () => (await sizeOf(".office .info")).w;
+    async function drag(sel, dx, dy, steps = 8) {
+        const b = await page.locator(sel).boundingBox();
+        const x = b.x + b.width / 2;
+        const y = b.y + b.height / 2;
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + dx, y + dy, { steps });
+        await page.mouse.up();
+        await page.waitForTimeout(60);
+    }
+    const key = async (sel, k) => {
+        await page.locator(sel).focus();
+        await page.keyboard.press(k);
+        await page.waitForTimeout(40);
+    };
+    await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: join(resizeShots, "1-default.png") });
+
+    // The three handles: role, orientation, focus, size of the hit area, shown on hover.
+    check(
+        "there are 3 separators: 2 vertical and 1 horizontal, each focusable and with a label",
+        JSON.stringify(
+            await page.$$eval('[role="separator"]', (els) =>
+                els.map((e) => [e.getAttribute("aria-orientation"), e.tabIndex, !!e.getAttribute("aria-label")]),
+            ),
+        ) === JSON.stringify([["vertical", 0, true], ["vertical", 0, true], ["horizontal", 0, true]]),
+    );
+    const hbox = { col: await sizeOf(H_COL), info: await sizeOf(H_INFO), office: await sizeOf(H_OFFICE) };
+    check(
+        "each handle is about 6 px wide (the hit area)",
+        hbox.col.w === 6 && hbox.info.w === 6 && hbox.office.h === 6,
+        JSON.stringify(hbox),
+    );
+    const lineOpacity = (sel) => page.locator(sel).evaluate((e) => Number(getComputedStyle(e, "::after").opacity));
+    check("a handle shows no line when the pointer is away", (await lineOpacity(H_COL)) === 0);
+    await page.locator(H_COL).hover();
+    await page.waitForTimeout(250);
+    check("a handle shows its line on hover", (await lineOpacity(H_COL)) > 0.5);
+    await page.mouse.move(700, 600);
+    check(
+        "a handle has the value, the minimum and the maximum as aria values",
+        (await page.locator(H_COL).getAttribute("aria-valuenow")) === "320" &&
+            (await page.locator(H_COL).getAttribute("aria-valuemin")) === "160" &&
+            (await page.locator(H_COL).getAttribute("aria-valuemax")) === "640",
+    );
+
+    // 16a. The building column.
+    check("at 1280 x 800 the default column is 320 px", (await colW()) === 320);
+    await drag(H_COL, 100, 0);
+    check("a drag to the right makes the column 100 px wider", (await colW()) === 420, String(await colW()));
+    await drag(H_COL, -900, 0);
+    check("a drag far to the left stops at the minimum of 160 px", (await colW()) === 160, String(await colW()));
+    await drag(H_COL, 1100, 0);
+    check("a drag far to the right stops at 50% of the window (640 px)", (await colW()) === 640, String(await colW()));
+    await key(H_COL, "ArrowLeft");
+    check("the Left key makes the column 16 px narrower", (await colW()) === 624, String(await colW()));
+    await key(H_COL, "ArrowRight");
+    await key(H_COL, "ArrowRight");
+    check("the Right key makes the column 16 px wider (and stops at the maximum)", (await colW()) === 640, String(await colW()));
+    await page.screenshot({ path: join(resizeShots, "2b-wide-column.png") });
+    await page.locator(H_COL).dblclick();
+    await page.waitForTimeout(60);
+    check("a double click on the handle resets the column to 320 px", (await colW()) === 320, String(await colW()));
+    await key(H_COL, "ArrowDown");
+    check("the Up and Down keys do nothing on a vertical handle", (await colW()) === 320);
+
+    // The pointer stays captured when the drag goes over the room (an SVG) and the terminal area.
+    {
+        const b = await page.locator(H_COL).boundingBox();
+        await page.mouse.move(b.x + 3, b.y + 300);
+        await page.mouse.down();
+        await page.mouse.move(b.x + 400, b.y + 150, { steps: 6 });
+        const captured = await page.locator(H_COL).evaluate((e) => e.hasPointerCapture(1));
+        await page.mouse.move(b.x + 100, b.y + 500, { steps: 6 });
+        check("a drag uses pointer capture, and goes on over the room and the terminal", captured && (await colW()) === 320 + 97, `captured ${captured}, col ${await colW()}`);
+        await page.mouse.up();
+        await page.waitForTimeout(60);
+    }
+    await page.locator(H_COL).dblclick();
+
+    // 16b. The height of the office. A live terminal is open here (Ada), so the fit is visible.
+    await selectEmp("ceo");
+    await bar.locator("button.start").click();
+    await page.waitForSelector(".tab.active .dot[data-status=idle]");
+    await page.waitForSelector(".pane:not(.hidden) .xterm-rows > div");
+    const termRows = () => page.locator(".pane:not(.hidden) .xterm-rows > div").count();
+    await page.waitForTimeout(400);
+    check("the default office height is 336 px", (await officeH()) === 336, String(await officeH()));
+    await drag(H_OFFICE, 0, 60);
+    check("a drag down makes the office 60 px higher", (await officeH()) === 396, String(await officeH()));
+    await drag(H_OFFICE, 0, -900);
+    check("a drag far up stops at the minimum of 120 px", (await officeH()) === 120, String(await officeH()));
+    await page.screenshot({ path: join(resizeShots, "3-small-office.png") });
+    await drag(H_OFFICE, 0, 1200);
+    const areaH = (await sizeOf(".area")).h;
+    check(
+        "a drag far down stops where the terminal area keeps 160 px",
+        areaH >= 159 && areaH <= 175,
+        `office ${await officeH()}, terminal area ${areaH}`,
+    );
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: join(resizeShots, "4-large-office.png") });
+    await key(H_OFFICE, "ArrowUp");
+    const afterUp = await officeH();
+    await key(H_OFFICE, "ArrowDown");
+    check("the Up and Down keys move the office handle by 16 px", (await officeH()) - afterUp === 16, `${afterUp} -> ${await officeH()}`);
+    await page.locator(H_OFFICE).dblclick();
+    await page.waitForTimeout(60);
+    check("a double click resets the office to 336 px", (await officeH()) === 336, String(await officeH()));
+    await key(H_OFFICE, "ArrowRight");
+    check("the Left and Right keys do nothing on a horizontal handle", (await officeH()) === 336);
+
+    // The terminal fits its new size after a drag, and the process gets ONE pty_resize with it.
+    await page.waitForTimeout(300);
+    const resizeCount = async () => (await calls("pty_resize")).length;
+    const before = await resizeCount();
+    const rowsBefore16 = await termRows();
+    await drag(H_OFFICE, 0, -90, 18);
+    await page.waitForTimeout(500);
+    const sent = (await calls("pty_resize")).slice(before);
+    const rowsNow = await termRows();
+    check("the terminal has more rows after the office got smaller", rowsNow > rowsBefore16, `${rowsBefore16} -> ${rowsNow}`);
+    check(
+        "a drag of 18 steps sends exactly one pty_resize, with the new size",
+        sent.length === 1 && sent[0].args.rows === rowsNow,
+        `sent ${JSON.stringify(sent.map((c) => c.args))}, rows ${rowsNow}`,
+    );
+    const fit = await page.evaluate(() => {
+        const pane = document.querySelector(".pane:not(.hidden)");
+        const screenEl = pane.querySelector(".xterm-screen");
+        return { pane: pane.getBoundingClientRect().height, screen: screenEl.getBoundingClientRect().height };
+    });
+    check("the terminal screen fills its pane after the drag (less than one row of space left)", fit.screen <= fit.pane && fit.pane - fit.screen < 24, JSON.stringify(fit));
+    await page.locator(H_OFFICE).dblclick();
+    await page.waitForTimeout(500);
+
+    // 16c. The split between the info panel and the room.
+    check("the default info panel is 456 px wide at 1280 x 800", (await infoW()) === 456, String(await infoW()));
+    await drag(H_INFO, -100, 0);
+    check("a drag to the left makes the info panel 100 px narrower", (await infoW()) === 356, String(await infoW()));
+    await drag(H_INFO, -900, 0);
+    check("a drag far to the left stops at 200 px for the info panel", (await infoW()) === 200, String(await infoW()));
+    await page.screenshot({ path: join(resizeShots, "5-narrow-info.png") });
+    await drag(H_INFO, 1200, 0);
+    const officeWide = (await sizeOf(".office")).w;
+    check("a drag far to the right leaves 120 px to the room", (await infoW()) === officeWide - 120 - 1 || (await infoW()) === officeWide - 120, `info ${await infoW()}, office ${officeWide}`);
+    await key(H_INFO, "ArrowLeft");
+    await key(H_INFO, "ArrowLeft");
+    const afterTwo = await infoW();
+    await key(H_INFO, "ArrowRight");
+    check("the Left and Right keys move the info handle by 16 px", (await infoW()) - afterTwo === 16, `${afterTwo} -> ${await infoW()}`);
+    await page.locator(H_INFO).dblclick();
+    await page.waitForTimeout(60);
+    check("a double click resets the info panel to 456 px", (await infoW()) === 456, String(await infoW()));
+
+    // 16d. The building and the room stay inside their containers.
+    const inside = (inner, outer, tol = 1) =>
+        inner.left >= outer.left - tol && inner.right <= outer.right + tol && inner.top >= outer.top - tol && inner.bottom <= outer.bottom + tol;
+    const fitReport = () =>
+        page.evaluate(() => {
+            const r = (el) => el.getBoundingClientRect();
+            const scroller = document.querySelector(".column .scroll");
+            const svg = document.querySelector("svg.building");
+            const sc = r(scroller);
+            const bs = r(svg);
+            const room = document.querySelector(".office .room");
+            const rc = r(room);
+            const art = r(room.querySelector("svg > image"));
+            const tagH = document.querySelector(".tag .tag-name")?.getBoundingClientRect().height ?? 0;
+            return {
+                scrollsY: scroller.scrollHeight > scroller.clientHeight + 1,
+                bldW: bs.width,
+                buildingInsideX: bs.left >= sc.left - 1 && bs.right <= sc.right + 1,
+                buildingInsideY: bs.top >= sc.top - 1 && bs.bottom <= sc.bottom + 1,
+                // The art of the room, inside its cell, and centred in the direction that has spare room.
+                roomInside: art.left >= rc.left - 1 && art.right <= rc.right + 1 && art.top >= rc.top - 1 && art.bottom <= rc.bottom + 1,
+                roomCentred: Math.abs(art.left - rc.left - (rc.right - art.right)) <= 2 && Math.abs(art.top - rc.top - (rc.bottom - art.bottom)) <= 2,
+                tagH,
+            };
+        });
+    const sizes16 = [
+        { name: "narrow column (160 px)", col: 160, office: 336, info: 456 },
+        { name: "default", col: 320, office: 336, info: 456 },
+        { name: "wide column (640 px)", col: 640, office: 336, info: 456 },
+        { name: "small office (120 px)", col: 320, office: 120, info: 456 },
+        { name: "large office (560 px)", col: 320, office: 560, info: 456 },
+        { name: "narrow room (info 700 px)", col: 320, office: 336, info: 700 },
+    ];
+    for (const sz of sizes16) {
+        await page.evaluate((v) => localStorage.setItem("agent-tower:layout", JSON.stringify(v)), { col: sz.col, office: sz.office, info: sz.info });
+        // Apply with the keyboard-free path: reload the page (the mock state is the same for floor lists).
+        await page.reload();
+        await page.waitForSelector(".storey.on");
+        await page.waitForTimeout(450);
+        const rep = await fitReport();
+        check(
+            `the building and the room stay inside their containers: ${sz.name}`,
+            rep.buildingInsideX && (rep.buildingInsideY || rep.scrollsY) && rep.roomInside && rep.roomCentred,
+            JSON.stringify(rep),
+        );
+        if (sz.col === 160) await page.screenshot({ path: join(resizeShots, "2-narrow-column.png") });
+        if (sz.office === 120) await page.screenshot({ path: join(resizeShots, "3b-small-office-fit.png") });
+        if (sz.office === 560) check("at the large office the name tags are readable (at least 8 px tall)", rep.tagH >= 8, `tag text ${rep.tagH.toFixed(1)} px`);
+    }
+
+    // 16e. 13 employees at a large size.
+    await page.evaluate(() => localStorage.setItem("agent-tower:layout", JSON.stringify({ col: 260, office: 560, info: 330 })));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await clickStorey("/home/demo/big");
+    await page.waitForFunction(() => document.querySelectorAll(".emp").length === 13);
+    await page.waitForTimeout(450);
+    const rep13 = await fitReport();
+    check(
+        "13 employees at a large office: the room stays inside and the name text is readable",
+        rep13.roomInside && rep13.roomCentred && rep13.tagH >= 8,
+        JSON.stringify(rep13),
+    );
+    await page.screenshot({ path: join(resizeShots, "6-13-employees-large.png") });
+
+    // 16f. Many floors: the building keeps a readable width, and the column scrolls.
+    await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    const fourFloors = await fitReport();
+    check("with 4 floors the building fits the column without a scroll bar", !fourFloors.scrollsY && fourFloors.buildingInsideY && fourFloors.buildingInsideX, JSON.stringify(fourFloors));
+    for (let i = 0; i < 9; i++) {
+        await page.fill("#floor-path", `/home/demo/extra-${i}`);
+        await page.click(".open button.primary");
+        await page.waitForSelector(".create");
+        await page.click(".create button.primary");
+        await page.waitForSelector(`.storey.on[data-path="/home/demo/extra-${i}"]`);
+    }
+    // A low window: 13 floors do not fit at a readable size, so the column scrolls.
+    await page.setViewportSize({ width: 1280, height: 560 });
+    await page.waitForTimeout(400);
+    const manyFloors = await fitReport();
+    check(
+        "with 13 floors the building keeps a readable width (about 200 px), stays inside sideways, and the column scrolls",
+        (await page.locator(".storey").count()) === 13 && manyFloors.scrollsY && manyFloors.buildingInsideX && manyFloors.bldW >= 195 && manyFloors.bldW <= 205,
+        JSON.stringify(manyFloors),
+    );
+    await page.screenshot({ path: join(resizeShots, "7-many-floors.png") });
+    await page.setViewportSize({ width: 1280, height: 800 });
+
+    // 16g. The sizes survive a reload, and a restored size is clamped to the window.
+    await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(300);
+    await drag(H_COL, -40, 0);
+    await drag(H_OFFICE, 0, -50);
+    await drag(H_INFO, 60, 0);
+    const mine = { col: await colW(), office: await officeH(), info: await infoW() };
+    check("the three sizes changed by the drags", mine.col === 280 && mine.office === 286 && mine.info === 556, JSON.stringify(mine));
+    const storedText = await page.evaluate(() => localStorage.getItem("agent-tower:layout"));
+    check("the sizes are in localStorage", storedText === JSON.stringify({ col: 280, office: 286, info: 556 }), String(storedText));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(400);
+    const restored = { col: await colW(), office: await officeH(), info: await infoW() };
+    check("the three sizes are the same after a reload", JSON.stringify(restored) === JSON.stringify(mine), JSON.stringify(restored));
+    await page.evaluate(() => localStorage.setItem("agent-tower:layout", JSON.stringify({ col: 5000, office: 9000, info: 9000 })));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(400);
+    const bigRestored = { col: await colW(), area: (await sizeOf(".area")).h, info: await infoW(), office: (await sizeOf(".office")).w };
+    check(
+        "stored sizes that are too large are clamped at the start (column 50%, terminal area 160 px, room 120 px)",
+        bigRestored.col === 640 && bigRestored.area >= 159 && bigRestored.area <= 175 && bigRestored.info === bigRestored.office - 120,
+        JSON.stringify(bigRestored),
+    );
+    await page.evaluate(() => localStorage.setItem("agent-tower:layout", "{this is not json"));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(300);
+    check("bad stored text gives the default sizes", (await colW()) === 320 && (await officeH()) === 336 && (await infoW()) === 456);
+    // A clamp when the window changes.
+    await key(H_COL, "ArrowRight");
+    for (let i = 0; i < 10; i++) await page.keyboard.press("ArrowRight");
+    await page.waitForTimeout(100);
+    check("11 Right keys widen the column by 16 px each", (await colW()) === 320 + 11 * 16, String(await colW()));
+    await page.setViewportSize({ width: 800, height: 560 });
+    await page.waitForTimeout(400);
+    check(
+        "when the window gets smaller the column is clamped to 50% of the new width",
+        (await colW()) === 400 && (await page.locator(H_COL).getAttribute("aria-valuemax")) === "400",
+        String(await colW()),
+    );
+    await page.evaluate(() => localStorage.setItem("agent-tower:layout", JSON.stringify({ office: 700 })));
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.setViewportSize({ width: 1280, height: 520 });
+    await page.waitForTimeout(400);
+    const small = (await sizeOf(".area")).h;
+    check("when the window gets lower the office shrinks so that the terminal area keeps 160 px", small >= 159 && small <= 175, String(small));
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(300);
+
+    // ================= 17. A loading state when a session starts (Feature B) =================
+    const setMock = (config) => page.evaluate((c) => (window.__towerMockConfig = c), config);
+    const overlay = (kind) => page.locator(`[data-starting="${kind}"]`);
+    const activeOverlayText = async (kind) => (await overlay(kind).innerText()).replace(/\s+/g, " ").trim();
+    const elapsedOf = async (kind) => Number((await overlay(kind).locator('[data-role="elapsed"]').innerText()).match(/\d+/)[0]);
+    const sid = () => page.locator(".pane:not(.hidden)").getAttribute("data-session");
+    await setMock({ startCallMs: 700, startingMs: 600_000 });
+
+    // 17a. Busy buttons, from the click until the command returns.
+    await selectEmp("ceo");
+    await bar.locator("button.start").click();
+    await page.waitForSelector("button.start[aria-busy=true]");
+    check(
+        'the clicked "start" button is disabled and shows a spinner and "starting..." until the command returns',
+        (await bar.locator("button.start").isDisabled()) &&
+            (await bar.locator("button.start").innerText()).trim() === "starting..." &&
+            (await bar.locator("button.start .spinner").count()) === 1,
+        await bar.locator("button.start").innerText(),
+    );
+    check("no tab exists yet while the command runs", (await page.locator(".tab").count()) === 0);
+    await page.waitForSelector(".tab.active");
+    const adaId = await sid();
+
+    // 17b. The tab spinner and the centre overlay.
+    check(
+        "the tab of a starting session shows a spinner in place of the status dot",
+        (await page.locator('.tab.active .dot.spin[data-status="starting"]').count()) === 1 &&
+            (await page.locator(".tab.active .dot.spin").evaluate((e) => getComputedStyle(e).animationName)) !== "none",
+    );
+    await overlay("centre").waitFor();
+    const centreText = await activeOverlayText("centre");
+    check("the centre overlay names the CLI and the employee", centreText.includes("Starting claude for Ada..."), centreText);
+    check("the centre overlay has a spinner", (await overlay("centre").locator(".spinner").count()) === 1);
+    const e1 = await elapsedOf("centre");
+    await page.waitForTimeout(2300);
+    const e2 = await elapsedOf("centre");
+    check("the elapsed time counts up each second", e2 - e1 >= 2 && e2 - e1 <= 3, `${e1} s -> ${e2} s`);
+    check(
+        "the centre overlay is in the middle of the terminal pane",
+        await page.evaluate(() => {
+            const o = document.querySelector('[data-starting="centre"]').getBoundingClientRect();
+            const p = document.querySelector(".pane:not(.hidden)").getBoundingClientRect();
+            const t = document.querySelector('[data-starting="centre"] .title').getBoundingClientRect();
+            return Math.abs(t.left + t.width / 2 - (p.left + p.width / 2)) < 3 && Math.abs(t.top + t.height / 2 - (p.top + p.height / 2)) < p.height * 0.2 && o.width > 0;
+        }),
+    );
+    check("no slow hint before 10 s", (await overlay("centre").locator('[data-role="slow-hint"]').count()) === 0);
+    check(
+        "the overlay does not block the terminal for input (no pointer events, and the terminal is under the pointer)",
+        await page.evaluate(() => {
+            const o = document.querySelector('[data-starting="centre"]');
+            const r = o.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return getComputedStyle(o).pointerEvents === "none" && !!hit?.closest(".xterm");
+        }),
+    );
+    await page.locator(".pane:not(.hidden) .xterm-helper-textarea").focus();
+    check("the terminal can take the focus while the overlay shows", await page.evaluate(() => document.activeElement?.classList.contains("xterm-helper-textarea")));
+    await page.screenshot({ path: join(resizeShots, "8-centre-overlay.png") });
+
+    // 17c. Output during the start: the centre overlay turns into the strip.
+    await page.evaluate((id) => window.__towerMock.output(id, "Do you trust the files in this folder? (y/n)\r\n"), adaId);
+    await overlay("strip").waitFor();
+    check("the first output turns the centre overlay into a strip", (await overlay("centre").count()) === 0 && (await overlay("strip").count()) === 1);
+    await waitScreen("Do you trust the files");
+    const stripBox = await page.evaluate(() => {
+        const s = document.querySelector('[data-starting="strip"]').getBoundingClientRect();
+        const p = document.querySelector(".pane:not(.hidden)").getBoundingClientRect();
+        return { right: p.right - s.right, top: s.top - p.top, width: s.width, paneW: p.width, height: s.height };
+    });
+    check("the strip is small and at the top right of the pane", stripBox.right >= 0 && stripBox.right < 40 && stripBox.top >= 0 && stripBox.top < 20 && stripBox.width < stripBox.paneW / 2 && stripBox.height < 40, JSON.stringify(stripBox));
+    const stripText = await activeOverlayText("strip");
+    check('the strip says "starting..." and the seconds', /^starting\.\.\. \d+ s$/.test(stripText), stripText);
+    const s1 = await elapsedOf("strip");
+    await page.waitForTimeout(1200);
+    check("the time in the strip goes on counting (and did not restart)", (await elapsedOf("strip")) > s1 && s1 >= 2, `${s1} -> ${await elapsedOf("strip")}`);
+    check("the strip takes no pointer events", (await overlay("strip").evaluate((e) => getComputedStyle(e).pointerEvents)) === "none");
+    await page.screenshot({ path: join(resizeShots, "9-strip.png") });
+
+    // 17d. The status changes: both go away, and the tab shows the dot again.
+    await page.evaluate((id) => window.__towerMock.leaveStarting(id), adaId);
+    await page.waitForSelector('.tab.active .dot[data-status="idle"]');
+    check("the strip goes away when the status is not starting any more", (await page.locator("[data-starting]").count()) === 0);
+    check("the tab shows the status dot again (no spinner)", (await page.locator(".tab.active .dot.spin").count()) === 0);
+
+    // 17e. A resume that has scrollback output at once: the strip shows from the start.
+    await setMock({ startCallMs: 700, startingMs: 600_000, startingText: "Trust this folder? 1. Yes  2. No\r\n" });
+    await selectEmp("eng-lin");
+    await page.waitForSelector(".bar button.resume");
+    await bar.locator("button.resume").click();
+    await page.waitForSelector("button.resume[aria-busy=true]");
+    check(
+        'the clicked "resume" button shows "resuming..." and the "start" button is disabled too',
+        (await bar.locator("button.resume").innerText()).trim() === "resuming..." && (await bar.locator("button.start").isDisabled()),
+    );
+    await page.waitForSelector('.tab.active:has-text("Lin")');
+    await overlay("strip").waitFor();
+    check(
+        "output that is in the scrollback of the attach also gives the strip (no centre overlay)",
+        (await overlay("centre").count()) === 0 && (await overlay("strip").count()) === 1,
+    );
+    await waitScreen("Trust this folder?");
+    await page.evaluate((id) => window.__towerMock.leaveStarting(id), await sid());
+    await page.waitForSelector("[data-starting]", { state: "detached" });
+    check("the strip of the resumed session goes away with the status", (await page.locator("[data-starting]").count()) === 0);
+
+    // 17f. The setup agent button.
+    await setMock({ startCallMs: 700, startingMs: 600_000 });
+    await page.click("button.setup:not(.stop-setup)");
+    await page.click("button.cli-codex");
+    await page.waitForSelector("button.setup[aria-busy=true]");
+    check(
+        'the setup button is disabled and shows "starting..." with a spinner until the command returns',
+        (await page.locator("button.setup").isDisabled()) &&
+            (await page.locator("button.setup").innerText()).trim() === "starting..." &&
+            (await page.locator("button.setup .spinner").count()) === 1 &&
+            (await page.locator("button.cli-claude").count()) === 0,
+    );
+    await page.waitForSelector('.tab.active:has-text("Setup")');
+    await overlay("centre").waitFor();
+    const setupCentre = await activeOverlayText("centre");
+    check("the setup overlay says: Starting codex for Setup...", setupCentre.includes("Starting codex for Setup..."), setupCentre);
+    check("while the setup session starts the button offers to stop it", (await page.locator("button.setup").innerText()) === "Stop the setup");
+    await page.evaluate((id) => window.__towerMock.leaveStarting(id), await sid());
+    await page.waitForSelector("[data-starting]", { state: "detached" });
+    await page.click("button.setup");
+    await page.waitForSelector("button.setup:not(.stop-setup)");
+
+    // 17g. The slow hint after 10 s and the "still starting" line after 90 s, with a fake clock.
+    await setMock({ startCallMs: 0, startingMs: 600_000 });
+    await selectEmp("pm");
+    await page.waitForSelector(".bar button.start:not([disabled])");
+    const stopsBeforeStuck = (await calls("session_stop")).length;
+    await bar.locator("button.start").click();
+    await page.waitForSelector('.tab.active:has-text("Maya")');
+    await overlay("centre").waitFor();
+    await page.clock.install();
+    // The lines come at the right time, not before: look just before each limit, then just after it.
+    await page.clock.fastForward(8_000);
+    await page.waitForTimeout(1300); // the page timer ticks each second of real time
+    check("at about 9 s there is no slow hint yet", (await page.locator('[data-role="slow-hint"]').count()) === 0, String(await elapsedOf("centre")));
+    await page.clock.fastForward(2_500);
+    await page.locator('[data-role="slow-hint"]').waitFor({ timeout: 2500 }).catch(() => {});
+    check(
+        "after 10 s the centre overlay adds the line about a slow load",
+        (await page.locator('[data-role="slow-hint"]').count()) === 1 &&
+            (await page.locator('[data-role="slow-hint"]').innerText()) ===
+                "The CLI loads its tools and the project. In a large project this can take more than one minute." &&
+            (await page.locator('[data-role="stuck"]').count()) === 0,
+        String(await elapsedOf("centre")),
+    );
+    await page.clock.fastForward(72_000);
+    await page.waitForTimeout(1300);
+    check("at about 85 s there is no still-starting line yet", (await page.locator('[data-role="stuck"]').count()) === 0, String(await elapsedOf("centre")));
+    await page.clock.fastForward(8_000);
+    await page.locator('[data-role="stuck"]').waitFor({ timeout: 2500 }).catch(() => {});
+    check(
+        "after 90 s the overlay adds: Still starting. If nothing shows, stop the session and look at the program paths in Settings.",
+        (await page.locator('[data-role="stuck"]').count()) === 1 &&
+            (await page.locator('[data-role="stuck"]').innerText()) === "Still starting. If nothing shows, stop the session and look at the program paths in Settings." &&
+            (await elapsedOf("centre")) >= 90,
+        String(await elapsedOf("centre")),
+    );
+    check("the 90 s line takes no automatic action (the session is still starting and live)", (await page.locator('.tab.active .dot[data-status="starting"]').count()) === 1);
+    await page.evaluate((id) => window.__towerMock.output(id, "x\r\n"), await sid());
+    await overlay("strip").waitFor();
+    check(
+        "in the strip the stuck line stays and the slow hint is gone",
+        (await page.locator('[data-starting="strip"] [data-role="stuck"]').count()) === 1 && (await page.locator('[data-role="slow-hint"]').count()) === 0,
+    );
+    await page.evaluate((id) => window.__towerMock.leaveStarting(id), await sid());
+    await page.waitForSelector("[data-starting]", { state: "detached" });
+    check("no session was stopped by the app during the whole wait", (await calls("session_stop")).length === stopsBeforeStuck);
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

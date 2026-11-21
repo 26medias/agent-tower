@@ -6,6 +6,10 @@
     import { ART, T, buildingHeight, stickerTransform, storeyY } from "$lib/office-layout";
     import { store } from "$lib/store.svelte";
 
+    // `scale`: screen pixels for one SVG unit, from the column (see buildingScale in sizes.ts).
+    // 0 means "not measured yet": the building then takes the full width.
+    let { scale = 0 }: { scale?: number } = $props();
+
     const count = $derived(store.floors.length);
 
     // The part of the storey image that reacts to the pointer (the roof and the walls). The images
@@ -35,6 +39,7 @@
         role="group"
         aria-label="Building, one storey for each floor"
         data-storeys={count}
+        style:width={scale > 0 ? `${ART.w * scale}px` : "100%"}
     >
         {#each store.floors as floor, i (floor.path)}
             {@const y = storeyY(i, count)}
@@ -87,7 +92,7 @@
 <style>
     .building {
         display: block;
-        width: 100%;
+        max-width: 100%;
         height: auto;
     }
 

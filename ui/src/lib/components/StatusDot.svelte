@@ -1,10 +1,11 @@
 <script lang="ts">
     import type { Status } from "$lib/types";
 
-    let { status }: { status: Status } = $props();
+    // `spin`: a session that starts shows a small turning ring in place of the dot (the tab does this).
+    let { status, spin = false }: { status: Status; spin?: boolean } = $props();
 </script>
 
-<span class="dot {status}" title={status} data-status={status}></span>
+<span class="dot {status}" class:spin={spin && status === "starting"} title={status} data-status={status}></span>
 
 <style>
     .dot {
@@ -19,6 +20,25 @@
 
     .starting {
         background: var(--st-starting);
+    }
+
+    /* A ring that turns, in place of the dot. The ring is still with reduced motion. */
+    .dot.spin {
+        background: transparent;
+        border: 2px solid var(--line);
+        border-top-color: var(--accent);
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+        .dot.spin {
+            animation: spin 0.8s linear infinite;
+        }
+    }
+
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
     }
 
     .working {

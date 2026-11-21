@@ -19,7 +19,7 @@
                 aria-selected={tab.sessionId === store.activeId}
                 onclick={() => store.selectTab(tab.sessionId)}
             >
-                <StatusDot status={tab.status} />
+                <StatusDot status={tab.status} spin />
                 <span class="label">{nameOf(tab.slug)}</span>
             </button>
             {#if tab.messageWaiting}
