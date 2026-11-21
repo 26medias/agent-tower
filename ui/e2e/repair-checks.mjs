@@ -407,7 +407,7 @@ export async function repairChecks({ page, check, url, shots }) {
     await M("notice", FLOOR, "Fourth notice");
     await M("notice", FLOOR, "Fifth notice");
     await page.waitForFunction(() => document.querySelector('[data-testid="toasts-more"]'));
-    check("D10: at most 4 toasts show, and a line counts the older ones", (await page.locator(".toast").count()) === 4 && /1 older message/.test(await page.locator('[data-testid="toasts-more"]').innerText()));
+    check("D10: at most 4 toasts show, and a line counts the older ones", (await page.locator(".toast").count()) === 4 && /1 older message waits\./.test(await page.locator('[data-testid="toasts-more"]').innerText()));
     await shot("d10-toasts-1280.png");
     // An information toast closes by itself after 6 s. An error toast stays.
     await M("employeeStart", BIG, "ceo", "pm");

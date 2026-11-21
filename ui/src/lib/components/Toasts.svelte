@@ -133,7 +133,7 @@
         <ToastItem {toast} {onfold} />
     {/each}
     {#if hidden > 0}
-        <div class="more" data-testid="toasts-more" bind:this={moreEl}>{hidden} older {hidden === 1 ? "message" : "messages"} wait. Close a message to see the next one.</div>
+        <div class="more" data-testid="toasts-more" bind:this={moreEl}>{hidden} older {hidden === 1 ? "message waits" : "messages wait"}. Close a message to see the next one.</div>
     {/if}
 </div>
 
