@@ -12,7 +12,10 @@
 //      E2E_FOUR_SHOTS (folder for the screenshots of e2e/four-checks.mjs; default
 //      /tmp/agent-tower-review/four/shots),
 //      E2E_LAST3_SHOTS (folder for the screenshots of e2e/last3-checks.mjs; default
-//      /tmp/agent-tower-review/last3).
+//      /tmp/agent-tower-review/last3),
+//      E2E_TOAST_SHOTS (folder for the screenshots of e2e/toast-checks.mjs; default
+//      /tmp/agent-tower-review/toast),
+//      E2E_ONLY=toast runs the page checks and the toast checks only.
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -21,6 +24,7 @@ import { fourChecks } from "./four-checks.mjs";
 import { last3Checks } from "./last3-checks.mjs";
 import { lastChecks } from "./last-checks.mjs";
 import { repairChecks } from "./repair-checks.mjs";
+import { toastChecks } from "./toast-checks.mjs";
 
 const url = process.env.E2E_URL ?? "http://127.0.0.1:1420";
 const shot = process.env.E2E_SHOT ?? "mock-page.png";
@@ -38,6 +42,9 @@ mkdirSync(fourShots, { recursive: true });
 // The screenshots of the last repairs of the review "final-b4" (e2e/last3-checks.mjs).
 const last3Shots = process.env.E2E_LAST3_SHOTS ?? "/tmp/agent-tower-review/last3";
 mkdirSync(last3Shots, { recursive: true });
+// The screenshots of the toast place and the three small items of the review "final-b5" (e2e/toast-checks.mjs).
+const toastShots = process.env.E2E_TOAST_SHOTS ?? "/tmp/agent-tower-review/toast";
+mkdirSync(toastShots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -462,17 +469,17 @@ try {
     const toastBox = await page.locator(".toast").first().boundingBox();
     const officeBox = await page.locator(".office").boundingBox();
     const areaBoxT = await page.locator(".area").boundingBox();
-    // Changed on purpose (last repair D-a): the toast stack is an overlay at the bottom right of the CENTRE column. It
-    // does not move the office, it lies over the terminal area, and it stays above the last two terminal lines (the input
-    // of the CLI). It never covers the task board, the top strip or the tabs.
+    // Changed on purpose (toast place): the toast stack is an overlay at the TOP right of the terminal area of the CENTRE
+    // column (6 px under the top of the area, 10 px inside the right edge of the column). It does not move the office, and
+    // it grows down. It never covers the task board, the top strip or the tabs. With no terminal rows to measure it stays
+    // above the bottom of the area less 130 px.
     const boardBoxT = await page.locator(".board").boundingBox();
     check(
-        "the toast is an overlay at the bottom right of the centre column: the office has not moved, and the last two terminal lines are free",
+        "the toast is an overlay at the top right of the terminal area of the centre column: the office has not moved",
         (await page.locator(".toast").first().evaluate((el) => getComputedStyle(el.parentElement).position)) === "fixed" &&
-            toastBox.x + toastBox.width <= boardBoxT.x &&
-            toastBox.x + toastBox.width > boardBoxT.x - 30 &&
-            toastBox.y >= areaBoxT.y &&
-            toastBox.y + toastBox.height <= areaBoxT.y + areaBoxT.height - 2 * 15 &&
+            Math.abs(toastBox.x + toastBox.width - (boardBoxT.x - 10)) <= 1 &&
+            Math.abs(toastBox.y - (areaBoxT.y + 6)) <= 1 &&
+            toastBox.y + toastBox.height <= areaBoxT.y + areaBoxT.height - 130 &&
             // Changed on purpose (N1): the top strip (30 px) is always there, so the office starts under it.
             officeBox.y === 30 &&
             Math.abs(officeBox.height - 336) <= 1,
@@ -2121,17 +2128,22 @@ try {
     }
 
     // 21. The repairs of the review "final-b" (B1, D1 to D3, D6 to D10, M6, the polish list).
-    // E2E_ONLY=last runs the page checks and the last checks only (it skips the long repair checks).
-    if (process.env.E2E_ONLY !== "last") await repairChecks({ page, check, url, shots: repairShots });
+    // E2E_ONLY=last runs the page checks and the last checks only (it skips the long repair checks). E2E_ONLY=toast runs the page checks and the toast checks.
+    const only = process.env.E2E_ONLY ?? "";
+    if (only === "") await repairChecks({ page, check, url, shots: repairShots });
 
     // 22. The last repairs of the review "final-b2" (N1 to N3, the one row of buttons, the Team activity list).
-    await lastChecks({ page, check, url, shots: lastShots });
+    if (only !== "toast") await lastChecks({ page, check, url, shots: lastShots });
 
     // 23. The four items of 2026-11-21: Browse..., the notification switch, test and reset of the programs.
-    await fourChecks({ page, check, url, shots: fourShots });
+    if (only !== "toast") await fourChecks({ page, check, url, shots: fourShots });
 
     // 24. The last repairs of the review "final-b4": the toast stack, the bar and the roster, the messages in Team activity.
-    await last3Checks({ page, check, url, shots: last3Shots });
+    if (only !== "toast") await last3Checks({ page, check, url, shots: last3Shots });
+
+    // 25. The toast place (top right of the terminal area), the toasts under a modal, the errors of refused actions inside the
+    // modals, the fold of the status rows, "resume" in the bar, and the main button of the header at 200 px.
+    await toastChecks({ page, check, url, shots: toastShots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

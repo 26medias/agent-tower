@@ -1,5 +1,6 @@
 <script lang="ts">
     import { store } from "$lib/store.svelte";
+    import ActionError from "./ActionError.svelte";
     import type { ProgramName } from "$lib/types";
 
     const names: ProgramName[] = ["claude", "codex", "node"];
@@ -54,6 +55,7 @@
                         </button>
                     {/if}
                 </form>
+                <ActionError area="program:{name}" />
                 {#if store.programs.overrides[name]}
                     <p class="note" data-testid="override-{name}" title={store.programs.overrides[name]}>
                         your path: {store.programs.overrides[name]}

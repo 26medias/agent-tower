@@ -3,6 +3,7 @@
     // model, and a "remove" button on each custom model.
     import { isValidModelName, modelText } from "$lib/models";
     import { store } from "$lib/store.svelte";
+    import ActionError from "./ActionError.svelte";
     import type { ModelKind, ModelOption } from "$lib/types";
 
     let {
@@ -81,6 +82,7 @@
         <button type="submit" class="add" disabled={trimmed === "" || problem !== "" || busy}>add</button>
     </form>
     {#if problem}<p class="problem">{problem}</p>{/if}
+    <ActionError area="models:{kind}" />
 </div>
 
 <style>

@@ -11,6 +11,7 @@
         modelChoices,
     } from "$lib/models";
     import { modal } from "$lib/modal";
+    import ActionError from "./ActionError.svelte";
     import { POLICY_IDS, POLICY_INFO, defaultManager } from "$lib/policies";
     import { isValidSlug, slugify, uniqueSlug } from "$lib/slug";
     import { store } from "$lib/store.svelte";
@@ -195,6 +196,7 @@
             <p class="warn" role="status" data-testid="no-instructions">This employee has no instructions. You can save, but it will not know its job.</p>
         {/if}
 
+        <ActionError area="employee" />
         <div class="buttons">
             {#if blocked}
                 <span class="reason" data-testid="form-reason">{blocked}</span>

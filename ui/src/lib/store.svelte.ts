@@ -14,7 +14,7 @@ import {
 } from "./activity";
 import * as ipc from "./ipc";
 import { blockedTaskId, describeError, isPathError, noticePlan, tidyError, type ErrorAction } from "./messages";
-import { modalOpen } from "./modal";
+import { modalOpen, onModalChange } from "./modal";
 import { orderEmployees } from "./order";
 import { focusTerminal } from "./terminal";
 import { taskLabel } from "./tasks";
@@ -104,7 +104,7 @@ export const TOAST_INFO_MS = 6000;
 export const TOAST_TASK_MS = 8000;
 /** The "MSG" mark on the tab of the receiver of a message shows this long, when the tab is not in view. */
 export const MSG_MARK_MS = 10_000;
-/** The overlay shows this many toasts, the newest first. */
+/** The overlay shows this many toasts. The newest is the first (at the top). */
 export const TOASTS_VISIBLE = 4;
 /** The store keeps this many toasts. The oldest go first. */
 const TOASTS_KEPT = 20;
@@ -342,10 +342,52 @@ class Store {
             action = this.actionFor(described.action);
         }
         const same = this.toasts.filter((t) => !(t.text === shown && t.kind === kind));
+        for (const t of this.toasts) if (!same.includes(t)) this.stopInfoTimer(t.id);
         this.toasts = [...same, { id, text: shown, kind, action, task }].slice(-TOASTS_KEPT);
-        if (kind === "info" && !stay) setTimeout(() => this.dismissToast(id), TOAST_INFO_MS);
+        if (kind === "info" && !stay) this.startInfoTimer(id, TOAST_INFO_MS);
         if (task) this.closeTaskToastLater(id);
         return id;
+    }
+
+    /**
+     * The timers of the information toasts. A timer pauses while a modal is open: the toast waits under the
+     * backdrop, so the operator could not read it. It runs again, with the time that is left, when the last
+     * modal closes. `since` is the start of the run that is in progress, or null while the timer is paused.
+     */
+    private infoTimers = new Map<number, { left: number; since: number | null; handle: ReturnType<typeof setTimeout> | null }>();
+
+    /** Pause the timers when a modal opens. Run them again when the last modal closes. Clear the errors of the modal actions then. */
+    private stopModalWatch = onModalChange((open) => {
+        if (open) {
+            for (const timer of this.infoTimers.values()) {
+                if (timer.handle === null || timer.since === null) continue;
+                clearTimeout(timer.handle);
+                timer.left = Math.max(0, timer.left - (Date.now() - timer.since));
+                timer.handle = null;
+                timer.since = null;
+            }
+        } else {
+            for (const id of [...this.infoTimers.keys()]) this.runInfoTimer(id);
+            this.actionErrors = {};
+        }
+    });
+
+    private startInfoTimer(id: number, ms: number): void {
+        this.infoTimers.set(id, { left: ms, since: null, handle: null });
+        if (!modalOpen()) this.runInfoTimer(id);
+    }
+
+    private runInfoTimer(id: number): void {
+        const timer = this.infoTimers.get(id);
+        if (!timer || timer.handle !== null) return;
+        timer.since = Date.now();
+        timer.handle = setTimeout(() => this.dismissToast(id), timer.left);
+    }
+
+    private stopInfoTimer(id: number): void {
+        const timer = this.infoTimers.get(id);
+        if (timer?.handle != null) clearTimeout(timer.handle);
+        this.infoTimers.delete(id);
     }
 
     /** Toasts that already have a timer for the detail of their task. */
@@ -412,11 +454,35 @@ class Store {
     }
 
     dismissToast(id: number): void {
+        this.stopInfoTimer(id);
         this.toasts = this.toasts.filter((t) => t.id !== id);
     }
 
     private fail(e: unknown): void {
         this.toast(ipc.errorText(e));
+    }
+
+    /**
+     * The error of the last action of a modal (the employee form, the settings panel), by area. The modal shows it as a
+     * line in the form, because the toast stays under the backdrop while the modal is open. The same text also goes to a
+     * toast, as before. The modal clears it before the next try, and it clears at once when the last modal closes.
+     */
+    actionErrors = $state.raw<Record<string, string>>({});
+
+    /** Clear (`null`) or set the inline error of one area. */
+    setActionError(area: string, text: string | null): void {
+        if (text === null) {
+            if (!(area in this.actionErrors)) return;
+            const { [area]: _gone, ...rest } = this.actionErrors;
+            this.actionErrors = rest;
+        } else this.actionErrors = { ...this.actionErrors, [area]: text };
+    }
+
+    /** An action of a modal failed: the inline line of `area` and a toast, both with the same text. */
+    private failIn(area: string, e: unknown): void {
+        const raw = ipc.errorText(e);
+        this.setActionError(area, describeError(raw).text);
+        this.toast(raw);
     }
 
     // ---- floors ----
@@ -1070,13 +1136,14 @@ class Store {
     // ---- employees ----
 
     async saveEmployee(employee: Employee): Promise<boolean> {
+        this.setActionError("employee", null);
         const path = this.openPath;
         if (!path) return false;
         try {
             this.applyView(await ipc.employeeSave(path, employee));
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn("employee", e);
             return false;
         }
     }
@@ -1276,59 +1343,64 @@ class Store {
 
     /** Replace the custom models of one kind. Returns true on success. */
     async setCustomModels(kind: ModelKind, names: string[]): Promise<boolean> {
+        this.setActionError(`models:${kind}`, null);
         try {
             this.models = await ipc.modelsSetCustom(kind, names);
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn(`models:${kind}`, e);
             return false;
         }
     }
 
     /** Store the image model of the logo. Returns true on success. */
     async setImageModel(model: string): Promise<boolean> {
+        this.setActionError("image", null);
         try {
             this.settings = await ipc.settingsSet(null, model);
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn("image", e);
             return false;
         }
     }
 
     /** Store the OpenAI key in the app config. An empty text removes it. Returns true on success. */
     async setOpenaiKey(key: string): Promise<boolean> {
+        this.setActionError("keys", null);
         try {
             this.settings = await ipc.settingsSet(key.trim(), null);
             // A stored key makes an old `NO_KEY:` error out of date.
             if (key.trim() !== "") this.clearLogoCallError();
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn("keys", e);
             return false;
         }
     }
 
     /** Write the floor defaults of the open floor. Returns true on success. */
     async setFloorDefaults(defaults: FloorDefaults): Promise<boolean> {
+        this.setActionError("defaults", null);
         const path = this.openPath;
         if (!path) return false;
         try {
             this.applyView(await ipc.floorDefaultsSet(path, defaults));
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn("defaults", e);
             return false;
         }
     }
 
     async setProgram(name: ProgramName, path: string): Promise<boolean> {
+        this.setActionError(`program:${name}`, null);
         try {
             this.programs = await ipc.programsSet(name, path.trim());
             this.programTests = { ...this.programTests, [name]: null };
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn(`program:${name}`, e);
             return false;
         }
     }
@@ -1355,11 +1427,12 @@ class Store {
 
     /** The switch "Desktop notification when an agent asks a question". Returns true on success. */
     async setNotifyOnQuestion(on: boolean): Promise<boolean> {
+        this.setActionError("interface", null);
         try {
             this.settings = await ipc.settingsSet(null, null, on);
             return true;
         } catch (e) {
-            this.fail(e);
+            this.failIn("interface", e);
             return false;
         }
     }

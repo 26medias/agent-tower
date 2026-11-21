@@ -131,6 +131,8 @@ export interface MockControl {
     setResumable(path: string, slugs: string[]): void;
     /** The next `team_resume` start of this employee fails (a notice follows). */
     failResume(slug: string): void;
+    /** The next call of this command is refused with this text (an error of the call, as the real app gives it). One time. */
+    failNext(command: string, text: string): void;
     /** Stop the automatic status changes of all sessions (`true`), or let them run (`false`). A check that needs a fixed status uses it. */
     freeze(on: boolean): void;
     /** Set the status of a session now, like the real CLI does. `session-changed` follows. */
@@ -287,6 +289,8 @@ export function createMockBackend(): Backend {
     const failOnce = new Set(["start:eng-sam", "resume:pm"]);
     // Employees whose start in `team_resume` fails one time (`MockControl.failResume`).
     const failResume = new Set<string>();
+    // Commands whose next call is refused one time (`MockControl.failNext`), with the text of the refusal.
+    const failNext = new Map<string, string>();
     // `MockControl.freeze`: no automatic status change while this is true.
     let frozen = false;
 
@@ -1390,6 +1394,9 @@ export function createMockBackend(): Backend {
         failResume(slug) {
             failResume.add(slug);
         },
+        failNext(command, text) {
+            failNext.set(command, text);
+        },
         freeze(on) {
             frozen = on;
             if (on) {
@@ -1487,6 +1494,11 @@ export function createMockBackend(): Backend {
             // A log of calls, for the e2e check (`window.__towerMockCalls`).
             const log = ((globalThis as Record<string, unknown>).__towerMockCalls ??= []) as unknown[];
             log.push({ command, args: a && "channel" in a ? { ...a, channel: "[channel]" } : a });
+            const refusal = failNext.get(command);
+            if (refusal !== undefined) {
+                failNext.delete(command);
+                throw refusal;
+            }
             return (await handle(command, a)) as T;
         },
         async listen<T>(event: string, handler: (payload: T) => void): Promise<Unlisten> {

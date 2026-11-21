@@ -6,7 +6,7 @@
 //   - Tab and Shift+Tab stay inside the modal;
 //   - everything behind the modal is `inert` and `aria-hidden`. A browser with no `inert` gets a
 //     fallback: the focusable elements get `tabindex="-1"`, and `[data-inert-fallback]` in app.css
-//     blocks the pointer. An element with `data-keep-live` (the toasts) stays usable;
+//     blocks the pointer. The toasts are inert too: they stay under the backdrop and wait;
 //   - Escape closes the modal. The key never reaches the terminal behind it. Key, input and paste
 //     events that come from xterm are stopped at the capture phase of the document, and the
 //     terminal is blurred when the modal opens;
@@ -117,7 +117,6 @@ function isolate(node: HTMLElement): HTMLElement[] {
     while (el && el !== document.body && el.parentElement) {
         for (const sibling of el.parentElement.children) {
             if (sibling === el || !(sibling instanceof HTMLElement)) continue;
-            if (sibling.hasAttribute("data-keep-live")) continue;
             if (["SCRIPT", "STYLE", "LINK", "TEMPLATE"].includes(sibling.tagName)) continue;
             mark(sibling);
             marked.push(sibling);
@@ -189,11 +188,11 @@ export function modal(node: HTMLElement, options: ModalOptions) {
         }
     };
 
-    // The focus never leaves the modal, except to a toast (a toast can hold an error to close).
+    // The focus never leaves the modal.
     const onFocusIn = (e: FocusEvent): void => {
         if (!isTop()) return;
         const target = e.target;
-        if (!(target instanceof Element) || node.contains(target) || target.closest("[data-keep-live]")) return;
+        if (!(target instanceof Element) || node.contains(target)) return;
         (firstFocus(node) ?? node).focus({ preventScroll: true });
     };
 

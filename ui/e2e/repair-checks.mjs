@@ -397,11 +397,12 @@ export async function repairChecks({ page, check, url, shots }) {
     const box3 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox(), tabs: await page.locator(".tabs").boundingBox() };
     check("D10: with 3 toasts the office, the tabs and the terminal area are exactly where they were", JSON.stringify(box0) === JSON.stringify(box3), JSON.stringify({ box0, box3 }));
     const toastBoxes = await page.$$eval(".toast", (els) => els.map((e) => ({ ...e.getBoundingClientRect().toJSON(), text: e.querySelector(".text").textContent })));
-    // Changed on purpose (last repair D-a): the stack is at the bottom of the centre column, so the NEWEST toast is the lowest, nearest to the corner.
-    check("D10: the newest toast is the lowest, nearest to the corner", toastBoxes[2].text === "Third notice." && toastBoxes[0].text === "First notice." && toastBoxes[2].y > toastBoxes[1].y && toastBoxes[1].y > toastBoxes[0].y, JSON.stringify(toastBoxes.map((b) => [b.text, b.y])));
-    // Changed on purpose (last repair D-a): the toasts are at the bottom right of the centre column, over the terminal area, not over the board and not over the tabs.
+    // Changed on purpose (toast place): the stack is at the TOP right of the terminal area and grows down, so the NEWEST toast is the
+    // first one, at the top, nearest to the anchor.
+    check("D10: the newest toast is at the top, nearest to the anchor", toastBoxes[0].text === "Third notice." && toastBoxes[2].text === "First notice." && toastBoxes[0].y < toastBoxes[1].y && toastBoxes[1].y < toastBoxes[2].y, JSON.stringify(toastBoxes.map((b) => [b.text, b.y])));
+    // Changed on purpose (toast place): the toasts are at the top right of the terminal area, 6 px under its top, 10 px inside the right edge of the centre column, and not over the board.
     const boardLeft = (await page.locator(".board").boundingBox()).x;
-    check("D10: the toasts are at the bottom right of the centre column: left of the board, under the tabs, over the terminal area", toastBoxes.every((b) => b.x + b.width <= boardLeft && b.x + b.width >= boardLeft - 30 && b.y >= box3.area.y && b.y + b.height <= box3.area.y + box3.area.height), JSON.stringify(toastBoxes[2]));
+    check("D10: the toasts are at the top right of the terminal area: 10 px left of the board, 6 px under the top of the area", toastBoxes.every((b) => Math.abs(b.x + b.width - (boardLeft - 10)) <= 1 && b.y >= box3.area.y + 5 && b.y + b.height <= box3.area.y + box3.area.height), JSON.stringify([toastBoxes[0], box3.area]));
     check("D10: a toast does not take the focus", (await page.evaluate(() => document.activeElement?.className)) === focusBefore);
     await M("notice", FLOOR, "Fourth notice");
     await M("notice", FLOOR, "Fifth notice");
@@ -485,14 +486,27 @@ export async function repairChecks({ page, check, url, shots }) {
     await modalChecks("report overlay", () => page.click('[data-testid="open-report"]'), '[data-testid="reader"]', '[data-testid="open-report"]', (f) => f.tag === "BUTTON");
     await page.getByRole("button", { name: /Back/ }).click();
 
-    // The edit form too, and a click on the backdrop; a toast stays usable while a modal is open.
+    // The edit form too, and a click on the backdrop. Changed on purpose (toast place): a toast does NOT stay usable while a modal
+    // is open. It stays under the backdrop, it is inert, and it takes no pointer event. It can be closed after the modal closes.
     await selectEmp("ceo");
     await page.click(".bar button.edit");
     await page.locator('form[aria-label="Edit employee"]').waitFor();
     await M("notice", FLOOR, "A message while a modal is open");
     await page.waitForSelector(".toast");
+    const underModal = await page.evaluate(() => {
+        const t = document.querySelector(".toast").getBoundingClientRect();
+        const top = document.elementFromPoint(t.left + t.width / 2, t.top + t.height / 2);
+        const host = document.querySelector('[data-testid="toasts"]');
+        return { covered: !top?.closest(".toast"), inert: host.inert === true, ariaHidden: host.getAttribute("aria-hidden"), pointer: getComputedStyle(document.querySelector(".toast")).pointerEvents };
+    });
+    check("D1: while a modal is open a toast is under the backdrop and inert (it cannot be clicked)", underModal.covered && underModal.inert && underModal.ariaHidden === "true", JSON.stringify(underModal));
+    await page.keyboard.press("Escape");
+    await page.locator('form[aria-label="Edit employee"]').waitFor({ state: "detached" });
     await page.locator('.toast button[aria-label="Dismiss"]').click();
-    check("D1: a toast can be closed while a modal is open", (await page.locator(".toast").count()) === 0);
+    check("D1: after the modal closes a toast can be closed again", (await page.locator(".toast").count()) === 0);
+    await selectEmp("ceo");
+    await page.click(".bar button.edit");
+    await page.locator('form[aria-label="Edit employee"]').waitFor();
     await page.keyboard.press("Escape");
     await page.locator('form[aria-label="Edit employee"]').waitFor({ state: "detached" });
     check("D1: the edit form closes with Escape and the focus is back on edit", await page.evaluate(() => !!document.activeElement?.matches("button.edit")));

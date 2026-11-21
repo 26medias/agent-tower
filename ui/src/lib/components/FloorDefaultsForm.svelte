@@ -7,6 +7,7 @@
     import { afterCliChange, afterModelChange, effortChoices, effortList, listFor, modelChoices } from "$lib/models";
     import { POLICY_IDS, POLICY_INFO } from "$lib/policies";
     import { store } from "$lib/store.svelte";
+    import ActionError from "./ActionError.svelte";
     import type { CliKind, FloorDefaults, Policy } from "$lib/types";
 
     const initial = untrack(() => store.floorView?.defaults ?? null);
@@ -119,6 +120,7 @@
     <p class="hint">
         An employee with no model or effort of its own gets these. With a CLI set, only employees of that CLI get them.
     </p>
+    <ActionError area="defaults" />
     <div class="buttons">
         {#if savedNote}
             <span class="saved" role="status" data-testid="defaults-saved">Saved</span>

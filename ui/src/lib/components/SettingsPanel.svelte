@@ -5,6 +5,7 @@
     import { onMount, tick } from "svelte";
     import { modal } from "$lib/modal";
     import { store } from "$lib/store.svelte";
+    import ActionError from "./ActionError.svelte";
     import FloorDefaultsForm from "./FloorDefaultsForm.svelte";
     import ModelListEditor from "./ModelListEditor.svelte";
     import PermissionsForm from "./PermissionsForm.svelte";
@@ -99,6 +100,7 @@
                     <button type="button" class="danger remove-key" disabled={keyBusy} onclick={() => void removeKey()}>remove</button>
                 {/if}
             </form>
+            <ActionError area="keys" />
             <p class="hint">
                 The panel never shows the key. A key that you paste here is stored in the app config file. The app uses it before the
                 environment variable.
@@ -118,6 +120,7 @@
                     <option value={choice.value}>{choice.label}</option>
                 {/each}
             </select>
+            <ActionError area="image" />
         </section>
 
         <section data-section="models" aria-label="Models">
@@ -177,6 +180,7 @@
                 />
                 <span>Desktop notification when an agent asks a question</span>
             </label>
+            <ActionError area="interface" />
             <p class="hint">The app shows it only while its window has no focus, or is minimized. A click on it does nothing.</p>
         </section>
     </div>

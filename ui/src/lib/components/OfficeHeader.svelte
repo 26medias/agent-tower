@@ -438,12 +438,12 @@
         text-transform: none;
     }
 
+    /* The main button never cuts its text. When the info panel is narrow (200 px), the text wraps onto two lines. */
     .buttons .main {
         flex: 0 1 auto;
         min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        white-space: normal;
+        overflow-wrap: anywhere;
     }
 
     .buttons .resume-team {

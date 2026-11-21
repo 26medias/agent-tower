@@ -249,13 +249,51 @@ describe("the fold of the status rows", () => {
             [2, status("eng", "is working")],
         ]);
         expect(texts(list)).toEqual(["eng is working", "eng asks a question", "eng is working"]);
-        // A message that is FROM the employee also lies between.
-        const sent = run([
+        // A start row of the same employee also lies between.
+        const started = run([
+            [0, status("eng", "is working")],
+            [1, other("started", "eng", { text: "Ada started eng" })],
+            [2, status("eng", "is working")],
+        ]);
+        expect(texts(started)).toEqual(["eng is working", "Ada started eng", "eng is working"]);
+    });
+
+    it("folds across a message, to the employee or from it (the live run showed \"Maya answered\" twice)", () => {
+        // The order of the live run "dc-activity": Maya answers, then her message to Eli is delivered, then Eli's message
+        // to Maya, then Eli answers (no row: Eli's last row is its own message), then Maya works and answers again. One
+        // "Maya answered" row is left, the newest.
+        const list = run([
+            [0, status("pm", "is working")],
+            [1, status("pm", "answered")],
+            [2, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: say MANGO" })],
+            [3, other("message", "pm", { fromSlug: "eng", text: "Eli \u2192 Maya: MANGO" })],
+            [4, status("eng", "answered")],
+            [5, status("pm", "is working")],
+            [6, status("pm", "answered")],
+        ]);
+        expect(texts(list)).toEqual(["Maya \u2192 Eli: say MANGO", "Eli \u2192 Maya: MANGO", "pm answered"]);
+        expect(list.filter((l) => l.kind === "session" && l.slug === "pm")).toHaveLength(1);
+    });
+
+    it("adds no \"answered\" row after a message that the same employee sent, and drops its old working row", () => {
+        const list = run([
             [0, status("pm", "is working")],
             [1, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: hi" })],
             [2, status("pm", "answered")],
         ]);
-        expect(texts(sent)).toEqual(["pm is working", "Maya \u2192 Eli: hi", "pm answered"]);
+        expect(texts(list)).toEqual(["Maya \u2192 Eli: hi"]);
+        // Only "answered" is skipped. Another status after the message is a row, and a message TO the employee does not skip it.
+        const idle = run([
+            [0, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: hi" })],
+            [1, status("pm", "is idle")],
+        ]);
+        expect(texts(idle)).toEqual(["Maya \u2192 Eli: hi", "pm is idle"]);
+        const received = run([
+            [0, status("eng", "is working")],
+            [1, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: hi" })],
+            [2, status("eng", "answered")],
+        ]);
+        expect(texts(received)).toEqual(["Maya \u2192 Eli: hi", "eng answered"]);
     });
 
     it("folds across a row that is about another employee", () => {

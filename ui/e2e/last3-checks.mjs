@@ -78,13 +78,15 @@ export async function last3Checks({ page, check, url, shots }) {
             const rows = [...document.querySelectorAll(".pane:not(.hidden) .xterm-rows > div")].map(box);
             return {
                 toasts: [...document.querySelectorAll('[data-testid="toasts"] .toast')].map(box),
+                // The box of the stack. It scrolls inside, so a toast can lie under its bottom edge: the box is what must stay in place.
+                stack: box(document.querySelector('[data-testid="toasts"]')),
                 board: box(document.querySelector(".board")),
                 strip: box(document.querySelector('[data-testid="top-strip"]')),
                 office: box(document.querySelector(".office")),
                 tabs: box(document.querySelector(".tabs")),
                 area: box(document.querySelector('[data-testid="terminal-area"]')),
-                // The top of the second line from the bottom: the last two lines of the terminal are under it.
-                lastTwoTop: rows.length >= 2 ? rows[rows.length - 2].top : null,
+                // The top of the 8th line from the bottom: the last 8 lines of the terminal (the input of the CLI and its status lines) are under it.
+                last8Top: rows.length >= 8 ? rows[rows.length - 8].top : null,
             };
         });
     const hit = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
@@ -128,21 +130,23 @@ export async function last3Checks({ page, check, url, shots }) {
             const others = [["board", g.board], ["top strip", g.strip], ["office", g.office], ["tabs", g.tabs]];
             const covered = others.filter(([, b]) => g.toasts.some((t) => hit(t, b))).map(([n]) => n);
             check(`D-a ${label} with ${count} toast(s): the stack covers no part of the task board, the top strip, the office or the tabs`, covered.length === 0 && g.toasts.length === count, JSON.stringify({ covered, n: g.toasts.length }));
-            check(`D-a ${label} with ${count} toast(s): the stack is in the terminal area, above the last two terminal lines`,
-                g.lastTwoTop !== null && g.toasts.every((t) => t.bottom <= g.lastTwoTop && t.top >= g.area.top && t.right <= g.board.left && t.left >= g.area.left),
-                JSON.stringify({ lastTwoTop: g.lastTwoTop, areaTop: g.area.top, toasts: g.toasts.map((t) => [Math.round(t.top), Math.round(t.bottom)]) }));
+            // Changed on purpose (toast place): the stack is at the TOP right of the terminal area and never reaches into the last 8 terminal lines.
+            check(`D-a ${label} with ${count} toast(s): the stack is in the terminal area, above the last 8 terminal lines`,
+                g.last8Top !== null && g.stack.bottom <= g.last8Top && g.stack.top >= g.area.top && g.stack.right <= g.board.left && g.stack.left >= g.area.left && g.toasts.every((t) => t.top >= g.area.top && t.top < g.last8Top && t.right <= g.board.left && t.left >= g.area.left),
+                JSON.stringify({ last8Top: g.last8Top, areaTop: g.area.top, stackBottom: g.stack.bottom, toasts: g.toasts.map((t) => [Math.round(t.top), Math.round(t.bottom)]) }));
             const reach = await detailReachable();
             check(`D-a ${label} with ${count} toast(s): the back button and the status of the open task detail can be clicked`, reach.back === "reachable" && reach.status === "reachable", JSON.stringify(reach));
-            const bottoms = g.toasts.map((t) => t.bottom);
-            check(`D-a ${label} with ${count} toast(s): the newest toast is the lowest, nearest to the corner`, bottoms.every((b, i) => i === 0 || b > bottoms[i - 1]), JSON.stringify(bottoms));
+            const tops = g.toasts.map((t) => t.top);
+            check(`D-a ${label} with ${count} toast(s): the newest toast is the highest, nearest to the anchor`, tops.every((b, i) => i === 0 || b > tops[i - 1]), JSON.stringify(tops));
             await shot(`toasts-${count}-${label}.png`);
         }
-        // A fifth toast: at most 4 show, and a line counts the older ones. It is on top of the stack.
+        // A fifth toast: at most 4 show, and a line counts the older ones. It is under the stack.
         await M("notice", FLOOR, "Could not resume Maya 5: the program was not found.");
         await page.waitForSelector('[data-testid="toasts-more"]');
         const g5 = await geometry();
-        check(`D-a ${label}: at most 4 toasts show, with a line for the older ones above them, and still no cover`,
-            g5.toasts.length === 4 && !g5.toasts.some((t) => [g5.board, g5.strip, g5.office, g5.tabs].some((b) => hit(t, b))));
+        const moreBox = await page.locator('[data-testid="toasts-more"]').evaluate((el) => el.getBoundingClientRect().top);
+        check(`D-a ${label}: at most 4 toasts show, with a line for the older ones under them, and still no cover`,
+            g5.toasts.length === 4 && moreBox >= Math.max(...g5.toasts.map((t) => t.bottom)) && !g5.toasts.some((t) => [g5.board, g5.strip, g5.office, g5.tabs].some((b) => hit(t, b))));
         await clearToasts();
     }
 
@@ -409,16 +413,20 @@ export async function last3Checks({ page, check, url, shots }) {
     await M("setStatus", pm2, "working");
     await pause();
     const pmRows = await rowsOf("Maya (Project Manager)");
-    // Oldest to newest: "is idle" (the start), "is working", the question, "is idle" (after the question) that "is working" then replaced.
+    // Oldest to newest. Changed on purpose (activity fold): the messages that Maya sent earlier do not stop the fold, so her "is working" row
+    // replaced her "is idle" row of the start. Then the question row, then "is idle" (after the question) that the last "is working" replaced.
     check("D-c: a question row is never folded away, and the status row after it replaces the older status row after it",
-        JSON.stringify(pmRows) === JSON.stringify(["Maya (Project Manager) is working", "Maya (Project Manager) asks a question", "Maya (Project Manager) is working", "Maya (Project Manager) is idle"]), JSON.stringify(pmRows));
+        JSON.stringify(pmRows) === JSON.stringify(["Maya (Project Manager) is working", "Maya (Project Manager) asks a question", "Maya (Project Manager) is working"]), JSON.stringify(pmRows));
     await M("deliverMessage", FLOOR, "pm", "eng-lin", "A message from Maya lies between two status rows of Maya.");
     await pause();
     await M("setStatus", pm2, "idle");
     await pause();
     const pmRows2 = await rowsOf("Maya (Project Manager)");
-    check("D-c: a message row between two status rows stops the fold: the old status row stays and a new one comes",
-        JSON.stringify(pmRows2) === JSON.stringify(["Maya (Project Manager) answered", "Maya (Project Manager) is working", ...pmRows.slice(1)]), JSON.stringify(pmRows2));
+    // Changed on purpose (activity fold): a message does NOT stop the fold. Maya sent a message, then her turn ended: the
+    // new "answered" row adds nothing (the message is the news of that turn), and her old "is working" row goes. The
+    // question row stays.
+    check("D-c: Maya sends a message, then answers: no new \"answered\" row, her old \"is working\" row goes, her question row stays",
+        JSON.stringify(pmRows2) === JSON.stringify(pmRows.slice(1)) && pmRows2.length === pmRows.length - 1, JSON.stringify(pmRows2));
     check("D-c: the list is still newest first, and it has no row about a status twice for one employee", (await rows().count()) === (await lineTexts()).length);
     await activity.screenshot({ path: join(shots, "activity-list-2560.png") });
     await shot("activity-2560.png");
