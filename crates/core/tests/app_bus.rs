@@ -2322,34 +2322,12 @@ fn a_message_in_question_is_not_given_by_the_stop_hook() {
 }
 
 #[test]
-fn the_setup_session_and_a_codex_session_never_get_a_block() {
+fn the_setup_session_never_gets_a_block() {
     let rig = Rig::new();
     rig.create_floor();
-    rig.add_employee("eng", Some("ceo"));
-    rig.add_employee("cdx", Some("ceo"));
-    rig.make_codex("cdx");
     rig.start("ceo");
     rig.live_idle("ceo");
     raw_program(&rig);
-
-    // Codex: a message waits, the session works, a Stop asks for an answer.
-    let cdx = rig.start("cdx").session_id;
-    raw_work(&rig, &cdx);
-    rig.tool("ceo", "send", json!({"to": "cdx", "text": "for codex"}));
-    assert_eq!(rig.db().count_pending_messages("cdx").unwrap(), 1);
-    assert!(
-        rig.stop_request(&cdx, false).is_none(),
-        "Codex gets no block"
-    );
-    rig.events.wait_status(&cdx, Status::Idle);
-    // The paste path delivers it (to the terminal).
-    wait_for("the paste for Codex", || {
-        echoed(&rig, &cdx).contains("for codex")
-    });
-    wait_for("the row is delivered", || {
-        rig.db().count_pending_messages("cdx").unwrap() == 0
-    });
-
     // The setup session: a message for the slug `setup` (stored by hand: no tool can send one).
     let setup = rig
         .tower
@@ -2367,6 +2345,147 @@ fn the_setup_session_and_a_codex_session_never_get_a_block() {
         "setup gets no block"
     );
     assert_eq!(rig.db().count_pending_messages("setup").unwrap(), 1);
+}
+
+/// A rig with a live `ceo` (fake-cli) and a raw CODEX `eng` session that the test drives. Codex
+/// stays `starting` until its first hook event, so the session is `working` after the prompt.
+fn rig_with_raw_codex() -> (Rig, String) {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.make_codex("eng");
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    raw_program(&rig);
+    let id = rig.start("eng").session_id;
+    raw_work(&rig, &id);
+    (rig, id)
+}
+
+/// Spec item N14 (closed on 2026-11-21): a Codex agent acts on the text of a blocked stop, so a
+/// Codex employee gets messages at its `Stop` like a Claude employee. Probe evidence:
+/// `/tmp/agent-tower-review/gaps/stop-probe/` (3 of 3 acted).
+#[test]
+fn a_codex_stop_with_a_waiting_message_returns_the_block_answer_and_keeps_working() {
+    let (rig, eng) = rig_with_raw_codex();
+    rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "say the word KIWI"}),
+    );
+    assert_eq!(rig.db().count_pending_messages("eng").unwrap(), 1);
+    let answer = rig.stop_request(&eng, false).expect("Codex gets a block");
+    assert_eq!(answer["decision"], "block");
+    assert_eq!(
+        answer["reason"],
+        stop_reason(&[delivered("Ada", "CEO", "ceo", "say the word KIWI")]).as_str()
+    );
+    wait_for("the row is delivered", || {
+        rig.db().count_pending_messages("eng").unwrap() == 0
+    });
+    // The turn goes on: no `idle` between, and no paste.
+    std::thread::sleep(QUIET);
+    assert_eq!(rig.events.latest(&eng).unwrap().status, Status::Working);
+    assert_eq!(
+        rig.events.statuses(&eng),
+        [Status::Starting, Status::Working]
+    );
+    assert!(!echoed(&rig, &eng).contains("KIWI"), "no paste");
+    // The next `Stop` has `stop_hook_active` (Codex sets it too, as in the probe) and no new
+    // message: no answer, and the turn ends.
+    assert!(rig.stop_request(&eng, true).is_none());
+    rig.events.wait_status(&eng, Status::Idle);
+}
+
+#[test]
+fn a_codex_stop_is_blocked_five_times_in_a_row_then_the_paste_path_delivers() {
+    let (rig, eng) = rig_with_raw_codex();
+    // Codex sends `stop_hook_active` (PROBED: false at the first stop, true at the stop after a
+    // block). The first four stops after the first carry it, and a new message still blocks; the
+    // counter of the app (`STOP_BLOCK_LIMIT`) is the guard that ends the row.
+    for number in 1..=5 {
+        let text = format!("message {number}");
+        rig.tool("ceo", "send", json!({"to": "eng", "text": text}));
+        let answer = rig
+            .stop_request(&eng, number > 1)
+            .unwrap_or_else(|| panic!("block {number}"));
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("> {text}")),
+            "{answer}"
+        );
+        wait_for("the row is delivered", || {
+            rig.db().count_pending_messages("eng").unwrap() == 0
+        });
+    }
+    rig.tool("ceo", "send", json!({"to": "eng", "text": "message 6"}));
+    assert!(
+        rig.stop_request(&eng, true).is_none(),
+        "the sixth stop in a row is not blocked"
+    );
+    // The turn ends, and the paste path delivers the sixth message to the Codex terminal.
+    rig.events.wait_status(&eng, Status::Idle);
+    wait_for("the paste of the sixth message", || {
+        echoed(&rig, &eng).contains("message 6")
+    });
+    wait_for("the row is delivered", || {
+        rig.db().count_pending_messages("eng").unwrap() == 0
+    });
+    assert_eq!(
+        rig.events
+            .statuses(&eng)
+            .iter()
+            .filter(|s| **s == Status::Idle)
+            .count(),
+        1,
+        "the five blocked stops kept `working`: {:?}",
+        rig.events.statuses(&eng)
+    );
+}
+
+/// The whole path with the real programs and the Codex flavour of the fake CLI: `fake-cli --kind
+/// codex` runs the real `tower-hook`, the hook asks the app, the answer blocks the stop, and the
+/// fake goes on with the reason. The status never shows `idle` in between, and no paste is written.
+#[test]
+fn the_real_hook_delivers_to_a_codex_session_at_the_end_of_the_turn() {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.make_codex("eng");
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    lock(&rig.shared.extra_args).extend(["--work-ms".into(), "1500".into()]);
+    let eng = rig.start("eng").session_id;
+    rig.events.wait_status(&eng, Status::Working);
+    rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "please also do this"}),
+    );
+    rig.events.wait("the turn ends", |e| {
+        e.statuses(&eng).last() == Some(&Status::Idle)
+            && e.statuses(&eng).contains(&Status::Working)
+    });
+    wait_for("the hook text reached the CLI", || {
+        rig.hook_text(&eng).is_some()
+    });
+    assert_eq!(
+        rig.hook_texts(&eng),
+        [delivered("Ada", "CEO", "ceo", "please also do this")]
+    );
+    // Codex has no `idle` before its first prompt, so the statuses are shorter than for Claude.
+    assert_eq!(
+        rig.events.statuses(&eng),
+        [Status::Starting, Status::Working, Status::Idle]
+    );
+    assert!(
+        rig.record(&eng).is_empty(),
+        "no paste: the CLI got no typed byte"
+    );
+    let rows = rig.db().all_messages().unwrap();
+    assert!(rows[0].delivered_at.is_some(), "the row is delivered");
 }
 
 #[test]

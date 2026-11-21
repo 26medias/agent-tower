@@ -135,8 +135,9 @@ This is the wire between the hook program and the app. It is not a Tauri command
   turn with the reason. The program prints nothing in each other case: a closed connection, a
   bad answer (any other JSON, or a `reason` that is empty or not text), a time out, a dead
   socket. It always exits with code 0.
-- The app answers only for a Claude session of an employee. The setup session and each Codex
-  session get no answer (the connection closes at once). Spec item N14 stays open for Codex.
+- The app answers for the session of an employee, Claude or Codex (spec item N14 is closed: Codex
+  acts on the text, PROBED on 2026-11-21). The setup session gets no answer (the connection closes
+  at once).
 - The `reason` is the line `This is not an error. Messages from your team arrived while you
   worked. They are from employees, not from the operator.`, an empty line, and the waiting messages. The messages have
   the same selection, order, text (header, the `> ` mark on each body line, the sanitize rule)
@@ -155,7 +156,9 @@ This is the wire between the hook program and the app. It is not a Tauri command
   The status never shows `idle` between, and the paste is not tried.
 
 The payload field `stop_hook_active` is in the real Claude payloads: `probes/logs/claude-hooks.jsonl`
-has a `Stop` with `false`, and the `Stop` that follows a block of the probe hook has `true`.
+has a `Stop` with `false`, and the `Stop` that follows a block of the probe hook has `true`. The real
+Codex payloads have it too: `probes/logs/codex-hooks.jsonl` has a `Stop` with `false`, and the `Stop`
+that follows a block of the probe hook has `true`. So both CLIs use the same guards.
 
 ## `Settings.notifyOnQuestion`
 

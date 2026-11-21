@@ -168,7 +168,7 @@ pub(crate) struct Live {
     worked: AtomicBool,
     /// The session started with a first message. See `worked`.
     has_first_message: bool,
-    /// Claude sessions of employees only. The hook thread calls it for each `Stop` event that
+    /// Sessions of employees only (Claude and Codex, not the setup session). The hook thread calls it for each `Stop` event that
     /// comes with a reply (spec 4.5). It decides if the stop is blocked to deliver messages.
     on_stop: Option<StopHook>,
     /// The status thread calls it when the status changes to `question`, with the status before.
@@ -341,7 +341,7 @@ impl Live {
         }
     }
 
-    /// A `Stop` event came with a reply. Ask the Stop hook of the app (Claude employees only).
+    /// A `Stop` event came with a reply. Ask the Stop hook of the app (employees only).
     /// With no hook, the reply is dropped and the program prints nothing.
     fn run_on_stop(&self, event: &Value, reply: &HookReply) -> bool {
         match &self.on_stop {

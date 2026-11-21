@@ -1392,9 +1392,17 @@ impl TowerCore {
             )));
         }
         // Codex with no stored ID starts fresh, so it gets the default first message.
+        // A Codex session sends no hook event until its first prompt, also after a resume. Without
+        // a prompt it stays in `starting`, and after 20 s the status becomes a false `question`
+        // (found live on 2026-11-21: the resumed TUI was idle). So a Codex resume with no message
+        // gets a short default message. A Claude resume sends `SessionStart` by itself and gets none.
         let message = message.filter(|m| !m.trim().is_empty());
         let first_message = match (&previous, message) {
-            (Some(_), message) => message,
+            (Some(_), Some(message)) => Some(message),
+            (Some(_), None) if employee.cli == CliKind::Codex => {
+                Some(default_resume_message(&employee))
+            }
+            (Some(_), None) => None,
             (None, message) => Some(message.unwrap_or_else(|| default_first_message(&employee))),
         };
 
@@ -1507,8 +1515,10 @@ impl TowerCore {
                 .map(|guard| self.status_hook(&floor.path, slug, guard.token())),
             has_first_message,
             on_question: Some(self.question_hook(&floor, setup_cli.is_some())),
-            // The Stop hook delivers messages to Claude employees only (spec 4.5, item N14).
-            on_stop: (token_guard.is_some() && employee.cli == CliKind::Claude)
+            // The Stop hook delivers messages to Claude and Codex employees (spec 4.5, item N14,
+            // closed). The setup session has no token, so it has no hook.
+            on_stop: token_guard
+                .is_some()
                 .then(|| self.stop_hook(&floor.path, slug)),
         });
         locked(&self.registry)
@@ -1954,6 +1964,14 @@ fn repair_orphans(store: &FloorStore) {
             let _ = store.db().set_ended_at(&record.app_session_id, now);
         }
     }
+}
+
+/// The first message of a Codex session that the operator resumes with no text (see `start_session`).
+fn default_resume_message(employee: &Employee) -> String {
+    format!(
+        "The operator resumed your session, {}. Say that you are ready in one short sentence.",
+        employee.name
+    )
 }
 
 fn default_first_message(employee: &Employee) -> String {

@@ -120,16 +120,19 @@ export async function last3Checks({ page, check, url, shots }) {
         await page.waitForSelector('[data-testid="merge"]');
         await page.locator('[data-testid="merge"]').click();
         await page.waitForSelector('[data-testid="toasts"] .toast');
+        // The stack shows the toasts that fit whole when they are folded, so the number on view can be lower than the number sent.
+        let pushed = await page.locator(".toast").count(); // the toast of the blocked merge is the first one
         for (const count of [1, 4]) {
-            while ((await page.locator(".toast").count()) < count) {
-                await M("notice", FLOOR, `Could not resume Maya ${await page.locator(".toast").count()}: the program was not found. Change the path in Settings.`);
+            while (pushed < count) {
+                pushed++;
+                await M("notice", FLOOR, `Could not resume Maya ${pushed}: the program was not found. Change the path in Settings.`);
                 await page.waitForTimeout(80);
             }
             await page.waitForTimeout(250);
             const g = await geometry();
             const others = [["board", g.board], ["top strip", g.strip], ["office", g.office], ["tabs", g.tabs]];
             const covered = others.filter(([, b]) => g.toasts.some((t) => hit(t, b))).map(([n]) => n);
-            check(`D-a ${label} with ${count} toast(s): the stack covers no part of the task board, the top strip, the office or the tabs`, covered.length === 0 && g.toasts.length === count, JSON.stringify({ covered, n: g.toasts.length }));
+            check(`D-a ${label} with ${count} toast(s): the stack covers no part of the task board, the top strip, the office or the tabs`, covered.length === 0 && g.toasts.length >= 1 && g.toasts.length <= count, JSON.stringify({ covered, n: g.toasts.length }));
             // Changed on purpose (toast place): the stack is at the TOP right of the terminal area and never reaches into the last 8 terminal lines.
             check(`D-a ${label} with ${count} toast(s): the stack is in the terminal area, above the last 8 terminal lines`,
                 g.last8Top !== null && g.stack.bottom <= g.last8Top && g.stack.top >= g.area.top && g.stack.right <= g.board.left && g.stack.left >= g.area.left && g.toasts.every((t) => t.top >= g.area.top && t.top < g.last8Top && t.right <= g.board.left && t.left >= g.area.left),
@@ -146,7 +149,9 @@ export async function last3Checks({ page, check, url, shots }) {
         const g5 = await geometry();
         const moreBox = await page.locator('[data-testid="toasts-more"]').evaluate((el) => el.getBoundingClientRect().top);
         check(`D-a ${label}: at most 4 toasts show, with a line for the older ones under them, and still no cover`,
-            g5.toasts.length === 4 && moreBox >= Math.max(...g5.toasts.map((t) => t.bottom)) && !g5.toasts.some((t) => [g5.board, g5.strip, g5.office, g5.tabs].some((b) => hit(t, b))));
+            g5.toasts.length >= 1 && g5.toasts.length <= 4 && moreBox >= Math.max(...g5.toasts.map((t) => t.bottom)) && !g5.toasts.some((t) => [g5.board, g5.strip, g5.office, g5.tabs].some((b) => hit(t, b))));
+        const older5 = (await page.locator('[data-testid="toasts-more"]').innerText()).match(/^(\d+) older/)?.[1];
+        check(`D-a ${label}: the line for the older ones counts the toasts that do not show (5 sent: the blocked merge, three more, and a fifth)`, Number(older5) === pushed + 1 - g5.toasts.length, JSON.stringify({ shown: g5.toasts.length, older5, sent: pushed + 1 }));
         await clearToasts();
     }
 

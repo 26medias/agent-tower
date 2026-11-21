@@ -19,13 +19,14 @@
 //!   "tool event after the last turn end" rule inside the write lock of the session. A refusal
 //!   leaves the messages waiting and sets the "message waiting" mark. The first-turn guard
 //!   (`Live::worked`) also leaves them waiting and sets the mark.
-//! - the Stop hook (`deliver_at_stop`, Claude employees only): when a turn of the receiver ends,
+//! - the Stop hook (`deliver_at_stop`, Claude and Codex employees): when a turn of the receiver ends,
 //!   the hook program of the session asks the app for waiting messages. The app answers with a
 //!   `block` decision, and the CLI continues the turn with the messages as the reason. It takes
 //!   the same messages as the paste, in the same order, with the same text (`format_waiting`) and
 //!   the same holds. The messages are marked delivered after the answer was written to the hook
 //!   program. A stop that is blocked keeps the status `working` (`Machine`, `StopBlockedByApp`).
-//!   Codex sessions never get it (spec item N14). The paste stays the fallback for all.
+//!   The setup session never gets it. Codex acts on the text of a blocked stop (spec item N14,
+//!   PROBED on 2026-11-21: 3 of 3). The paste stays the fallback for all.
 //! - `inbox()`: the receiver takes its waiting messages. They are marked delivered after the
 //!   answer was written to the connection (`Claim`, `settle_claims`).
 //! - the first message of a session that the app starts for the message (`start_for_message`).
@@ -1391,7 +1392,7 @@ impl TowerCore {
         delivery
     }
 
-    /// The Stop hook of a Claude employee (spec 4.5, first path). The hook program sent a `Stop`
+    /// The Stop hook of an employee (Claude or Codex; spec 4.5, first path). The hook program sent a `Stop`
     /// event of `live` and waits for an answer. If messages wait, write the `block` answer, mark
     /// them delivered, and return `true`: the caller tells the status machine, so the stop keeps
     /// `working`. Otherwise return `false` (no answer is written, the connection closes, and the
@@ -1558,7 +1559,7 @@ impl TowerCore {
         }
     }
 
-    /// What the hook thread of a Claude employee runs for each `Stop` event that has a reply
+    /// What the hook thread of an employee runs for each `Stop` event that has a reply
     /// (`deliver_at_stop`).
     pub(super) fn stop_hook(&self, path: &Path, slug: &str) -> StopHook {
         let me = self.me.clone();

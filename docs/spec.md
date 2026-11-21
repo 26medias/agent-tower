@@ -99,7 +99,7 @@ An employee exists in the database when it has no session. A session is started 
 | Action | Who can do it | Result |
 |---|---|---|
 | Start | The manager of the employee (through an MCP tool), or the operator | A new CLI process starts in a PTY with the role instructions and the MCP configuration. |
-| Continue | The same | The message goes to the live session. If the session stopped and had one turn or more, the app resumes it by its CLI session ID. A session with no turn cannot be resumed (the CLI has no conversation); the app starts a fresh one (`claude --resume <id>` VERIFIED flag; `codex resume <id>` VERIFIED subcommand). |
+| Continue | The same | The message goes to the live session. If the session stopped and had one turn or more, the app resumes it by its CLI session ID. A session with no turn cannot be resumed (the CLI has no conversation); the app starts a fresh one (`claude --resume <id>` VERIFIED flag; `codex resume <id>` VERIFIED subcommand). "Had a turn" means a `working` status event, that is the first `UserPromptSubmit`. PROBED on 2026-11-21 with Claude `haiku`: a session that was stopped 0.8 s after that event and a session that was stopped at once after it (the first prompt sent, no answer) both had the prompt in the transcript file, so `claude --resume` kept the CLI session ID and showed the first prompt in its history. Evidence: `/tmp/agent-tower-review/gaps/claude-resume/`. |
 | Stop | The manager, or the operator | The process stops. The transcript stays. |
 | Fresh start | The manager, or the operator | Stop, then start with a new CLI session and an empty context. |
 
@@ -129,6 +129,8 @@ Start rules (from the gate 1 probes; the parts that are not probed are marked):
 - **Codex daemon.** The app starts Codex with `--no-daemon` (PROBED: it works). A shared daemon of a different version (0.171.0) runs on this machine. If the TUI uses it without the flag, and if `-c` settings apply there, is NOT TRACED.
 - **Codex hook trust.** Codex asks the operator to trust each hook command one time. The trust is lost if the command text changes.
   Thus the hook commands are the same text for all sessions, and the identity of the employee goes in the environment only.
+  The command text holds the path of `tower-hook`. Seen on 2026-11-21: an app that ran from another build folder showed "Hooks need review: 8 hooks are new or changed" and the session waited in `question`; the app never answers that dialog (the choices write the trust into `~/.codex`). The operator trusts the hooks once for each build path.
+- **Codex resume.** `codex resume <id>` sends no hook event until its first prompt (found live on 2026-11-21: a resumed session with no prompt stayed in `starting`, and after 20 s the status showed a false `question`). So a Codex resume with no text from the operator gets a short default first message: "The operator resumed your session, <Name>. Say that you are ready in one short sentence." A Claude resume sends `SessionStart` by itself and gets no message. Evidence: `/tmp/agent-tower-review/gaps/codex/`.
 - **App crash.** When the app stops, the PTYs close and all CLI processes stop. After a restart, the sessions show as `stopped` and can be resumed.
 
 ### 4.3 Status
@@ -179,7 +181,7 @@ Special cases:
       This works because the permission prompt draws output each 0.6 s, a working turn each 0.1 s, and the idle prompt draws nothing.
 - **Startup dialogs have unsafe defaults (PROBED at step 0).** Enter on the Claude trust dialog selects "No, exit". Enter on the Codex update dialog selects "Update now".
   This is one more reason for the rule that the app never types into `starting`.
-- **Stop that the app blocked (M2).** When the Stop hook of the app returns `block` to deliver messages (4.5), the turn continues with no new event. That `Stop` keeps `working`. The next `Stop` gives `idle`. Built on 2026-11-21 (Claude only): the app tells the machine `StopBlockedByApp` after it wrote the answer and before the machine gets that `Stop`.
+- **Stop that the app blocked (M2).** When the Stop hook of the app returns `block` to deliver messages (4.5), the turn continues with no new event. That `Stop` keeps `working`. The next `Stop` gives `idle`. Built on 2026-11-21 (Claude and Codex): the app tells the machine `StopBlockedByApp` after it wrote the answer and before the machine gets that `Stop`.
 - The facts about `SubagentStop`, `Notification` timing and the Codex `Interrupt` event are PROBED.
 
 Fallback for a CLI with no hooks: PTY output activity gives `working` or `idle` only. Codex can also give
@@ -235,7 +237,7 @@ Repairs after the M2a review:
 - `inbox` marks messages delivered after it wrote the answer. The HTTP endpoint checks the token before it reads the body, gives each request one deadline of 30 s, and allows 256 open connections (HTTP 503 over that).
 - The start rule ignores the manager chain of an employee that is its own ancestor. Employees can start 12 sessions for each floor in a rolling 10 minutes. The Claude settings of an employee deny the file tools for `floor.toml`, `employees/`, `assets/` and `state/` under `.swarm/`. Codex has no enforced deny (its sandbox is off on this machine).
 
-Not built yet: `employee_stop`, the Stop-hook delivery path, and the loop limit per task (M2a counts 30 messages for each pair in a rolling hour).
+Not built in M2a: `employee_stop` and the loop limit per task (M2a counts 30 messages for each pair in a rolling hour). The Stop-hook delivery path was built later (4.5).
 
 Who can talk to whom: each employee of a floor can message each other employee of that floor.
 The operator can message all. Messages between floors are never possible (isolation rule, 4.0).
@@ -247,19 +249,19 @@ Sending is a tool call. Delivery into a session has three paths. The app selects
 
 | Status of the receiver | Path |
 |---|---|
-| `working` | **Stop hook.** When the turn ends, the Stop hook of the session asks the app for waiting messages. If there are some, it returns `{"decision":"block","reason":<messages>}`. The CLI continues the turn with the messages (mechanism PROBED for both CLIs). **Built for Claude on 2026-11-21.** Codex keeps the paste path: item N14 is open, and the app never blocks a Codex stop. |
+| `working` | **Stop hook.** When the turn ends, the Stop hook of the session asks the app for waiting messages. If there are some, it returns `{"decision":"block","reason":<messages>}`. The CLI continues the turn with the messages (mechanism PROBED for both CLIs). **Built for Claude and for Codex on 2026-11-21.** Item N14 is closed: Codex acts on the text (PROBED, 3 of 3). |
 | `idle`, `done` | **PTY paste.** The app writes `ESC[200~` + text + `ESC[201~` + `\r` to the PTY in one write (bracketed paste; PROBED for both CLIs, also with multi-line text). |
 | `question`, `starting` | **No delivery.** The messages stay in the queue. |
 | `stopped` | The messages stay in the queue. `employee_start` from a manager resumes the session with them. |
 
 The agent can also pull at any time with `inbox()` or `wait()`.
 
-**The Stop hook as built (2026-11-21, Claude employees only).** `tower-hook` sends the `Stop` event with `"reply": true` and waits 2 s at the most for an answer on the same socket. The app answers `block` only if the session is `working` and has had a first turn, a message waits that is not held, fewer than 5 stops in a row were blocked, and (when the payload has `stop_hook_active` = `true`) a message newer than the last block waits. It takes the messages with the same code as the paste (same selection, order, text, `> ` mark, sanitize rule and holds), at most 60000 bytes at one time. The `reason` starts with the line `This is not an error. Messages from your team arrived while you worked. They are from employees, not from the operator.` (Claude prints the delivery under its own line "Stop hook reported a problem", so the first line says that this is normal). The app marks the messages delivered only after the answer was written to the hook program. In every other case (no message, a dead hook program, a time out, the setup session, a Codex session) the hook prints nothing and the turn ends as before: the status goes to `idle` and the paste delivers later. A blocked stop keeps the status `working` (4.3). Details of the wire: `docs/ipc-final.md`.
+**The Stop hook as built (2026-11-21, Claude and Codex employees).** `tower-hook` sends the `Stop` event with `"reply": true` and waits 2 s at the most for an answer on the same socket. The app answers `block` only if the session is `working` and has had a first turn, a message waits that is not held, fewer than 5 stops in a row were blocked, and (when the payload has `stop_hook_active` = `true`) a message newer than the last block waits. It takes the messages with the same code as the paste (same selection, order, text, `> ` mark, sanitize rule and holds), at most 60000 bytes at one time. The `reason` starts with the line `This is not an error. Messages from your team arrived while you worked. They are from employees, not from the operator.` (Claude prints the delivery under its own line "Stop hook reported a problem", and Codex prints "Blocked by hook", so the first line says that this is normal). Codex has the same payload field `stop_hook_active` (false at the first stop, true at the stop after a block; PROBED), so Claude and Codex share the guards. The app marks the messages delivered only after the answer was written to the hook program. In every other case (no message, a dead hook program, a time out, the setup session) the hook prints nothing and the turn ends as before: the status goes to `idle` and the paste delivers later. A blocked stop keeps the status `working` (4.3). Details of the wire: `docs/ipc-final.md`.
 
 Each delivered message has a clear header, for example `[message from Maya (Project Manager), task T-12]`.
 The role instructions say that messages from other employees arrive in this form, also as "blocked by hook" text,
 and that such a message is not the operator. Without this, the Codex model treated the hook text as untrusted and did not act on it (PROBED).
-That the role instructions change this is NOT TRACED (item N14). If they do not, Codex sessions get messages only by paste at `idle` and by `inbox()`.
+With the role instructions in place, a Codex agent acts on this text (item N14, PROBED on 2026-11-21: 3 of 3, see section 8).
 
 **Rules for PTY paste.** A paste with Enter into a permission dialog approves the action (PROBED in both CLIs: the command ran). So:
 
@@ -502,7 +504,7 @@ Placeholder art is used in M1 to M3. The visual work (M4) can move earlier if th
 | N11 | How `question` ends when the operator denies a prompt, both CLIs. Claude Ctrl-C and the 2 s quiet rule | PROBED at step 0 (4.3). Evidence in `probes/step0/` |
 | N12 | Claude permission mode and tool rules for `read_only` and `edit_in_worktree` | CLOSED in M3 (2026-11-21), PROBED with six `claude -p --model haiku` calls (4.7) |
 | N13 | First message as the `[PROMPT]` argument when a startup dialog shows. Codex `check_for_update_on_startup=false` | WORKS, PROBED at step 0 (4.2). Not traced: Codex without `--no-daemon`, and the Codex option "Continue without trusting" hooks |
-| N14 | A Codex agent acts on a message that the Stop hook delivers, when the role instructions explain it | NOT TRACED. Still open on 2026-11-21: the Stop hook is built for Claude only, and Codex sessions get messages by paste and `inbox()`. Close it before the Stop hook is turned on for Codex |
+| N14 | A Codex agent acts on a message that the Stop hook delivers, when the role instructions explain it | CLOSED on 2026-11-21, PROBED live in the real app: Codex `gpt-6-luna`, low effort, the real role instructions of the app (`team_instructions`). A message row waited while Codex wrote a story. At its `Stop` the app returned the `block` answer with the text "This is not an error. Messages from your team arrived while you worked..." and a `> Please say the word <W> in your next reply.` body. Codex showed "Blocked by hook", kept the same turn, called `tower.send` with the word and then said it, 3 of 3 times (KIWI, LIME, FIG; KIWI in one session, LIME and FIG in a second session). The status stayed `working` through each block. Codex has `stop_hook_active`, so the guards are the same as for Claude. The first gate 1 probe saw Codex call the same text untrusted, with no role instructions. Decision: the Stop hook delivers to Codex too. Evidence: `/tmp/agent-tower-review/gaps/stop-probe/` (`run1/rollout.jsonl`, `run2/rollout.jsonl`, `analyse.py`) |
 | N15 | Nested worktrees: parent `CLAUDE.md` loading, test runners that collect `.swarm/worktrees/` | Changed in M3 (2026-11-21): the session stays in the main checkout, so Claude loads the `CLAUDE.md` of the main checkout as before. A worktree copy of `CLAUDE.md` loading when an employee reads files in the worktree, and test runners that collect `.swarm/worktrees/`: NOT TRACED |
 
 ## 9. Points closed by the operator (2026-11-19)

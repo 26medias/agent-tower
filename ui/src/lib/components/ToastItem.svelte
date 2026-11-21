@@ -3,12 +3,28 @@
     // again. The full text is always in the `title`. The toast never takes the focus, except a button that the operator clicks.
     import { store, type Toast } from "$lib/store.svelte";
 
-    let { toast }: { toast: Toast } = $props();
+    // `onfold` gets the height of the toast while the text is cut (folded). The stack uses it to count the toasts that fit.
+    let { toast, onfold }: { toast: Toast; onfold?: (id: number, height: number) => void } = $props();
 
     let open = $state(false);
     // True when the text is longer than 3 lines at the width of the toast. It keeps its value while the text is open.
     let cut = $state(false);
     let textEl: HTMLElement | undefined = $state();
+    let rootEl: HTMLElement | undefined = $state();
+
+    // Tell the stack the folded height now, and when it changes (a resize, or the "more" button that comes and goes).
+    // While the text is open the height is not the folded height, so nothing is sent.
+    $effect(() => {
+        const el = rootEl;
+        if (!el || !onfold) return;
+        const report = (): void => {
+            if (!open) onfold(toast.id, Math.ceil(el.getBoundingClientRect().height));
+        };
+        report();
+        const observer = new ResizeObserver(report);
+        observer.observe(el);
+        return () => observer.disconnect();
+    });
 
     $effect(() => {
         const el = textEl;
@@ -24,7 +40,7 @@
     });
 </script>
 
-<div class="toast" class:info={toast.kind === "info"} role={toast.kind === "info" ? "status" : "alert"} data-kind={toast.kind ?? "error"}>
+<div class="toast" bind:this={rootEl} class:info={toast.kind === "info"} role={toast.kind === "info" ? "status" : "alert"} data-kind={toast.kind ?? "error"}>
     <div class="body">
         <span class="text" class:open title={toast.text} bind:this={textEl}>{toast.text}</span>
         {#if cut || open}

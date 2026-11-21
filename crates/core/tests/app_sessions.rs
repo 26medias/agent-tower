@@ -129,6 +129,57 @@ fn codex_session_stores_the_cli_session_id_from_the_first_hook_event() {
     assert!(rig.events.latest(&id).unwrap().can_resume);
 }
 
+/// Found live on 2026-11-21: a Codex session sends no hook event until its first prompt, also
+/// after a resume. A resume with no message left the session in `starting`, and after 20 s the
+/// status became a false `question` (the resumed TUI was idle). So a Codex resume with no text
+/// gets a short default message, and the status leaves `starting` with the first hook event.
+#[test]
+fn a_codex_resume_with_no_message_gets_a_default_message_and_leaves_starting() {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.make_codex("pm");
+    let first = rig.start("pm");
+    rig.wait_first_turn(&first.session_id);
+    rig.stop_and_wait(&first.session_id);
+    assert!(rig.events.latest(&first.session_id).unwrap().can_resume);
+
+    let second = rig
+        .tower
+        .session_resume(&rig.cwd, "pm", None, 24, 80)
+        .unwrap();
+    let call = rig.calls().pop().unwrap();
+    assert!(call.resume.is_some(), "it is a resume");
+    let message = call.first_message.as_deref().expect("a default message");
+    assert!(
+        message.contains("resumed your session") && message.contains("Maya"),
+        "{message}"
+    );
+    // The session leaves `starting` by its first hook event, and then it ends its turn.
+    rig.wait_first_turn(&second.session_id);
+    assert_eq!(
+        rig.events.statuses(&second.session_id),
+        [Status::Starting, Status::Working, Status::Idle]
+    );
+}
+
+/// A Claude resume sends `SessionStart` by itself, so it needs no message (and none is made up).
+#[test]
+fn a_claude_resume_with_no_message_gets_no_message() {
+    let rig = Rig::new();
+    rig.create_floor();
+    let first = rig.start("pm");
+    rig.wait_first_turn(&first.session_id);
+    rig.stop_and_wait(&first.session_id);
+    let second = rig
+        .tower
+        .session_resume(&rig.cwd, "pm", None, 24, 80)
+        .unwrap();
+    let call = rig.calls().pop().unwrap();
+    assert!(call.resume.is_some());
+    assert_eq!(call.first_message, None, "Claude gets no made up message");
+    rig.events.wait_status(&second.session_id, Status::Idle);
+}
+
 #[test]
 fn codex_resume_with_no_stored_id_starts_fresh() {
     let rig = Rig::new();

@@ -109,13 +109,16 @@ export async function toastChecks({ page, check, url, shots }) {
         await page.waitForSelector('[data-testid="detail-status"]');
         // 1 toast, then 4 toasts. The oldest (0) and the third (2) are long.
         const texts = [`${LONG} (1)`, "Could not resume Eli: a short text.", `${LONG} (3)`, "Could not resume Sam: another short text."];
+        // The stack shows the toasts that fit whole when they are folded, so the number on view can be lower than the number sent.
+        let pushed = 0;
         for (const count of [1, 4]) {
-            while ((await page.locator(".toast").count()) < count) await notice(texts[await page.locator(".toast").count()]);
+            while (pushed < count) await notice(texts[pushed++]);
             await page.waitForTimeout(250);
             const g = await geometry();
+            const n = g.toasts.length;
             const others = [["task board", g.board], ["task detail", g.detail], ["top strip", g.strip], ["office", g.office], ["tabs", g.tabs]];
             const covered = others.filter(([, b]) => g.toasts.some((t) => hit(t.shows, b))).map(([n]) => n);
-            check(`T ${label} with ${count} toast(s): no toast covers the strip, the office, the tabs, the board or the task detail`, covered.length === 0 && g.toasts.length === count, JSON.stringify({ covered, n: g.toasts.length }));
+            check(`T ${label} with ${count} toast(s): no toast covers the strip, the office, the tabs, the board or the task detail`, covered.length === 0 && n >= 1 && n <= count, JSON.stringify({ covered, n }));
             check(`T ${label} with ${count} toast(s): the stack is 6 px under the top of the terminal area and 10 px inside the right edge of the centre column`,
                 Math.abs(g.stack.top - (g.area.top + 6)) <= 1 && Math.abs(g.toasts[0].right - (g.board.left - 10)) <= 1 && g.toasts[0].top >= g.area.top + 5,
                 JSON.stringify({ stackTop: g.stack.top, areaTop: g.area.top, right: g.toasts[0].right, boardLeft: g.board.left }));
@@ -126,7 +129,7 @@ export async function toastChecks({ page, check, url, shots }) {
             check(`T ${label} with ${count} toast(s): the newest toast is at the top`, g.toasts[0].text.startsWith(texts[count - 1]) && tops.every((v, i) => i === 0 || v > tops[i - 1]), JSON.stringify(g.toasts.map((t) => [t.text.slice(-12), Math.round(t.top)])));
             const longOnes = g.toasts.filter((t) => t.text.length > 100);
             check(`T ${label} with ${count} toast(s): a long toast shows 3 lines and a "more" control, a short one shows no control, the full text is in the title`,
-                longOnes.length === (count === 1 ? 1 : 2) && longOnes.every((t) => t.lines === 3 && t.more === "more" && t.title === t.text) &&
+                longOnes.length === texts.slice(count - n, count).filter((x) => x.length > 100).length && longOnes.every((t) => t.lines === 3 && t.more === "more" && t.title === t.text) &&
                     g.toasts.filter((t) => t.text.length <= 100).every((t) => t.more === null && t.title === t.text),
                 JSON.stringify(g.toasts.map((t) => [t.lines, t.more])));
             await shot(`t-${count}-toasts-${label}.png`);
@@ -146,8 +149,80 @@ export async function toastChecks({ page, check, url, shots }) {
         await notice("Could not resume Zed: a fifth text.");
         const g5 = await geometry();
         const moreTop = await page.locator('[data-testid="toasts-more"]').evaluate((el) => el.getBoundingClientRect().top);
-        check(`T ${label}: at most 4 toasts show and the line for the older ones is under them`, g5.toasts.length === 4 && moreTop >= Math.max(...g5.toasts.map((t) => t.top)), JSON.stringify({ n: g5.toasts.length, moreTop }));
+        check(`T ${label}: at most 4 toasts show and the line for the older ones is under them`, g5.toasts.length >= 1 && g5.toasts.length <= 4 && moreTop >= Math.max(...g5.toasts.map((t) => t.top)), JSON.stringify({ n: g5.toasts.length, moreTop }));
         await clearToasts();
+    }
+
+    // ================= Only the toasts that fit whole show (gap 2 of the last review) =================
+    // Error toasts of 3 long lines and a "more" control are about 85 px high. At 1280 x 800 the stack is about 251 px high, so
+    // three folded toasts (267 px) do not fit. The stack shows the toasts that fit whole, and the line for the older ones counts
+    // the rest. Each check compares the boxes of the toasts with the box of the stack.
+    const fitBoxes = () =>
+        page.evaluate(() => {
+            const box = (el) => {
+                if (!el) return null;
+                const b = el.getBoundingClientRect();
+                return { top: b.top, bottom: b.bottom, height: b.height };
+            };
+            const stack = document.querySelector('[data-testid="toasts"]');
+            const more = document.querySelector('[data-testid="toasts-more"]');
+            const style = getComputedStyle(stack);
+            return {
+                stack: { ...box(stack), maxHeight: parseFloat(style.maxHeight), gap: parseFloat(style.rowGap), scrolls: stack.scrollHeight > stack.clientHeight + 1 },
+                toasts: [...stack.querySelectorAll(".toast")].map(box),
+                more: box(more),
+                moreText: more ? more.textContent.trim() : null,
+            };
+        });
+    const WHOLE = 0.6; // The boxes have fractions of a pixel.
+    const mixedTexts = [`${LONG} (m1)`, "Could not resume Maya: the program was not found. Change the path in Settings.", `${LONG} (m3)`, "Could not resume Eli: the program was not found. Change the path in Settings."];
+    for (const [label, size] of [["1280", SMALL], ["2560", LARGE]]) {
+        for (const [kind, total] of [["long", 4], ["long", 6], ["mixed", 4]]) {
+            await fresh(size);
+            await liveWithScreen("ceo");
+            for (let i = 0; i < total; i++) await notice(kind === "mixed" ? mixedTexts[i] : `${LONG} (fit ${i + 1})`);
+            await page.waitForTimeout(300);
+            const f = await fitBoxes();
+            const n = f.toasts.length;
+            const tag = `fit ${label} with ${total} ${kind} error toasts`;
+            check(`${tag}: each visible toast lies whole inside the box of the stack when folded, and the stack does not scroll`,
+                n >= 1 && f.toasts.every((b) => b.top >= f.stack.top - WHOLE && b.bottom <= f.stack.bottom + WHOLE) && !f.stack.scrolls,
+                JSON.stringify({ stack: [f.stack.top, f.stack.bottom], toasts: f.toasts.map((b) => [b.top, b.bottom]) }));
+            const older = f.moreText?.match(/^(\d+) older (message|messages) wait/);
+            check(`${tag}: the line for the older ones shows the right count (${total} - ${n}) and lies inside the stack box`,
+                n === Math.min(4, total) && total === n ? f.more === null : older !== null && older !== undefined && Number(older[1]) === total - n && (older[2] === "message") === (total - n === 1) && f.more.top >= f.stack.top - WHOLE && f.more.bottom <= f.stack.bottom + WHOLE,
+                JSON.stringify({ n, moreText: f.moreText }));
+            const tallest = Math.max(...f.toasts.map((b) => b.height));
+            const sum = f.toasts.reduce((s, b) => s + b.height, 0) + f.stack.gap * (n - 1);
+            const extra = sum + f.stack.gap + tallest + (total > n + 1 ? f.stack.gap + (f.more?.height ?? 24) : 0);
+            check(`${tag}: it shows as many as fit (the next toast would not fit whole)`, n === Math.min(4, total) || extra > f.stack.maxHeight,
+                JSON.stringify({ n, sum, tallest, extra, maxHeight: f.stack.maxHeight }));
+            if (kind === "long" && total === 4) {
+                check(`${tag}: ${label === "1280" ? "two show (three need 267 px, the stack has 251 px) and 2 wait" : "all four show and no line for older ones shows"}`,
+                    label === "1280" ? n === 2 && Number(older?.[1]) === 2 : n === 4 && f.more === null, JSON.stringify({ n, moreText: f.moreText, maxHeight: f.stack.maxHeight, h: f.toasts.map((b) => b.height) }));
+                await shot(`fit-${label}-4-long.png`);
+            }
+            if (kind === "long" && total === 6) {
+                // "more" on the newest toast opens it. The count does not change, and the stack scrolls inside its own box.
+                await page.locator(".toast").first().locator('[data-testid="toast-more"]').click();
+                await page.waitForTimeout(200);
+                const o = await fitBoxes();
+                check(`${tag}: a toast that is open does not change the count or the line, the stack keeps its top and its height limit, and at 1280 it scrolls inside`,
+                    o.toasts.length === n && o.moreText === f.moreText && Math.abs(o.stack.top - f.stack.top) < 1 && o.stack.bottom <= f.stack.top + f.stack.maxHeight + 1 && (label === "1280" ? o.stack.scrolls : true),
+                    JSON.stringify({ n, on: o.toasts.length, moreText: o.moreText, scrolls: o.stack.scrolls }));
+                await shot(`fit-${label}-6-long-one-open.png`);
+                await page.locator(".toast").first().locator('[data-testid="toast-more"]').click();
+                // The operator closes the newest toast: 5 are left, and the count follows the rule again.
+                await page.locator('.toast button[aria-label="Dismiss"]').first().click();
+                await page.waitForTimeout(300);
+                const d = await fitBoxes();
+                const dOlder = d.moreText?.match(/^(\d+) older/);
+                check(`${tag}: after one is closed the stack still shows whole toasts and counts the rest (5 - ${d.toasts.length})`,
+                    d.toasts.length >= 1 && d.toasts.every((b) => b.top >= d.stack.top - WHOLE && b.bottom <= d.stack.bottom + WHOLE) && (d.toasts.length === 4 ? d.more !== null && Number(dOlder?.[1]) === 1 : Number(dOlder?.[1]) === 5 - d.toasts.length),
+                    JSON.stringify({ n: d.toasts.length, moreText: d.moreText }));
+            }
+            await clearToasts();
+        }
     }
 
     // The 8-rows limit comes from the rows that are measured. With no terminal on view the limit is the area less 130 px.
