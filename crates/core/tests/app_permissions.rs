@@ -90,7 +90,7 @@ fn the_operator_sets_and_reads_the_rules_in_the_app_config() {
             &rig.cwd,
             rules(&[
                 "Bash(rtk cargo test:*)",
-                " Bash(git status:*) ",
+                " Bash(git status) ",
                 "Read(./src/**)",
                 "Bash(rtk cargo test:*)",
             ]),
@@ -101,11 +101,12 @@ fn the_operator_sets_and_reads_the_rules_in_the_app_config() {
         saved.allow,
         [
             "Bash(rtk cargo test:*)",
-            "Bash(git status:*)",
+            "Bash(git status)",
             "Read(./src/**)"
         ]
     );
-    // One warning for each rule that runs the code of the project, with the rule in front.
+    // One warning for each rule that runs the code of the project, with the rule in front. The
+    // exact rule `Bash(git status)` has none.
     assert_eq!(
         saved.warnings,
         [format!("Bash(rtk cargo test:*): {WARNING}")]
@@ -226,6 +227,55 @@ fn two_floors_keep_separate_lists_and_forget_removes_the_entry() {
     assert!(!config_text(&rig).contains("floor_permissions"));
 }
 
+const WILDCARD_WARNING: &str = "This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.";
+
+/// The check is informed consent, not a wall: a wildcard rule of a plain program is stored with a
+/// warning, and an exact rule is stored with none. A build tool keeps the stronger text.
+#[test]
+fn a_wildcard_rule_of_a_plain_program_has_a_warning_and_an_exact_rule_has_none() {
+    let rig = Rig::new();
+    rig.create_floor();
+    let saved = rig
+        .tower
+        .floor_permissions_set(
+            &rig.cwd,
+            rules(&[
+                "Bash(ls:*)",
+                "Bash(rtk git status)",
+                "Bash(sort *)",
+                "Bash(cargo fmt --check)",
+                "Bash(rtk cargo test:*)",
+                "Bash(cat README.md)",
+                "Read(./src/**)",
+            ]),
+        )
+        .unwrap();
+    assert_eq!(saved.allow.len(), 7);
+    assert_eq!(
+        saved.warnings,
+        [
+            format!("Bash(ls:*): {WILDCARD_WARNING}"),
+            format!("Bash(sort *): {WILDCARD_WARNING}"),
+            format!("Bash(cargo fmt --check): {WARNING}"),
+            format!("Bash(rtk cargo test:*): {WARNING}"),
+        ]
+    );
+    // A git rule with a wildcard is refused, and nothing is stored for it.
+    let error = rig
+        .tower
+        .floor_permissions_set(&rig.cwd, rules(&["Bash(git log:*)"]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("A git rule must be the exact command"),
+        "{error}"
+    );
+    assert_eq!(
+        rig.tower.floor_permissions_get(&rig.cwd).unwrap(),
+        saved.allow
+    );
+}
+
 #[test]
 fn a_bad_rule_refuses_the_whole_list_and_writes_nothing() {
     let rig = Rig::new();
@@ -263,6 +313,12 @@ fn a_bad_rule_refuses_the_whole_list_and_writes_nothing() {
         "Bash(find:*)",
         "Bash(git rebase:*)",
         "Bash(git log --output=x:*)",
+        // The third review: a git rule with a wildcard, and programs that run commands.
+        "Bash(git log:*)",
+        "Bash(rtk git diff:*)",
+        "Bash(git log --output=x)",
+        "Bash(sqlite3:*)",
+        "Bash(man:*)",
         "Read(.swarm/state/**)",
         "WebFetch(domain:169.254.169.254)",
         "",

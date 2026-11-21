@@ -4,7 +4,11 @@
 // refuses a rule, the form shows its text. A rule that this file does not know how to judge is not
 // refused here: the server decides.
 //
-// The rules (the third version of the server check, 2026-11-21):
+// The check is NOT a security boundary. It is informed consent: the operator must know what each
+// rule gives. A list of blocked programs can never be complete, so each `Bash` rule with a `*`
+// gets a warning (`ruleWarning`). That warning is the real control.
+//
+// The rules (the fourth version of the server check, 2026-11-21):
 //   - only printable ASCII;
 //   - the entry is `WebSearch` alone, or `Tool(pattern)` with Tool one of Bash, Read, Glob, Grep,
 //     WebFetch, and a pattern with no `(` or `)`;
@@ -12,8 +16,11 @@
 //     has only A-Z a-z 0-9 . _ / + - . `rtk` is unwrapped first (the check applies to the words after
 //     it; `rtk` alone, `rtk` with an option and `rtk proxy` and the like are refused). The program is
 //     not on the list of programs that run other programs, change or destroy data, or send data out.
-//     `git` has an allow list of read-only subcommands, and `--output`, `--exec` and `-c` are refused.
-//     The build tools are allowed, with a warning from the server (`ruleWarning` is the same rule);
+//     `git` rules must be exact (no `*`: a wildcard lets the agent add `--output`, which writes a
+//     file). The subcommand is on an allow list, and `--output`, `--exec`, `--ext-diff`, `--textconv`
+//     and `-c` are refused.
+//     Each other program is allowed. A rule with a `*` gets a warning from the server, a stronger
+//     one for the build tools and for a script of the project (`ruleWarning` gives the same texts);
 //   - `Read`, `Glob`, `Grep`: a relative pattern with no `..`, and not the folder `.swarm/state`;
 //   - `WebFetch`: only `domain:<host>`, with a dot. No IP address, `localhost`, `.local`, `.internal`;
 //   - `WebSearch`: the bare name only.
@@ -42,15 +49,20 @@ export const BLOCKED_COMMANDS: readonly string[] = [
     // a few more wrappers
     "ssh-agent", "sshpass", "expect", "chroot", "nsenter", "ionice", "taskset", "numactl", "runuser", "setpriv",
     "start-stop-daemon", "run-parts", "systemd-run", "screen", "tmux",
+    // a best effort: programs that open a shell, an editor or a pager, or that run another program.
+    // The list is NOT complete. The warning of each wildcard rule is the real control.
+    "sqlite3", "psql", "mysql", "man", "less", "more", "nvim", "ex", "ed", "nodejs", "tclsh", "julia", "rscript", "irb",
+    "ipython", "osascript", "xdg-open", "uvx", "pipx", "nix-shell", "nix", "direnv", "mise", "chrt", "prlimit", "fakeroot",
+    "firejail", "bwrap", "valgrind", "perf", "hyperfine", "install", "patch",
 ];
 
-/** The only git subcommands that a rule can name. They read, and they do not change anything. */
+/** The only git subcommands that a rule can name. The rule must be exact: with a `*` an agent can add `--output`. */
 export const ALLOWED_GIT: readonly string[] = ["status", "log", "diff", "show", "blame", "ls-files", "rev-parse", "describe"];
 
 /** Build and package tools. A rule for one is allowed, and the server adds a warning: they run the code of the project. */
 export const BUILD_TOOLS: readonly string[] = [
     "cargo", "npm", "npx", "pnpm", "yarn", "make", "just", "uv", "pip", "go", "gradle", "mvn", "pytest", "tox", "bundle",
-    "rake", "composer", "dotnet",
+    "rake", "composer", "dotnet", "cmake", "ninja", "bazel", "poetry", "meson", "scons",
 ];
 
 /** The words after `rtk` that run any command or change the settings of `rtk`. */
@@ -58,8 +70,16 @@ const RTK_REFUSED: readonly string[] = ["proxy", "run", "err", "test", "summary"
 
 const FORM = "Write a rule as Tool(pattern), for example Bash(cargo test:*). The tools are Bash, Read, Glob, Grep and WebFetch. WebSearch has no pattern.";
 
-/** The text of a warning of the server, without the rule: `<rule>: <this text>`. */
+/** The text of a warning of the server for the code of the project, without the rule: `<rule>: <this text>`. */
 export const WARNING_TEXT = "This rule lets each agent of the floor run the project's own code with no question.";
+
+/** The text of the warning of the server for a `Bash` rule with a `*`, without the rule. */
+export const WILDCARD_WARNING_TEXT =
+    "This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.";
+
+/** The refusal of a `git` rule with a `*`. */
+export const GIT_WILDCARD_REFUSAL =
+    "A git rule must be the exact command, for example Bash(git status) or Bash(git diff --stat). A rule with * lets an agent add options such as --output, which writes files.";
 
 /** `null` when the rule is good. Else the text for the operator. */
 export function checkAllowRule(rule: string): string | null {
@@ -152,22 +172,27 @@ function checkBash(rule: string, pattern: string): string | null {
     if (programName(first).plain === "git") {
         const rest = body.slice(first.length);
         const sub = rest.startsWith(" ") ? firstWord(rest.slice(1)) : "";
-        if (sub === "") return `A git rule needs a subcommand, for example Bash(git status:*).`;
+        if (sub === "") return `A git rule needs a subcommand, for example Bash(git status).`;
         if (!ALLOWED_GIT.includes(sub)) {
             return `"git ${sub}" is not allowed in a rule. A rule can name only these git subcommands: ${ALLOWED_GIT.join(", ")}.`;
         }
         for (const word of rest.split(/[ :]/)) {
-            if (word === "-c" || word.startsWith("--output") || word.startsWith("--exec")) {
-                return `"git ${sub} ${word}" is not allowed in a rule. The options -c, --output and --exec can run a program or write a file.`;
+            if (word === "-c" || ["--output", "--exec", "--ext-diff", "--textconv"].some((option) => word.startsWith(option))) {
+                return `"git ${sub} ${word}" is not allowed in a rule. The options -c, --output, --exec, --ext-diff and --textconv can run a program or write a file.`;
             }
         }
+        if (pattern.includes("*")) return GIT_WILDCARD_REFUSAL;
     }
     return null;
 }
 
 /**
- * The warning that the server gives for a rule that runs the code of the project, or `null`. The server
- * is the judge; the mock uses this to give the same warning. The text is `<rule>: <WARNING_TEXT>`.
+ * The warning that the server gives for a rule, or `null`. The server is the judge; the mock uses this to
+ * give the same warning. One warning at most for each rule, and the stronger one wins:
+ *   - `<rule>: <WARNING_TEXT>` for a build tool (also an exact rule, also after `rtk`) and for a script
+ *     of the project (a relative path);
+ *   - `<rule>: <WILDCARD_WARNING_TEXT>` for each other `Bash` rule with a `*`.
+ * An exact rule of another program has none. A rule that is refused has none.
  */
 export function ruleWarning(rule: string): string | null {
     if (checkAllowRule(rule) !== null || !rule.startsWith("Bash(") || !rule.endsWith(")")) return null;
@@ -177,7 +202,8 @@ export function ruleWarning(rule: string): string | null {
     const first = firstWord(unwrapped.rest);
     // A program that a relative path names (./scripts/check.sh) is the code of the project too.
     const relative = first.includes("/") && !first.startsWith("/");
-    return relative || isBuildTool(first) ? `${rule}: ${WARNING_TEXT}` : null;
+    if (relative || isBuildTool(first)) return `${rule}: ${WARNING_TEXT}`;
+    return pattern.includes("*") ? `${rule}: ${WILDCARD_WARNING_TEXT}` : null;
 }
 
 function checkWebFetch(pattern: string): string | null {

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ALLOW_RULES_MAX, EXAMPLE_RULES, WARNING_TEXT, addRule, checkAllowRule, mergeRules, removeRule, ruleWarning } from "./permissions";
+import { ALLOW_RULES_MAX, EXAMPLE_RULES, GIT_WILDCARD_REFUSAL, WARNING_TEXT, WILDCARD_WARNING_TEXT, addRule, checkAllowRule, mergeRules, removeRule, ruleWarning } from "./permissions";
 
 describe("checkAllowRule", () => {
     it("accepts the good forms", () => {
         for (const rule of [
             "Bash(cargo test:*)",
-            "Bash(git status:*)",
+            "Bash(git status)",
             "Bash(git diff)",
             "Bash(npm run build)",
             "Bash(./scripts/check.sh)",
@@ -54,6 +54,10 @@ describe("checkAllowRule", () => {
             ["Bash(python3:*)", /"python3" is not allowed/],
             ["Bash(git:*)", /needs a subcommand/],
             ["Bash(git)", /needs a subcommand/],
+            ["Bash(git status:*)", /exact command/],
+            ["Bash(sqlite3:*)", /"sqlite3" is not allowed/],
+            ["Bash(man:*)", /"man" is not allowed/],
+            ["Bash(less:*)", /"less" is not allowed/],
             ["Bash(git push:*)", /"git push" is not allowed/],
             ["Bash(git checkout main)", /"git checkout" is not allowed/],
             ["Bash(git config:*)", /"git config" is not allowed/],
@@ -89,7 +93,8 @@ describe("checkAllowRule", () => {
 describe("checkAllowRule: the check of 2026-11-21 (docs/ipc-m3.md)", () => {
     it("unwraps rtk, and refuses rtk alone, rtk with an option and rtk proxy and the like", () => {
         expect(checkAllowRule("Bash(rtk cargo test:*)")).toBeNull();
-        expect(checkAllowRule("Bash(rtk git status:*)")).toBeNull();
+        expect(checkAllowRule("Bash(rtk git status)")).toBeNull();
+        expect(checkAllowRule("Bash(rtk git status:*)")).toBe(GIT_WILDCARD_REFUSAL);
         expect(checkAllowRule("Bash(rtk:*)")).toMatch(/"rtk" alone/);
         expect(checkAllowRule("Bash(rtk)")).toMatch(/"rtk" alone/);
         expect(checkAllowRule("Bash(rtk -v ls)")).toMatch(/"rtk -v" is not allowed/);
@@ -102,6 +107,9 @@ describe("checkAllowRule: the check of 2026-11-21 (docs/ipc-m3.md)", () => {
     });
 
     it("refuses the programs of the contract list, with a folder in front, in capitals and with a version", () => {
+        for (const program of ["sqlite3", "psql", "mysql", "man", "less", "more", "nvim", "ex", "ed", "nodejs", "tclsh", "julia", "Rscript", "irb", "ipython", "osascript", "xdg-open", "uvx", "pipx", "nix-shell", "nix", "direnv", "mise", "chrt", "prlimit", "fakeroot", "firejail", "bwrap", "valgrind", "perf", "hyperfine", "install", "patch"]) {
+            expect(checkAllowRule(`Bash(${program}:*)`), program).toMatch(/is not allowed in a rule/);
+        }
         for (const program of ["find", "awk", "gawk", "sed", "tar", "cp", "mv", "tee", "ln", "vim", "nano", "docker", "kubectl", "tmux", "screen", "ncat", "socat", "bash", "ksh", "pwsh", "busybox", "xargs", "deno", "bun", "lua", "rsync", "systemd-run", "."]) {
             expect(checkAllowRule(`Bash(${program} x)`), program).toMatch(/is not allowed in a rule/);
         }
@@ -112,21 +120,30 @@ describe("checkAllowRule: the check of 2026-11-21 (docs/ipc-m3.md)", () => {
     });
 
     it("lets the build tools and the other programs pass", () => {
-        for (const rule of ["Bash(cargo test:*)", "Bash(npm test:*)", "Bash(make build)", "Bash(pnpm run check)", "Bash(uv run pytest)", "Bash(ls:*)", "Bash(cat README.md)", "Bash(rtk cargo test:*)"]) {
+        for (const rule of ["Bash(cargo test:*)", "Bash(npm test:*)", "Bash(make build)", "Bash(pnpm run check)", "Bash(uv run pytest)", "Bash(ls:*)", "Bash(sort:*)", "Bash(gh:*)", "Bash(rg:*)", "Bash(jq:*)", "Bash(cat README.md)", "Bash(rtk cargo test:*)"]) {
             expect(checkAllowRule(rule), rule).toBeNull();
         }
     });
 
-    it("lets git run only the read-only subcommands, and refuses -c, --output and --exec", () => {
+    it("lets git run only an exact rule of the allow list, and refuses a *, -c, --output, --exec, --ext-diff and --textconv", () => {
         for (const sub of ["status", "log", "diff", "show", "blame", "ls-files", "rev-parse", "describe"]) {
-            expect(checkAllowRule(`Bash(git ${sub}:*)`), sub).toBeNull();
+            expect(checkAllowRule(`Bash(git ${sub})`), sub).toBeNull();
+            expect(checkAllowRule(`Bash(git ${sub}:*)`), sub).toBe(GIT_WILDCARD_REFUSAL);
+            expect(checkAllowRule(`Bash(git ${sub} *)`), sub).toBe(GIT_WILDCARD_REFUSAL);
         }
+        expect(checkAllowRule("Bash(git diff --stat)")).toBeNull();
+        expect(checkAllowRule("Bash(git log:*)")).toBe(GIT_WILDCARD_REFUSAL);
+        expect(checkAllowRule("Bash(rtk git log:*)")).toBe(GIT_WILDCARD_REFUSAL);
+        expect(checkAllowRule("Bash(git diff *)")).toBe(GIT_WILDCARD_REFUSAL);
         for (const sub of ["push", "rebase", "commit", "add", "fetch", "branch", "stash", "apply", "reset", "checkout", "config"]) {
             expect(checkAllowRule(`Bash(git ${sub}:*)`), sub).toMatch(new RegExp(`"git ${sub}" is not allowed`));
         }
         expect(checkAllowRule("Bash(git -C x status)")).toMatch(/"git -C" is not allowed/);
+        expect(checkAllowRule("Bash(git log --output=x)")).toMatch(/--output/);
         expect(checkAllowRule("Bash(git log --output=x:*)")).toMatch(/--output/);
         expect(checkAllowRule("Bash(git diff --exec=x)")).toMatch(/--exec/);
+        expect(checkAllowRule("Bash(git diff --ext-diff)")).toMatch(/--ext-diff/);
+        expect(checkAllowRule("Bash(git log -p --textconv)")).toMatch(/--textconv/);
         expect(checkAllowRule("Bash(git log -c foo=bar)")).toMatch(/-c/);
         expect(checkAllowRule("Bash(git:*)")).toMatch(/needs a subcommand/);
     });
@@ -151,16 +168,36 @@ describe("checkAllowRule: the check of 2026-11-21 (docs/ipc-m3.md)", () => {
 });
 
 describe("ruleWarning", () => {
-    it("warns for a build tool, also after rtk, and for a program that a relative path names", () => {
-        for (const rule of ["Bash(cargo test:*)", "Bash(rtk cargo test:*)", "Bash(npm test:*)", "Bash(make:*)", "Bash(./scripts/check.sh)", "Bash(pip3 install x)"]) {
+    it("warns about the project code for a build tool, also after rtk and also for an exact rule, and for a program that a relative path names", () => {
+        for (const rule of ["Bash(cargo test:*)", "Bash(rtk cargo test:*)", "Bash(npm test:*)", "Bash(make:*)", "Bash(./scripts/check.sh)", "Bash(pip3 install x)", "Bash(cargo fmt --check)", "Bash(cmake:*)", "Bash(ninja:*)", "Bash(bazel:*)", "Bash(poetry:*)", "Bash(meson:*)", "Bash(scons:*)"]) {
             expect(ruleWarning(rule), rule).toBe(`${rule}: ${WARNING_TEXT}`);
         }
     });
 
-    it("gives no warning for the other rules, and none for a rule that is refused", () => {
-        for (const rule of ["Bash(ls:*)", "Bash(git status:*)", "Read(./src/**)", "WebSearch", "Bash(rtk:*)", "Bash(sh x)", "Bash(/usr/bin/ls)"]) {
+    it("warns about the wildcard for each other Bash rule with a *", () => {
+        for (const rule of ["Bash(ls:*)", "Bash(rtk ls:*)", "Bash(sort:*)", "Bash(gh:*)", "Bash(rg:*)", "Bash(jq:*)", "Bash(/usr/bin/ls:*)", "Bash(ls *)", "Bash(ls * -l)"]) {
+            expect(ruleWarning(rule), rule).toBe(`${rule}: ${WILDCARD_WARNING_TEXT}`);
+        }
+    });
+
+    it("gives no warning for an exact rule of a plain program, for the other tools, and for a rule that is refused", () => {
+        for (const rule of ["Bash(ls)", "Bash(rtk git status)", "Bash(cat README.md)", "Bash(/usr/bin/ls -l)", "Read(./src/**)", "Read(**)", "WebSearch", "Bash(rtk:*)", "Bash(sh x)", "Bash(sh:*)", "Bash(git status:*)", "Bash(sqlite3:*)"]) {
             expect(ruleWarning(rule), rule).toBeNull();
         }
+    });
+
+    it("never accepts a Bash rule with a * and gives no warning (generated names)", () => {
+        let checked = 0;
+        for (let i = 0; i < 60; i++) {
+            for (const name of [`zq${i}x`, `tool-${i}`, `my_prog${i}.sh2`]) {
+                for (const rule of [`Bash(${name}:*)`, `Bash(${name} *)`, `Bash(${name} * -x)`, `Bash(rtk ${name}:*)`, `Bash(/usr/bin/${name}:*)`]) {
+                    if (checkAllowRule(rule) !== null) continue;
+                    checked++;
+                    expect(ruleWarning(rule), rule).not.toBeNull();
+                }
+            }
+        }
+        expect(checked).toBeGreaterThan(700);
     });
 });
 

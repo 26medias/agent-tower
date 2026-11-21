@@ -175,7 +175,8 @@ fn other(message: impl Into<String>) -> TowerError {
 // ---------------------------------------------------------------------------------------------
 
 /// The result of `floor_permissions_set`: the rules that the app stored, and a warning for each
-/// rule that lets an agent run the code of the project (`model::allow_rule_warning`).
+/// rule that lets an agent run the code of the project, and for each `Bash` rule with a wildcard
+/// (`model::allow_rule_warning`). The warnings are how the operator learns what a rule gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionsSaved {
     pub allow: Vec<String>,
@@ -809,7 +810,9 @@ impl TowerCore {
     /// written when one is bad. The text is trimmed and a duplicate is dropped. The old
     /// `[permissions]` table of `floor.toml` is removed (the rest of the file stays). The new rules
     /// apply at the next start of a session. The observer gets `floor_changed`. Returns the stored
-    /// list, and a warning for each rule that lets the agents run the code of the project.
+    /// list, and a warning for each rule that lets the agents run the code of the project (a build
+    /// tool, a script) and for each `Bash` rule with a wildcard (`allow_rule_warning`). An exact
+    /// `Bash` rule of another program has no warning.
     pub fn floor_permissions_set(
         &self,
         path: &Path,

@@ -84,7 +84,7 @@ describe("mock: a gone floor", () => {
 });
 
 describe("mock: the rules for commands with no question", () => {
-    it("floor_permissions_set returns the stored list and one warning for each rule that runs the project code", async () => {
+    it("floor_permissions_set returns the stored list and one warning for each rule that runs the project code or has a wildcard", async () => {
         const b = createMockBackend();
         const saved = await b.invoke<{ allow: string[]; warnings: string[] }>("floor_permissions_set", {
             path: FLOOR,
@@ -93,6 +93,7 @@ describe("mock: the rules for commands with no question", () => {
         expect(saved.allow).toEqual(["Bash(rtk cargo test:*)", "Bash(ls:*)"]);
         expect(saved.warnings).toEqual([
             "Bash(rtk cargo test:*): This rule lets each agent of the floor run the project's own code with no question.",
+            "Bash(ls:*): This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.",
         ]);
         expect(await b.invoke("floor_permissions_get", { path: FLOOR })).toEqual(saved.allow);
     });

@@ -73,14 +73,21 @@ refused: ...`, `there is no session of the last team to resume`, `the last team 
 ```ts
 interface PermissionsSaved {
   allow: string[];     // the stored rules, trimmed, with no duplicate
-  warnings: string[];  // one text for each rule that runs the code of the project
+  warnings: string[];  // one text for each rule that runs the code of the project, and for each Bash rule with a *
 }
 ```
 
 `floor_permissions_set` returned `string[]` before. It returns `PermissionsSaved` now. The old
-array is the field `allow`. A warning is `<rule>: This rule lets each agent of the floor run the
-project's own code with no question.` The rule is saved. The warning is for the operator to read.
-The UI shows each warning next to the saved list.
+array is the field `allow`. A warning is `<rule>: <text>`. The rule is saved. The warning is for
+the operator to read. The UI shows each warning next to the saved list. There are two texts, and a
+rule gets one at most (the stronger one):
+
+- For a build or package tool, and for a script of the project (also an exact rule):
+  `This rule lets each agent of the floor run the project's own code with no question.`
+- For each other `Bash` rule that has a `*` in it:
+  `This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.`
+
+An exact `Bash` rule of another program (no `*`) has no warning: it allows only that command.
 
 The rules are in the app config file (`programs.toml` in the config folder, mode 0600), in the
 table `[floor_permissions]`. Each key is the real absolute path of a floor (symbolic links
@@ -107,9 +114,19 @@ printable ASCII (0x20 to 0x7E). The whole entry is one of:
 - `Tool(pattern)` with `Tool` one of `Bash`, `Read`, `Glob`, `Grep`, `WebFetch`. The pattern has no
   `(` and no `)`, so one entry is one rule (`Bash(ls) Bash(rm:*)` and `Bash(ls:*))` are refused).
 
-The check is a guard against the mistakes of the operator. A list of blocked programs can never be
-complete, so each program that is not on a list is allowed: the list is the choice of the operator,
-and an agent cannot write it. The pattern must not be empty, and it depends on the tool:
+**The check is not a security boundary. It is informed consent:** the operator must know what each
+rule gives. A list of blocked programs can never be complete. Many programs write files or run
+other commands through their options (`sort -o`, `rg --pre`, `fd -x`, `gh`, `psql`, `man -P`,
+`less`, `patch`, and more), and a rule with a `*` lets the agent add any option. So the check does
+two things:
+
+1. It refuses what it can name: the programs and forms below. The list of blocked programs is a
+   best effort, and it is not complete.
+2. It gives a warning for each `Bash` rule that has a `*` in it (the texts are above). This
+   warning is the real control. The list is the choice of the operator, and an agent cannot write
+   it.
+
+The pattern must not be empty, and it depends on the tool:
 
 - `Bash`: the pattern does not start with a space. The first word (up to the first space or `:`)
   is not empty and has only `[A-Za-z0-9._/+-]`, so `Bash(*)`, `Bash(* *)`, `Bash(?*)`, `Bash(*.sh)`
@@ -130,18 +147,31 @@ and an agent cannot write it. The pattern must not be empty, and it depends on t
     `nano`, `emacs`, `kill`, `pkill`, `systemctl`, `mount`, `umount`, `crontab`, `at`, and a few
     wrappers (`ssh-agent`, `sshpass`, `expect`, `chroot`, `nsenter`, `ionice`, `taskset`,
     `numactl`, `runuser`, `setpriv`, `start-stop-daemon`, `run-parts`, `systemd-run`, `screen`,
-    `tmux`). A folder in front (`/bin/sh`) does not help, the case does not matter, and a
-    versioned name is the same program (`python3.12`, `lua5.4`).
-  - `git` has an allow list. The word after `git` is one of `status`, `log`, `diff`, `show`,
-    `blame`, `ls-files`, `rev-parse`, `describe`. Every other subcommand, no subcommand, and an
-    option before the subcommand are refused. A pattern with `--output`, `--exec` or `-c` is
-    refused too. `Bash(git status:*)` is allowed. `Bash(git:*)`, `Bash(git push:*)`,
-    `Bash(git rebase:*)` and `Bash(git log --output=x:*)` are refused.
-  - The build and package tools are allowed, with a warning: `cargo`, `npm`, `npx`, `pnpm`,
-    `yarn`, `make`, `just`, `uv`, `pip`, `go`, `gradle`, `mvn`, `pytest`, `tox`, `bundle`, `rake`,
-    `composer`, `dotnet`, also after `rtk`. A program that a relative path names
+    `tmux`), and, as a best effort (added 2026-11-21): `sqlite3`, `psql`, `mysql`, `man`, `less`,
+    `more`, `nvim`, `ex`, `ed`, `nodejs`, `tclsh`, `julia`, `Rscript`, `irb`, `ipython`,
+    `osascript`, `xdg-open`, `uvx`, `pipx`, `nix-shell`, `nix`, `direnv`, `mise`, `chrt`,
+    `prlimit`, `fakeroot`, `firejail`, `bwrap`, `valgrind`, `perf`, `hyperfine`, `install`,
+    `patch`. A folder in front (`/bin/sh`) does not help, the case does not matter, and a
+    versioned name is the same program (`python3.12`, `lua5.4`). The list is not complete.
+  - `git` rules must be exact. A `git` rule (also after `rtk`) with a `*` is refused with this
+    text: `A git rule must be the exact command, for example Bash(git status) or Bash(git diff --stat). A rule with * lets an agent add options such as --output, which writes files.`
+    The reason: a rule with `*` lets the agent add `--output=<file>`, which writes a file, so no
+    `git` subcommand is safe with a wildcard. The subcommand allow list stays for an exact rule:
+    the word after `git` is one of `status`, `log`, `diff`, `show`, `blame`, `ls-files`,
+    `rev-parse`, `describe`. Every other subcommand, no subcommand, and an option before the
+    subcommand are refused. An exact rule that has `--output`, `--exec`, `--ext-diff`,
+    `--textconv` or ` -c ` is refused too. `Bash(git status)` and `Bash(git diff --stat)` are
+    allowed, with no warning. `Bash(git status:*)`, `Bash(git log:*)`, `Bash(rtk git log:*)`,
+    `Bash(git diff *)`, `Bash(git:*)`, `Bash(git push:*)` and `Bash(git log --output=x)` are refused.
+  - The build and package tools are allowed, with the warning about the code of the project:
+    `cargo`, `npm`, `npx`, `pnpm`, `yarn`, `make`, `just`, `uv`, `pip`, `go`, `gradle`, `mvn`,
+    `pytest`, `tox`, `bundle`, `rake`, `composer`, `dotnet`, `cmake`, `ninja`, `bazel`, `poetry`,
+    `meson`, `scons`, also after `rtk`, also with a versioned name (`pip3`), and also for an exact
+    rule (`Bash(cargo fmt --check)`). A program that a relative path names
     (`./scripts/check.sh`) gets the warning too. They run the code of the project.
-  - Each other program is allowed.
+  - Each other program is allowed. With a `*` in the rule it gets the wildcard warning
+    (`Bash(ls:*)`, `Bash(sort:*)`, `Bash(gh:*)`, `Bash(rg:*)`, `Bash(jq:*)`). With no `*` it gets
+    no warning (`Bash(rtk git status)`, `Bash(cat README.md)`).
 - `Read`, `Glob`, `Grep`: a path that is relative to the project (not `/...`, not `~...`) with no
   `..` part. The bare names `Read`, `Glob` and `Grep` are refused: they open the whole disk. A
   pattern that starts with `.swarm/state` or `./.swarm/state`, a pattern that has
@@ -159,10 +189,16 @@ side checks again (`crates/core/src/model.rs`, `check_allow_rule`). A rule in th
 fails the check (the check can change in a new version, or someone edited the file by hand) is
 dropped when a session starts. The error text of a refusal names the reason.
 
-What stays open. The build and package tools run the code of the project, and an agent of the
-floor can write the code of its own worktree. So a rule for them lets that agent run code with no
-question. The warning says this. The app config is outside the project, but a Codex employee has no
-enforced limits on this machine, so it can write the file if it tries.
+What stays open (known limits). The build and package tools run the code of the project, and an
+agent of the floor can write the code of its own worktree. So a rule for them lets that agent run
+code with no question. The warning says this. The app config is outside the project, but a Codex
+employee has no enforced limits on this machine, so it can write the file if it tries. The list of
+blocked programs is not complete, and it cannot be: the warning of each wildcard rule is the
+control. The check does not resolve a host name, so `WebFetch(domain:127.0.0.1.nip.io)` passes.
+
+Known limit: the rules of a floor are stored by the path of the floor. If another floor takes that
+path (for example a folder is moved away and another folder is renamed to the same path), that
+floor gets those rules.
 
 ## Events
 

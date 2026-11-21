@@ -74,8 +74,11 @@ const PATH_TOOLS: [&str; 3] = ["Read", "Glob", "Grep"];
 /// that allows one of these with no question gives the agent a way around every other rule, so
 /// the app does not accept a rule for them. The check is on the name of the program, with no
 /// folder in front, with no regard to letter case, and also for a versioned name (`python3.12`,
-/// `lua5.4`). The list is a guard against a mistake of the operator. No list of programs can be
-/// complete. `git` is a special case (`GIT_ALLOWED_SUBCOMMANDS`). `rtk` is a wrapper
+/// `lua5.4`). The list is a best effort, and it is NOT complete: no list of programs can be
+/// complete, because many programs can write files or run other commands through their options
+/// (`sort -o`, `rg --pre`, `fd -x`, `gh`, and more). The real control is the warning that each
+/// rule with a wildcard gets (`allow_rule_warning`): it makes the operator know what the rule gives.
+/// `git` is a special case (`GIT_ALLOWED_SUBCOMMANDS`). `rtk` is a wrapper
 /// (`RTK_BLOCKED_SUBCOMMANDS`).
 const BASH_BLOCKED_PROGRAMS: &[&str] = &[
     "sh",
@@ -184,10 +187,48 @@ const BASH_BLOCKED_PROGRAMS: &[&str] = &[
     "systemd-run",
     "screen",
     "tmux",
+    // Programs that open a shell, an editor or a pager, or that run another program, through a
+    // command or an option. A best effort. The list is not complete (see above).
+    "sqlite3",
+    "psql",
+    "mysql",
+    "man",
+    "less",
+    "more",
+    "nvim",
+    "ex",
+    "ed",
+    "nodejs",
+    "tclsh",
+    "julia",
+    "rscript",
+    "irb",
+    "ipython",
+    "osascript",
+    "xdg-open",
+    "uvx",
+    "pipx",
+    "nix-shell",
+    "nix",
+    "direnv",
+    "mise",
+    "chrt",
+    "prlimit",
+    "fakeroot",
+    "firejail",
+    "bwrap",
+    "valgrind",
+    "perf",
+    "hyperfine",
+    "install",
+    "patch",
 ];
 
-/// The `git` subcommands that a rule can allow. They only read. A rule for `git` needs one of
-/// them as the first word after `git` (`Bash(git status:*)`). Every other subcommand is refused.
+/// The `git` subcommands that a rule can allow. A rule for `git` needs one of them as the first
+/// word after `git`. Every other subcommand is refused. A `git` rule must be the exact command
+/// (`Bash(git status)`, `Bash(git diff --stat)`): a rule with a wildcard lets an agent add an
+/// option such as `--output=<file>`, which writes a file. So no `git` subcommand is "safe" with a
+/// wildcard.
 const GIT_ALLOWED_SUBCOMMANDS: &[&str] = &[
     "status",
     "log",
@@ -208,15 +249,23 @@ const RTK_BLOCKED_SUBCOMMANDS: &[&str] = &[
 
 /// The build and package tools. A rule for them is allowed, because the operator wants for
 /// example `cargo test` with no question. They run the code of the project, so
-/// `floor_permissions_set` returns a warning for each such rule (`allow_rule_warning`).
+/// `floor_permissions_set` returns a warning for each such rule, also for an exact one
+/// (`allow_rule_warning`).
 const BUILD_TOOLS: &[&str] = &[
     "cargo", "npm", "npx", "pnpm", "yarn", "make", "just", "uv", "pip", "go", "gradle", "mvn",
-    "pytest", "tox", "bundle", "rake", "composer", "dotnet",
+    "pytest", "tox", "bundle", "rake", "composer", "dotnet", "cmake", "ninja", "bazel", "poetry",
+    "meson", "scons",
 ];
 
 /// The warning text for a rule that runs the code of the project.
 pub const PROJECT_CODE_WARNING: &str =
     "This rule lets each agent of the floor run the project's own code with no question.";
+
+/// The warning text for a `Bash` rule with a wildcard (`*`) that is not a build tool.
+pub const WILDCARD_WARNING: &str = "This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.";
+
+/// The text of the refusal of a `git` rule with a wildcard.
+pub const GIT_WILDCARD_REFUSAL: &str = "A git rule must be the exact command, for example Bash(git status) or Bash(git diff --stat). A rule with * lets an agent add options such as --output, which writes files.";
 
 /// Check one rule of the list of a floor. `Err` is the text for the operator.
 ///
@@ -229,10 +278,12 @@ pub const PROJECT_CODE_WARNING: &str =
 /// - `Bash`: the first word (up to the first space or `:`) is a plain program name of
 ///   `[A-Za-z0-9._/+-]`. The check unwraps `rtk` first: it applies to the words after `rtk`,
 ///   and `rtk` alone, or `rtk` with a word of `RTK_BLOCKED_SUBCOMMANDS` or an option, is
-///   refused. The program is not one of `BASH_BLOCKED_PROGRAMS`. For `git` the subcommand is one
-///   of `GIT_ALLOWED_SUBCOMMANDS`, and the pattern has no `--output`, `-c` or `--exec`. Each
-///   other program is allowed, with a warning for the build tools (`allow_rule_warning`). The
-///   pattern does not start with a space.
+///   refused. The program is not one of `BASH_BLOCKED_PROGRAMS` (a best effort: the list is not
+///   complete). For `git` the rule must be exact (no `*`), the subcommand is one of
+///   `GIT_ALLOWED_SUBCOMMANDS`, and the pattern has no `--output`, `--exec`, `--ext-diff`,
+///   `--textconv` or `-c`. Each other program is allowed. Each rule with a `*` gets a warning
+///   (`allow_rule_warning`), a stronger one for the build tools and for a script of the project.
+///   The pattern does not start with a space.
 /// - `Read`, `Glob`, `Grep`: a path that is relative to the project (it does not start with `/`
 ///   or `~`), has no `..` part, and does not name `.swarm/state`. These tools alone (no pattern)
 ///   are refused: they open the whole disk.
@@ -244,8 +295,10 @@ pub const PROJECT_CODE_WARNING: &str =
 /// with a hook that rewrites commands (for example RTK), `cargo test` becomes `rtk cargo test`,
 /// so the rule is `Bash(rtk cargo test:*)`.
 ///
-/// This check is a guard against the mistakes of the operator. The list is the choice of the
-/// operator, and it is in the app config, so an agent of the floor cannot change it.
+/// This check is NOT a security boundary. It is a guard against the mistakes of the operator, and
+/// the operator is told what a rule gives: each `Bash` rule with a wildcard gets a warning
+/// (`allow_rule_warning`). The list is the choice of the operator, and it is in the app config,
+/// so an agent of the floor cannot change it.
 pub fn check_allow_rule(rule: &str) -> Result<(), String> {
     let count = rule.chars().count();
     if count == 0 {
@@ -305,15 +358,31 @@ pub fn check_allow_rule(rule: &str) -> Result<(), String> {
     }
 }
 
-/// The warning for a rule that is allowed but that runs the code of the project: a build or
-/// package tool (`cargo`, `npm`, `make` and others, also after `rtk`), or a file of the project
-/// that is named by a relative path (`./scripts/check.sh`). `None` for any other rule, and for a
-/// rule that `check_allow_rule` refuses. The text starts with the rule.
+/// The warning for a rule that is allowed, or `None`. The text starts with the rule. There is one
+/// warning at most for each rule, and the stronger one wins:
+/// - `PROJECT_CODE_WARNING` for a rule that runs the code of the project: a build or package tool
+///   (`cargo`, `npm`, `make` and others, also after `rtk`, also for an exact rule), or a file of
+///   the project that is named by a relative path (`./scripts/check.sh`);
+/// - `WILDCARD_WARNING` for each other `Bash` rule with a `*` in it. The rule lets the agent add
+///   any argument, and many programs write files or run commands through their options. A list of
+///   blocked programs cannot be complete, so this warning is the real control.
+///
+/// An exact `Bash` rule (no `*`) of another program gets none: it allows only that command. A rule
+/// of another tool gets none. A rule that `check_allow_rule` refuses gets none.
 pub fn allow_rule_warning(rule: &str) -> Option<String> {
     let pattern = rule.strip_prefix("Bash(")?.strip_suffix(')')?;
     let program = check_bash_pattern(rule, pattern).ok()?;
-    (BUILD_TOOLS.contains(&program.name.as_str()) || program.runs_project_file)
-        .then(|| format!("{rule}: {PROJECT_CODE_WARNING}"))
+    if is_build_tool(&program.name) || program.runs_project_file {
+        return Some(format!("{rule}: {PROJECT_CODE_WARNING}"));
+    }
+    pattern
+        .contains('*')
+        .then(|| format!("{rule}: {WILDCARD_WARNING}"))
+}
+
+/// Is `name` a build or package tool, or a versioned name of one (`pip3`, `go1.22`)?
+fn is_build_tool(name: &str) -> bool {
+    BUILD_TOOLS.iter().any(|tool| is_blocked_name(name, tool))
 }
 
 /// The warnings for a list of rules, in the order of the rules. A rule that has none adds none.
@@ -420,29 +489,33 @@ fn check_git_pattern(rule: &str, pattern: &str, after: &str) -> Result<(), Strin
     let sub = &after[..sub_end];
     if sub.is_empty() {
         return Err(format!(
-            "\"{rule}\" names git with no subcommand, so it would allow git push and others that change or destroy work. Name a subcommand, for example Bash(git status:*)"
+            "\"{rule}\" names git with no subcommand, so it would allow git push and others that change or destroy work. Name a subcommand, for example Bash(git status)"
         ));
     }
     if !sub.starts_with(|c: char| c.is_ascii_lowercase()) {
         return Err(format!(
-            "\"{rule}\" has git with an option before the subcommand. Name the subcommand first, for example Bash(git status:*)"
+            "\"{rule}\" has git with an option before the subcommand. Name the subcommand first, for example Bash(git status)"
         ));
     }
     if !GIT_ALLOWED_SUBCOMMANDS.contains(&sub) {
         return Err(format!(
-            "\"{rule}\" allows git {sub}. A rule for git can name only the subcommands that read: {}. Another subcommand can change or destroy work, or run a program, so a rule for it would allow too much",
+            "\"{rule}\" allows git {sub}. A rule for git can name only these subcommands: {}. Another subcommand can change or destroy work, or run a program, so a rule for it would allow too much",
             GIT_ALLOWED_SUBCOMMANDS.join(", ")
         ));
     }
-    let bad_option = pattern.contains("--output")
-        || pattern.contains("--exec")
-        || pattern.contains("-c ")
-        || pattern.contains("-c:")
-        || pattern.ends_with("-c");
+    let bad_option = ["--output", "--exec", "--ext-diff", "--textconv"]
+        .iter()
+        .any(|option| pattern.contains(option))
+        || pattern.contains(" -c ")
+        || pattern.contains(" -c:")
+        || pattern.ends_with(" -c");
     if bad_option {
         return Err(format!(
-            "\"{rule}\" has the option --output, --exec or -c. Each of them can write a file or run a program, so a rule with it would allow too much"
+            "\"{rule}\" has the option --output, --exec, --ext-diff, --textconv or -c. Each of them can write a file or run a program, so a rule with it would allow too much"
         ));
+    }
+    if pattern.contains('*') {
+        return Err(GIT_WILDCARD_REFUSAL.to_owned());
     }
     Ok(())
 }
@@ -555,8 +628,9 @@ mod tests {
     fn good_rules_pass() {
         for rule in [
             "Bash(cargo test:*)",
-            "Bash(git status:*)",
+            "Bash(git status)",
             "Bash(git diff)",
+            "Bash(git diff --stat)",
             "Bash(npm run build)",
             "Bash(rtk cargo test:*)",
             "Bash(./scripts/check.sh:*)",
@@ -646,6 +720,7 @@ mod tests {
             ("Bash(git checkout:*)", "allows git checkout"),
             ("Bash(git config:*)", "allows git config"),
             ("Bash(git -c x=y status)", "option before"),
+            ("Bash(git status:*)", "must be the exact command"),
             ("Bash(rtk:*)", "no command after it"),
             ("Bash(rtk)", "no command after it"),
             ("Bash(rtk proxy:*)", "allows rtk proxy"),
@@ -685,17 +760,19 @@ mod tests {
         assert!(check_allow_rule("Bash(python3-config:*)").is_ok());
     }
 
-    /// What a rule gets under the design of 2026-11-21.
+    /// What a rule gets under the design of 2026-11-21 (the third version: informed consent).
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Expect {
         /// Allowed, with no warning.
         Pass,
         /// Allowed, with the warning about the code of the project.
         Warn,
+        /// Allowed, with the warning about a wildcard.
+        Wild,
         /// Refused.
         No,
     }
-    use Expect::{No, Pass, Warn};
+    use Expect::{No, Pass, Warn, Wild};
 
     fn outcome(rule: &str) -> Expect {
         match (check_allow_rule(rule), allow_rule_warning(rule)) {
@@ -704,13 +781,15 @@ mod tests {
                 No
             }
             (Ok(()), None) => Pass,
-            (Ok(()), Some(_)) => Warn,
+            (Ok(()), Some(warning)) if warning == format!("{rule}: {PROJECT_CODE_WARNING}") => Warn,
+            (Ok(()), Some(warning)) if warning == format!("{rule}: {WILDCARD_WARNING}") => Wild,
+            (Ok(()), Some(warning)) => panic!("{rule}: an unknown warning: {warning}"),
         }
     }
 
-    /// The rules of the reviewer (about 110, from the probe `zz_rules.rs`), each with the result
-    /// that the new design gives. A rule that the old check let through, and that is refused now,
-    /// has `No` and a comment.
+    /// The rules of the reviewers (about 110 from the probe `zz_rules.rs`, and about 90 from the
+    /// probe `zz_a3.rs`), each with the result that the new design gives. A rule that the old
+    /// check let through, and that is refused now, has `No` and a comment.
     #[test]
     fn the_rules_of_the_review_get_the_result_of_the_new_design() {
         let table: &[(&str, Expect)] = &[
@@ -744,8 +823,8 @@ mod tests {
             ("Bash(parallel:*)", No),
             ("Bash(pkexec:*)", No),
             ("Bash(docker:*)", No),
-            // A name that no program has (not blocked).
-            ("Bash(python3-x:*)", Pass),
+            // A name that no program has (not blocked): a wildcard warning.
+            ("Bash(python3-x:*)", Wild),
             // Programs that run a command, write a file or send data out.
             ("Bash(find:*)", No),
             ("Bash(awk:*)", No),
@@ -791,17 +870,37 @@ mod tests {
             ("Bash(rtk rtk proxy:*)", No),
             ("Bash(rtk -v cargo:*)", No),
             ("Bash(rtk find:*)", No),
-            ("Bash(rtk git status:*)", Pass),
-            ("Bash(rtk ls:*)", Pass),
-            // `git`: only the subcommands that read.
-            ("Bash(git status:*)", Pass),
-            ("Bash(git log:*)", Pass),
-            ("Bash(git diff:*)", Pass),
-            ("Bash(git show:*)", Pass),
-            ("Bash(git blame:*)", Pass),
-            ("Bash(git ls-files:*)", Pass),
-            ("Bash(git rev-parse:*)", Pass),
-            ("Bash(git describe:*)", Pass),
+            ("Bash(rtk git status:*)", No),
+            ("Bash(rtk git status)", Pass),
+            ("Bash(rtk ls:*)", Wild),
+            // `git`: a rule must be the exact command, and a subcommand of the allow list.
+            ("Bash(git status)", Pass),
+            ("Bash(git diff --stat)", Pass),
+            ("Bash(git log --oneline)", Pass),
+            ("Bash(git show)", Pass),
+            ("Bash(git blame x)", Pass),
+            ("Bash(git ls-files)", Pass),
+            ("Bash(git rev-parse HEAD)", Pass),
+            ("Bash(git describe)", Pass),
+            ("Bash(git status:*)", No),
+            ("Bash(git status *)", No),
+            ("Bash(git log:*)", No),
+            ("Bash(rtk git log:*)", No),
+            ("Bash(git diff:*)", No),
+            ("Bash(git diff *)", No),
+            ("Bash(git show:*)", No),
+            ("Bash(git blame:*)", No),
+            ("Bash(git ls-files:*)", No),
+            ("Bash(git rev-parse:*)", No),
+            ("Bash(git describe:*)", No),
+            ("Bash(git log --oneline:*)", No),
+            ("Bash(git log --output=x)", No),
+            ("Bash(git diff --ext-diff)", No),
+            ("Bash(git diff --ext-diff:*)", No),
+            ("Bash(git log -p --textconv)", No),
+            ("Bash(git log -p --textconv:*)", No),
+            ("Bash(git -C x log:*)", No),
+            ("Bash(git -C x log)", No),
             ("Bash(git -c:*)", No),
             ("Bash(git grep:*)", No),
             ("Bash(git rebase:*)", No),
@@ -826,14 +925,92 @@ mod tests {
             ("Bash(git log -c x=y)", No),
             ("Bash(git log -c:*)", No),
             ("Bash(git log -c)", No),
-            ("Bash(git log --oneline:*)", Pass),
             // Versioned names.
             ("Bash(python3.12:*)", No),
             ("Bash(lua5.4:*)", No),
             // Each other program is the choice of the operator.
-            ("Bash(ls:*)", Pass),
-            ("Bash(/usr/bin/ls:*)", Pass),
-            ("Bash(pythonista:*)", Pass),
+            ("Bash(ls:*)", Wild),
+            ("Bash(/usr/bin/ls:*)", Wild),
+            ("Bash(pythonista:*)", Wild),
+            ("Bash(ls)", Pass),
+            ("Bash(cat README.md)", Pass),
+            ("Bash(/usr/bin/ls -l)", Pass),
+            // An exact rule of a build tool or of a script still runs the code of the project.
+            ("Bash(cargo fmt --check)", Warn),
+            ("Bash(rtk cargo fmt --check)", Warn),
+            ("Bash(npm run build)", Warn),
+            ("Bash(./scripts/check.sh)", Warn),
+            ("Bash(pip3 install x)", Warn),
+            ("Bash(go1.22 test)", Warn),
+            // The programs that the third review showed (`zz_a3.rs`). Each program that is not
+            // refused here gets the wildcard warning, because a prefix rule lets the agent add any
+            // option. A refused name is a best effort: the list is not complete.
+            ("Bash(rtk rtk proxy:*)", No),
+            ("Bash(rtk -v proxy:*)", No),
+            ("Bash(rtk xargs:*)", No),
+            ("Bash(nice -n 5 sh:*)", No),
+            ("Bash(/usr/bin/python3:*)", No),
+            ("Bash(bash5:*)", No),
+            ("Bash(less:*)", No),
+            ("Bash(more:*)", No),
+            ("Bash(man:*)", No),
+            ("Bash(rtk man:*)", No),
+            ("Bash(at:*)", No),
+            ("Bash(sqlite3:*)", No),
+            ("Bash(psql:*)", No),
+            ("Bash(mysql:*)", No),
+            ("Bash(nvim:*)", No),
+            ("Bash(ex:*)", No),
+            ("Bash(ed:*)", No),
+            ("Bash(nodejs:*)", No),
+            ("Bash(uvx:*)", No),
+            ("Bash(pipx:*)", No),
+            ("Bash(hyperfine:*)", No),
+            ("Bash(valgrind:*)", No),
+            ("Bash(perf:*)", No),
+            ("Bash(chrt:*)", No),
+            ("Bash(prlimit:*)", No),
+            ("Bash(fakeroot:*)", No),
+            ("Bash(firejail:*)", No),
+            ("Bash(bwrap:*)", No),
+            ("Bash(install:*)", No),
+            ("Bash(patch:*)", No),
+            ("Bash(osascript:*)", No),
+            ("Bash(xdg-open:*)", No),
+            ("Bash(tclsh:*)", No),
+            ("Bash(Rscript:*)", No),
+            ("Bash(julia:*)", No),
+            ("Bash(irb:*)", No),
+            ("Bash(ipython:*)", No),
+            ("Bash(nix-shell:*)", No),
+            ("Bash(nix:*)", No),
+            ("Bash(direnv:*)", No),
+            ("Bash(mise:*)", No),
+            ("Bash(poetry:*)", Warn),
+            ("Bash(cmake:*)", Warn),
+            ("Bash(ninja:*)", Warn),
+            ("Bash(bazel:*)", Warn),
+            ("Bash(meson:*)", Warn),
+            ("Bash(scons:*)", Warn),
+            ("Bash(ssh-keygen:*)", Wild),
+            ("Bash(gh:*)", Wild),
+            ("Bash(rg:*)", Wild),
+            ("Bash(rtk rg:*)", Wild),
+            ("Bash(fd:*)", Wild),
+            ("Bash(jq:*)", Wild),
+            ("Bash(sort:*)", Wild),
+            ("Bash(unzip:*)", Wild),
+            ("Bash(gzip:*)", Wild),
+            ("Bash(rclone:*)", Wild),
+            ("Bash(aws:*)", Wild),
+            ("Bash(terraform:*)", Wild),
+            ("Bash(openssl:*)", Wild),
+            ("Bash(zip:*)", Wild),
+            ("Bash(mkdir:*)", Wild),
+            ("Bash(touch:*)", Wild),
+            ("Bash(ls *)", Wild),
+            ("Bash(ls * -l)", Wild),
+            ("Bash(rg --pre x:*)", Wild),
             // The tools with a path.
             ("Read(./../x)", No),
             ("Read(src/../../x)", No),
@@ -846,6 +1023,9 @@ mod tests {
             ("Read(.swarm/**)", No),
             ("Read(.swarm/*)", No),
             ("Read(.swarm/reports/**)", Pass),
+            ("Read(.swarm/employees/**)", Pass),
+            ("Read(*/state/**)", Pass),
+            ("Read(.sw*/state/**)", Pass),
             ("Read(**)", Pass),
             ("Read(*)", Pass),
             ("Read(.ssh/**)", Pass),
@@ -866,6 +1046,12 @@ mod tests {
             ("WebFetch(domain:Wiki.INTERNAL)", No),
             ("WebFetch(domain:a.localhost)", No),
             ("WebFetch(domain:1password.com)", Pass),
+            ("WebFetch(domain:127.0.0.1)", No),
+            ("WebFetch(domain:metadata.google.internal)", No),
+            // Known limit: the check does not resolve a name. These names point at 127.0.0.1.
+            ("WebFetch(domain:nip.io)", Pass),
+            ("WebFetch(domain:127.0.0.1.nip.io)", Pass),
+            ("WebFetch(domain:localtest.me)", Pass),
             ("WebSearch", Pass),
             // Other tools.
             ("Edit(./x)", No),
@@ -881,20 +1067,162 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// The invariant of the design: a `Bash` rule with a wildcard is never accepted with no
+    /// warning. The names are generated, so the test does not depend on a list of programs. Each
+    /// name is built so that it is not on any list, and the test checks that the rule passes the
+    /// check (so a blocked name would fail the test, not hide in it).
+    #[test]
+    fn a_bash_rule_with_a_wildcard_always_has_a_warning() {
+        let mut names: Vec<String> = Vec::new();
+        for i in 0..40 {
+            names.push(format!("zq{i}x"));
+            names.push(format!("tool-{i}"));
+            names.push(format!("my_prog{i}.sh2"));
+        }
+        for real in [
+            "ls",
+            "cat",
+            "grep",
+            "rg",
+            "fd",
+            "jq",
+            "sort",
+            "uniq",
+            "head",
+            "tail",
+            "wc",
+            "gh",
+            "aws",
+            "gcloud",
+            "terraform",
+            "helm",
+            "openssl",
+            "zip",
+            "unzip",
+            "gzip",
+            "mkdir",
+            "touch",
+            "diff",
+            "stat",
+            "du",
+            "df",
+            "ps",
+            "date",
+            "whoami",
+            "ssh-keygen",
+            "rclone",
+            "bat",
+            "exa",
+            "eza",
+            "tree",
+            "file",
+            "xxd",
+            "hexdump",
+            "base64",
+            "shasum",
+            "md5sum",
+            "yq",
+            "fzf",
+            "tokei",
+            "sqlx",
+            "diesel",
+            "prettier",
+            "eslint",
+            "tsc",
+            "ruff",
+            "black",
+            "mypy",
+        ] {
+            names.push((*real).to_owned());
+        }
+        let mut checked = 0;
+        for name in &names {
+            for rule in [
+                format!("Bash({name}:*)"),
+                format!("Bash({name} *)"),
+                format!("Bash({name} -x:*)"),
+                format!("Bash({name} * -x)"),
+                format!("Bash(rtk {name}:*)"),
+                format!("Bash(/usr/bin/{name}:*)"),
+                format!("Bash(./bin/{name}:*)"),
+            ] {
+                if check_allow_rule(&rule).is_err() {
+                    continue;
+                }
+                checked += 1;
+                let warning = allow_rule_warning(&rule)
+                    .unwrap_or_else(|| panic!("{rule}: accepted with no warning"));
+                assert!(warning.starts_with(&format!("{rule}: ")), "{warning}");
+            }
+        }
+        // The names are not blocked, so almost every rule is checked. A guard for the test itself.
+        assert!(checked > 800, "only {checked} rules were checked");
+        // The same rule with no wildcard is exact: no warning, except for the code of the project.
+        assert_eq!(allow_rule_warning("Bash(zq1x -x)"), None);
+        assert_eq!(allow_rule_warning("Bash(rtk gh pr list)"), None);
+    }
+
     #[test]
     fn a_warning_names_the_rule_and_says_why() {
-        let rules: Vec<String> = ["Bash(ls:*)", "Bash(rtk cargo test:*)", "Bash(git log:*)"]
-            .iter()
-            .map(|r| (*r).to_owned())
-            .collect();
+        let rules: Vec<String> = [
+            "Bash(ls:*)",
+            "Bash(rtk cargo test:*)",
+            "Bash(git log:*)",
+            "Bash(rtk git status)",
+            "Bash(cargo fmt --check)",
+            "Bash(sort *)",
+        ]
+        .iter()
+        .map(|r| (*r).to_owned())
+        .collect();
+        // One warning for each rule, in the order of the rules. The refused rule `git log:*` and
+        // the exact rule `rtk git status` have none. A build tool gets the stronger text.
         assert_eq!(
             allow_rule_warnings(&rules),
             [
-                "Bash(rtk cargo test:*): This rule lets each agent of the floor run the project's own code with no question."
+                "Bash(ls:*): This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.",
+                "Bash(rtk cargo test:*): This rule lets each agent of the floor run the project's own code with no question.",
+                "Bash(cargo fmt --check): This rule lets each agent of the floor run the project's own code with no question.",
+                "Bash(sort *): This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.",
             ]
         );
         assert_eq!(allow_rule_warning("Bash(sh:*)"), None);
         assert_eq!(allow_rule_warning("WebSearch"), None);
+        assert_eq!(allow_rule_warning("Read(./src/**)"), None);
+    }
+
+    #[test]
+    fn a_git_rule_with_a_wildcard_is_refused_with_the_text_for_git() {
+        let text = "A git rule must be the exact command, for example Bash(git status) or Bash(git diff --stat). A rule with * lets an agent add options such as --output, which writes files.";
+        for rule in [
+            "Bash(git log:*)",
+            "Bash(rtk git log:*)",
+            "Bash(git diff *)",
+            "Bash(git status:*)",
+            "Bash(git show --stat *)",
+            "Bash(/usr/bin/git blame:*)",
+        ] {
+            assert_eq!(check_allow_rule(rule), Err(text.to_owned()), "{rule}");
+        }
+        for rule in [
+            "Bash(git status)",
+            "Bash(rtk git diff --stat)",
+            "Bash(git log --oneline -5)",
+        ] {
+            assert_eq!(check_allow_rule(rule), Ok(()), "{rule}");
+            assert_eq!(allow_rule_warning(rule), None, "{rule}");
+        }
+        // An exact rule with an option that writes a file or runs a program is refused.
+        for option in [
+            "--output=x",
+            "--exec=x",
+            "--ext-diff",
+            "--textconv",
+            "-c x=y",
+        ] {
+            let rule = format!("Bash(git log {option})");
+            assert!(check_allow_rule(&rule).is_err(), "{rule}");
+        }
     }
 
     #[test]

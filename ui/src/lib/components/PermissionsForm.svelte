@@ -2,8 +2,9 @@
     // The section "Commands with no question" of the settings panel (docs/ipc-m3.md): the rules of
     // the open floor. The app stores them in its own config, outside the project folder. A list, a
     // field to add a rule, and a remove button for each rule. A bad rule is refused before the call,
-    // with the reason. A rule that runs the code of the project is saved with a warning from the
-    // server: the warning shows on that rule. An old `[permissions]` table in the project is only
+    // with the reason. A rule with a wildcard, and a rule that runs the code of the project, are
+    // saved with a warning from the server: the warning shows on that rule. The check is not a
+    // security boundary. It tells the operator what each rule gives. An old `[permissions]` table in the project is only
     // proposed (an agent can have written it): the operator reads it and clicks "Use these rules".
     import { onMount } from "svelte";
     import { EXAMPLE_RULES, addRule, mergeRules, removeRule } from "$lib/permissions";
@@ -75,8 +76,8 @@
             The rules apply to the Claude employees of this floor (not to an employee that asks before each action) and only to a
             session that starts after you save them. A session that runs keeps its old rules. The app refuses a rule that is too wide
             or that runs other programs: a rule for every command, a shell, an interpreter, <code>find</code>, <code>sed</code>,
-            <code>rm</code>, <code>curl</code>, <code>git</code> with a subcommand that changes things, and more. The server decides,
-            and its reason shows here.
+            <code>rm</code>, <code>curl</code>, <code>git</code> with a <code>*</code> or with a subcommand that changes things, and
+            more. The list of refused programs is not complete. The server decides, and its reason shows here.
         </p>
     {/if}
     <p class="hint" data-testid="rules-storage">
@@ -84,8 +85,8 @@
         through the project.
     </p>
     <p class="warning" data-testid="rules-warning" role="note">
-        Each rule lets every agent of this floor run that command with no question. Build tools such as cargo, npm and make run the
-        code of the project.
+        A rule with * lets every agent of this floor run that program with any arguments and no question. Many programs can write
+        files or run other commands through their options. Prefer an exact rule when one exact command is enough.
     </p>
     <p class="hint" data-testid="rules-hook-note">
         A rule must match the command as the CLI sees it. If a hook on this machine rewrites commands (for example
