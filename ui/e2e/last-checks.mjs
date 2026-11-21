@@ -331,7 +331,8 @@ export async function lastChecks({ page, check, url, shots }) {
     await page.waitForFunction(() => window.__towerMockCalls.some((c) => c.command === "floor_open" && c.args.path === "/home/demo/big"));
     await page.locator(`.storey[data-path="${BIG}"]`).evaluate((g) => g.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await page.waitForSelector(`.storey.on[data-path="${BIG}"]`);
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-activity"] li').length >= 2);
+    // One row is enough: the question row replaced the "started" status row of the same employee (the fold rule).
+    await page.waitForFunction(() => /asks a question/.test(document.querySelector('[data-testid="team-activity"]')?.textContent ?? ""));
     const bigTexts = await lineTexts();
     check("N3 activity: the lines of a floor that was never opened name the employee (Pia (Project Manager)), not the slug (pm)",
         bigTexts.includes("Pia (Project Manager) asks a question") && !bigTexts.some((t) => /^pm /.test(t)), JSON.stringify(bigTexts));

@@ -7,6 +7,7 @@ import {
     appendActivity,
     exchangeDraft,
     messageDraft,
+    repeatsTaskRow,
     sessionDrafts,
     startedDraft,
     taskDrafts,
@@ -560,7 +561,8 @@ class Store {
 
     /** A `message-delivered` event: add the row, and mark the tab of the receiver for `MSG_MARK_MS` when it is not in view. */
     private onMessageDelivered(payload: MessageDeliveredPayload): void {
-        this.addActivity([messageDraft(payload)]);
+        // A task status message repeats the task row of the list: no second row. The MSG mark of the tab still shows.
+        if (!repeatsTaskRow(payload)) this.addActivity([messageDraft(payload)]);
         const session = sessionOf(this.sessionState, payload.path, payload.toSlug);
         if (!session || this.inView(session)) return;
         const id = session.sessionId;

@@ -388,9 +388,11 @@ export async function last3Checks({ page, check, url, shots }) {
     let texts = await lineTexts();
     check("D-c: a delivered message is a row \"Maya → Lin: <the first 80 characters>\" (control characters out, newline as a space), and an ellipsis when it is cut", texts.includes(`Maya ${ARROW} Lin: ${preview}\u2026`) && preview.length === 80, JSON.stringify(texts));
     check("D-c: the row never carries more than the first 80 characters of the body", !texts.some((t) => t.includes("next message of the team")), JSON.stringify(texts));
-    check("D-c: a task message is \"Maya → Lin: task T-3 assigned\" or \"Maya → Lin: T-3 is now in review\"", texts.includes(`Maya ${ARROW} Lin: task T-3 assigned`) && texts.includes(`Maya ${ARROW} Lin: T-3 is now in review`), JSON.stringify(texts));
+    // Changed on purpose (final review): a task STATUS message gets no row, because the task row "T-3 is now in review"
+    // already says it. An assignment keeps its row.
+    check("D-c: a task assignment is a row \"Maya → Lin: task T-3 assigned\", and a task status message adds no second row", texts.includes(`Maya ${ARROW} Lin: task T-3 assigned`) && !texts.some((t) => t.includes(`${ARROW} Lin: T-3 is now`)), JSON.stringify(texts));
     check("D-c: a task that the operator gave shows \"Operator → Lin: task T-2 assigned\"", texts.includes(`Operator ${ARROW} Lin: task T-2 assigned`));
-    check("D-c: the message rows have the kind message", (await activity.locator('li button[data-kind="message"]').count()) === 4);
+    check("D-c: the message rows have the kind message", (await activity.locator('li button[data-kind="message"]').count()) === 3);
     // A click goes to the tab of the receiver.
     await page.locator('li button[data-kind="message"]', { hasText: "task T-3 assigned" }).click();
     check("D-c: a click on a message row goes to the tab of the receiver", (await page.locator(".bar").getAttribute("data-slug")) === "eng-lin" && (await page.locator(`.tab.active[data-session="${lin2}"]`).count()) === 1);
@@ -418,20 +420,19 @@ export async function last3Checks({ page, check, url, shots }) {
     await M("setStatus", pm2, "working");
     await pause();
     const pmRows = await rowsOf("Maya (Project Manager)");
-    // Oldest to newest. Changed on purpose (activity fold): the messages that Maya sent earlier do not stop the fold, so her "is working" row
-    // replaced her "is idle" row of the start. Then the question row, then "is idle" (after the question) that the last "is working" replaced.
-    check("D-c: a question row is never folded away, and the status row after it replaces the older status row after it",
-        JSON.stringify(pmRows) === JSON.stringify(["Maya (Project Manager) is working", "Maya (Project Manager) asks a question", "Maya (Project Manager) is working"]), JSON.stringify(pmRows));
+    // Changed on purpose (final review): a question row is the status while the question is open. The next status row
+    // means that the question is over, so one row is left for Maya.
+    check("D-c: after a question and the next status, Maya has ONE row: the newest status",
+        JSON.stringify(pmRows) === JSON.stringify(["Maya (Project Manager) is working"]), JSON.stringify(pmRows));
     await M("deliverMessage", FLOOR, "pm", "eng-lin", "A message from Maya lies between two status rows of Maya.");
     await pause();
     await M("setStatus", pm2, "idle");
     await pause();
     const pmRows2 = await rowsOf("Maya (Project Manager)");
-    // Changed on purpose (activity fold): a message does NOT stop the fold. Maya sent a message, then her turn ended:
-    // the new "answered" row replaces her old "is working" row. Each employee keeps its newest status row. The
-    // question row stays.
-    check("D-c: Maya sends a message, then answers: her \"answered\" row replaces her \"is working\" row, and her question row stays",
-        JSON.stringify(pmRows2) === JSON.stringify(["Maya (Project Manager) answered", ...pmRows.slice(1)]) && pmRows2.length === pmRows.length, JSON.stringify(pmRows2));
+    // A message does NOT stop the fold. Maya sent a message, then her turn ended: her "answered" row replaces her
+    // "is working" row, and she still has one row.
+    check("D-c: Maya sends a message, then answers: her \"answered\" row replaces her \"is working\" row",
+        JSON.stringify(pmRows2) === JSON.stringify(["Maya (Project Manager) answered"]), JSON.stringify(pmRows2));
     check("D-c: the list is still newest first, and it has no row about a status twice for one employee", (await rows().count()) === (await lineTexts()).length);
     await activity.screenshot({ path: join(shots, "activity-list-2560.png") });
     await shot("activity-2560.png");

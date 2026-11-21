@@ -136,6 +136,14 @@ export function taskDrafts(
  * task it is "Maya → Eli: task T-3 assigned" (an assignment) or "Maya → Eli: T-3 is now in review" (a status
  * message). A click goes to the tab of the receiver.
  */
+/**
+ * True for a delivered message that only repeats a task status ("T-2 is now in review"). The task row of the list
+ * already says it ("T-2 is now in review"), so the list gets no second row for it.
+ */
+export function repeatsTaskRow(p: MessageDeliveredPayload): boolean {
+    return p.kind === "task" && p.taskId !== null && p.taskStatus !== null && p.taskStatus !== undefined;
+}
+
 export function messageDraft(p: MessageDeliveredPayload): ActivityDraft {
     // The preview has 80 characters at most. A text of that length is probably cut: the row ends with "…".
     let what = p.preview.length >= PREVIEW_CHARS ? `${p.preview}\u2026` : p.preview;
@@ -171,21 +179,17 @@ export const FOLD_MS = 5 * 60 * 1000;
  * Add lines at the end of the list (the newest). The rule for the status rows (kind `session`: "is working",
  * "answered", "is idle", "is done", "stopped"). The aim is ONE current status row for each employee.
  *
- *  1. A new status row of an employee replaces that employee's previous status row, when that row is younger than
+ *  1. A new status row of an employee replaces ALL older status rows of that employee that are younger than
  *     `FOLD_MS`. Rows of other employees do not matter.
- *  2. A question row or a start row of the same employee ("Maya asks a question", "Ada started Maya") lies between
- *     two status rows of that employee. They tell a story ("asks, then works, then answers"), so the old status row
- *     stays and no fold happens.
- *  3. A message row never stops the fold, not a message to the employee and not a message from it. A message is an
- *     event of its own. The real app delivers it after the status row of the sender ("Maya answered", then "Maya →
- *     Eli: ..."). If a message stopped the fold, the list would show "Maya answered" twice, with the messages
- *     between them. (The first version of this rule did that. The live run "dc-activity" showed it.)
- *  4. Each employee that took part keeps its newest status row. A status row is never dropped because a message
- *     row is near it. (An earlier version dropped the "answered" row after a message of the same employee. Then an
- *     employee had no status row at all: the live run "final-b6" showed it.)
+ *  2. A question row is the status of the employee while the question is open. A new status row of the employee
+ *     means that the question is over, so the question row goes. A new question row replaces the status rows and
+ *     the older question rows of that employee in the same way. (An earlier version kept "is working", "asks a
+ *     question" and "answered" for each employee: the live run "final-b13" showed 28 rows for a task of one file.)
+ *  3. A message row and a start row never stop the fold, and they are never removed.
+ *  4. Each employee that took part keeps its newest status row or its open question row.
  *
- * Rows for questions, starts, tasks and messages are never removed by this function. `nextId` gives the ID of a
- * new line.
+ * Rows for starts, tasks, messages and stopped exchanges are never removed by this function. `nextId` gives the ID
+ * of a new line.
  */
 export function appendActivity(
     list: readonly ActivityEntry[],
@@ -195,23 +199,16 @@ export function appendActivity(
 ): ActivityEntry[] {
     const out = [...list];
     for (const draft of drafts) {
-        let add = true;
-        if (draft.kind === "session" && draft.slug !== undefined) {
+        if ((draft.kind === "session" || draft.kind === "question") && draft.slug !== undefined) {
             const slug = draft.slug;
-            // The previous status row of the employee. Rules 1 to 3.
-            let previous = -1;
+            // Rules 1 and 2: the older status rows and question rows of this employee go, when they are young enough.
             for (let i = out.length - 1; i >= 0; i--) {
                 const row = out[i];
-                if (row.path !== draft.path) continue;
-                if (row.kind === "session" && row.slug === slug) {
-                    previous = i;
-                    break;
-                }
-                if ((row.kind === "question" || row.kind === "started") && row.slug === slug) break;
+                if (row.path !== draft.path || row.slug !== slug) continue;
+                if ((row.kind === "session" || row.kind === "question") && at - row.at < FOLD_MS) out.splice(i, 1);
             }
-            if (previous >= 0 && at - out[previous].at < FOLD_MS) out.splice(previous, 1);
         }
-        if (add) out.push({ ...draft, id: nextId(), at });
+        out.push({ ...draft, id: nextId(), at });
     }
     return out;
 }

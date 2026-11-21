@@ -7,6 +7,7 @@ import {
     exchangeDraft,
     lineText,
     messageDraft,
+    repeatsTaskRow,
     sessionDrafts,
     startedDraft,
     statusPhrase,
@@ -248,32 +249,58 @@ describe("the fold of the status rows", () => {
         expect(texts(list)).toEqual(["pm is working", "eng answered"]);
     });
 
-    it("never removes a question, a start, a task row or a message row", () => {
+    it("never removes a start, a task row or a message row", () => {
         const list = run([
-            [0, other("question", "eng", { text: "eng asks a question" })],
             [1, other("started", "eng", { text: "Ada started eng" })],
             [2, other("task", "eng", { taskId: 1, text: "T-1 goes to eng" })],
             [3, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: hi" })],
             [4, status("eng", "is working")],
             [5, status("eng", "answered")],
         ]);
-        expect(texts(list)).toEqual(["eng asks a question", "Ada started eng", "T-1 goes to eng", "Maya \u2192 Eli: hi", "eng answered"]);
+        expect(texts(list)).toEqual(["Ada started eng", "T-1 goes to eng", "Maya \u2192 Eli: hi", "eng answered"]);
     });
 
-    it("does not fold across a row of another kind for the same employee", () => {
-        const list = run([
+    it("a question row is the status while it is open, and it goes when the next status comes", () => {
+        // "is working", then the question: the question replaces the status row.
+        const asked = run([
+            [0, status("eng", "is working")],
+            [1, other("question", "eng", { text: "eng asks a question" })],
+        ]);
+        expect(texts(asked)).toEqual(["eng asks a question"]);
+        // The operator answers and the employee works again: the question is over, one status row is left.
+        const after = run([
             [0, status("eng", "is working")],
             [1, other("question", "eng", { text: "eng asks a question" })],
             [2, status("eng", "is working")],
+            [3, status("eng", "answered")],
         ]);
-        expect(texts(list)).toEqual(["eng is working", "eng asks a question", "eng is working"]);
-        // A start row of the same employee also lies between.
+        expect(texts(after)).toEqual(["eng answered"]);
+        // The question of another employee stays.
+        const two = run([
+            [0, other("question", "pm", { text: "pm asks a question" })],
+            [1, status("eng", "is working")],
+        ]);
+        expect(texts(two)).toEqual(["pm asks a question", "eng is working"]);
+        // A start row of the same employee does not stop the fold, and it stays.
         const started = run([
             [0, status("eng", "is working")],
             [1, other("started", "eng", { text: "Ada started eng" })],
             [2, status("eng", "is working")],
         ]);
-        expect(texts(started)).toEqual(["eng is working", "Ada started eng", "eng is working"]);
+        expect(texts(started)).toEqual(["Ada started eng", "eng is working"]);
+        // An old question row (older than the fold time) stays.
+        const old = run([
+            [0, other("question", "eng", { text: "eng asks a question" })],
+            [FOLD_MS + 1, status("eng", "is working")],
+        ]);
+        expect(texts(old)).toEqual(["eng asks a question", "eng is working"]);
+    });
+
+    it("a task status message repeats the task row, and other messages do not", () => {
+        expect(repeatsTaskRow(delivered({ kind: "task", taskId: 3, taskStatus: "review" }))).toBe(true);
+        expect(repeatsTaskRow(delivered({ kind: "task", taskId: 3, taskStatus: "" }))).toBe(true);
+        expect(repeatsTaskRow(delivered({ kind: "task", taskId: 3 }))).toBe(false);
+        expect(repeatsTaskRow(delivered())).toBe(false);
     });
 
     it("folds across a message, to the employee or from it (the live run showed \"Maya answered\" twice)", () => {
