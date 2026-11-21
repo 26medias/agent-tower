@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError, programProblem, splitFileError, tidyError } from "./messages";
+import { describeError, isFloorGone, isPathError, noticePlan, programProblem, splitFileError, tidyError } from "./messages";
 
 describe("tidyError", () => {
     it("removes the code prefix and starts with a capital letter", () => {
@@ -50,5 +50,48 @@ describe("splitFileError", () => {
 
     it("keeps a text that has no file name", () => {
         expect(splitFileError("something odd")).toEqual({ file: "", folder: "", message: "something odd" });
+    });
+});
+
+describe("the path errors of floor_open and floor_create", () => {
+    it("removes the code prefix of each of them, and of FLOOR_GONE", () => {
+        expect(tidyError("NOT_ABSOLUTE: Type the full path of the folder, for example /home/you/project.")).toBe(
+            "Type the full path of the folder, for example /home/you/project.",
+        );
+        expect(tidyError("NOT_FOUND: The folder /x/y does not exist.")).toBe("The folder /x/y does not exist.");
+        expect(tidyError("NOT_A_FOLDER: /x/a.txt is a file, not a folder.")).toBe("/x/a.txt is a file, not a folder.");
+        expect(tidyError("NO_WRITE: You cannot write in the folder /ro.")).toBe("You cannot write in the folder /ro.");
+        expect(tidyError("FLOOR_GONE: The folder of this floor is gone: /x.")).toBe("The folder of this floor is gone: /x.");
+    });
+
+    it("knows the four path errors, and not NO_FLOOR", () => {
+        for (const code of ["NOT_ABSOLUTE", "NOT_FOUND", "NOT_A_FOLDER", "NO_WRITE"]) expect(isPathError(`${code}: text`)).toBe(true);
+        expect(isPathError("NO_FLOOR: /x has no .swarm/ folder")).toBe(false);
+        expect(isPathError("FLOOR_GONE: The folder of this floor is gone: /x.")).toBe(false);
+        expect(isPathError("the task T-1 is not found")).toBe(false);
+        expect(isFloorGone("FLOOR_GONE: The folder of this floor is gone: /x.")).toBe(true);
+        expect(isFloorGone("NOT_FOUND: x")).toBe(false);
+    });
+});
+
+describe("noticePlan", () => {
+    it("shows the error kinds as an error toast", () => {
+        for (const kind of ["task_blocked", "resume_failed", "floor_gone"]) {
+            expect(noticePlan(kind).tone).toBe("error");
+        }
+    });
+
+    it("shows floor_back as an information toast that closes by itself", () => {
+        expect(noticePlan("floor_back")).toEqual({ tone: "info", stay: false });
+    });
+
+    it("shows task_done_unmerged as an information toast that stays", () => {
+        expect(noticePlan("task_done_unmerged")).toEqual({ tone: "info", stay: true });
+    });
+
+    it("shows a kind that it does not know as an information toast", () => {
+        expect(noticePlan("something_new")).toEqual({ tone: "info", stay: false });
+        // The app removed this kind (docs/ipc-m3.md): it is not an error any more.
+        expect(noticePlan("permissions_restored")).toEqual({ tone: "info", stay: false });
     });
 });

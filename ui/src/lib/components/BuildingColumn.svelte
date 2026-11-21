@@ -37,8 +37,11 @@
         });
     });
 
+    // The error of a bad path shows under the field that the path was typed in (the empty office has its own field).
+    const showError = $derived(store.openError?.source === "column");
+
     async function open(): Promise<void> {
-        if (await store.openFloor(pathInput)) pathInput = "";
+        if (await store.openFloor(pathInput, "column")) pathInput = "";
     }
 
     async function create(): Promise<void> {
@@ -99,10 +102,17 @@
                     placeholder="/path/to/project"
                     autocomplete="off"
                     spellcheck="false"
+                    aria-invalid={showError ? "true" : undefined}
+                    aria-describedby={showError ? "floor-path-error" : undefined}
                     bind:value={pathInput}
+                    oninput={() => store.clearOpenError()}
                 />
                 <button type="submit" class="primary">open</button>
             </div>
+            {#if showError && store.openError}
+                <!-- The typed path stays in the field, so that the operator can correct it. No "create" is offered. -->
+                <p class="error" id="floor-path-error" role="alert" data-testid="open-error">{store.openError.text}</p>
+            {/if}
         </form>
 
         {#if store.pendingCreate && store.floorView}
@@ -275,6 +285,14 @@
 
     code {
         color: var(--accent);
+    }
+
+    .error {
+        margin: 0;
+        color: var(--danger);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        user-select: text;
     }
 
     .floors {

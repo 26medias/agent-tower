@@ -3,7 +3,7 @@
 // Svelte 5 runes. The pure state changes live in ./reducers.ts.
 import { tick } from "svelte";
 import * as ipc from "./ipc";
-import { describeError, type ErrorAction } from "./messages";
+import { describeError, isPathError, noticePlan, tidyError, type ErrorAction } from "./messages";
 import { modalOpen } from "./modal";
 import { orderEmployees } from "./order";
 import { focusTerminal } from "./terminal";
@@ -35,6 +35,7 @@ import {
     type FloorView,
     type ModelCatalog,
     type ModelKind,
+    type NoticePayload,
     type ProgramName,
     type Programs,
     type SessionView,
@@ -70,6 +71,12 @@ export interface Question {
 export function windowTitleFor(questions: number): string {
     return questions > 0 ? `(${questions}) Agent Tower` : "Agent Tower";
 }
+
+/** The field that the operator typed an "open folder" path in. The error of a bad path shows under that field. */
+export type OpenSource = "column" | "empty";
+
+/** Why a control that writes in the open floor is disabled while the folder of the floor is gone. */
+export const GONE_REASON = "The folder of this floor is gone. The app cannot change this floor.";
 
 /** What a button was clicked to do. A start, a resume or the setup agent. */
 export type LaunchKind = "start" | "resume" | "setup";
@@ -153,6 +160,11 @@ class Store {
     logoCallError = $state.raw<Record<string, string>>({});
     /** Set when `floor_open` failed with `NO_FLOOR:`. The UI offers to create the floor. */
     pendingCreate = $state.raw<{ path: string; message: string } | null>(null);
+    /**
+     * Set when `floor_open` of a typed path failed with `NOT_ABSOLUTE:`, `NOT_FOUND:`, `NOT_A_FOLDER:`
+     * or `NO_WRITE:`. `text` is for a person. The field `source` shows it under itself. No "create" is offered.
+     */
+    openError = $state.raw<{ source: OpenSource; path: string; text: string } | null>(null);
     /** The tasks of each floor that the UI has loaded, oldest first. */
     tasksByPath = $state.raw<Record<string, TaskView[]>>({});
     /** The task whose detail panel is open, by floor path. */
@@ -163,8 +175,12 @@ class Store {
     );
     /** The diff box of the open task (docs/ipc-m3.md). `diff` is null while it loads. */
     taskDiff = $state.raw<{ path: string; id: number; diff: TaskDiff | null; error: string | null } | null>(null);
-    /** The rules of `[permissions] allow` of each floor that the settings panel loaded. */
+    /** The rules of each floor that the settings panel loaded. The app stores them in its own config, not in the project. */
     permissionsByPath = $state.raw<Record<string, string[]>>({});
+    /** The warnings of the last save of the rules of each floor (docs/ipc-m3.md): `<rule>: <text>`. A save replaces them. */
+    permissionWarningsByPath = $state.raw<Record<string, string[]>>({});
+    /** The rules of an old `[permissions]` table in the project that the operator can choose to use, by floor path. */
+    proposedByPath = $state.raw<Record<string, string[]>>({});
     backend = $state<"tauri" | "mock" | "">("");
     ready = $state(false);
     private busy = $state.raw<Record<string, LaunchKind>>({});
@@ -178,6 +194,9 @@ class Store {
     private unlisten: ipc.Unlisten[] = [];
     /** Version of the logo that was loaded (or asked for) for each floor. */
     private logoLoaded = new Map<string, number | null>();
+
+    /** The folder of the open floor is gone (`FloorView.gone`). The controls that write are disabled. */
+    gone = $derived(this.floorView?.gone === true);
 
     /** The tasks of the open floor. */
     tasks = $derived(this.openPath ? (this.tasksByPath[this.openPath] ?? []) : []);
@@ -249,9 +268,7 @@ class Store {
                     if (payload.path === this.openPath) void this.loadTasks(payload.path);
                 }),
                 // A merge that is blocked, or a start that the team resume could not do.
-                await ipc.onNotice((payload) => {
-                    this.toast(payload.text);
-                }),
+                await ipc.onNotice((payload) => this.onNotice(payload)),
                 await ipc.onFloorChanged((payload) => {
                     // The list carries the logo version of every floor.
                     void this.loadFloors();
@@ -279,11 +296,12 @@ class Store {
     // ---- toasts ----
 
     /**
-     * Show a toast. An information toast closes after `TOAST_INFO_MS`. An error toast stays until
-     * the operator closes it. An error is shown as text for a person (see messages.ts), and a
-     * problem with a program path offers a button for Settings. The same text twice shows once.
+     * Show a toast. An information toast closes after `TOAST_INFO_MS`, unless `stay` is true. An
+     * error toast stays until the operator closes it. An error is shown as text for a person (see
+     * messages.ts), and a problem with a program path offers a button for Settings. The same text
+     * twice shows once.
      */
-    toast(text: string, kind?: "info"): void {
+    toast(text: string, kind?: "info", stay = false): void {
         const id = ++this.toastId;
         let shown = text;
         let action: Toast["action"];
@@ -294,7 +312,27 @@ class Store {
         }
         const same = this.toasts.filter((t) => !(t.text === shown && t.kind === kind));
         this.toasts = [...same, { id, text: shown, kind, action }].slice(-TOASTS_KEPT);
-        if (kind === "info") setTimeout(() => this.dismissToast(id), TOAST_INFO_MS);
+        if (kind === "info" && !stay) setTimeout(() => this.dismissToast(id), TOAST_INFO_MS);
+    }
+
+    /**
+     * A `notice` event (docs/ipc-m3.md, docs/ipc-final.md). `noticePlan` says how the toast looks.
+     * `floor_gone` and `floor_back` also read the list and the open floor again. The app sends
+     * `floor-changed` first, which does the same: this keeps the UI right if that event is lost.
+     */
+    private onNotice(payload: NoticePayload): void {
+        const plan = noticePlan(payload.kind);
+        if (plan.tone === "error") this.toast(payload.text);
+        else this.toast(payload.text, "info", plan.stay);
+        if (payload.kind === "floor_gone" || payload.kind === "floor_back") {
+            void this.loadFloors();
+            if (payload.path === this.openPath) void this.reloadFloor();
+        }
+    }
+
+    /** The reason for a control that writes, while the open floor is gone. Else the normal title. */
+    goneTitle(normal?: string): string | undefined {
+        return this.gone ? GONE_REASON : normal;
     }
 
     private actionFor(kind: ErrorAction): Toast["action"] {
@@ -496,9 +534,19 @@ class Store {
         }
     }
 
-    /** Open a floor by path. Returns true on success. */
-    async openFloor(path: string): Promise<boolean> {
+    /** The operator changed the typed path: the old error under the field is out of date. */
+    clearOpenError(): void {
+        if (this.openError !== null) this.openError = null;
+    }
+
+    /**
+     * Open a floor by path. Returns true on success. `source` is the field that the path was typed
+     * in. A path that cannot be a floor (`NOT_ABSOLUTE:`, `NOT_FOUND:`, `NOT_A_FOLDER:`, `NO_WRITE:`)
+     * shows its text under that field. With no `source` (a click on a floor) it shows as a toast.
+     */
+    async openFloor(path: string, source?: OpenSource): Promise<boolean> {
         const clean = path.trim();
+        this.openError = null;
         if (clean === "") {
             this.toast("Enter a folder path first.");
             return false;
@@ -517,6 +565,10 @@ class Store {
             const text = ipc.errorText(e);
             if (text.startsWith("NO_FLOOR:")) {
                 this.pendingCreate = { path: clean, message: text };
+            } else if (source && isPathError(text)) {
+                // No "create" for these: the path is not a folder that can be a floor.
+                this.pendingCreate = null;
+                this.openError = { source, path: clean, text: tidyError(text) };
             } else {
                 this.toast(text);
             }
@@ -558,15 +610,32 @@ class Store {
         }
     }
 
-    async reloadFloor(): Promise<void> {
+    /** Read the open floor again. Returns the new view, or null when there is none or the call failed. */
+    async reloadFloor(): Promise<FloorView | null> {
         const path = this.openPath;
-        if (!path) return;
+        if (!path) return null;
         try {
             const view = await ipc.floorOpen(path);
-            if (this.openPath === path) this.applyView(view);
+            if (this.openPath !== path) return null;
+            const wasGone = this.floorView?.path === path && this.floorView.gone;
+            this.applyView(view);
+            // The folder is back: the tasks that the UI holds can be old.
+            if (wasGone && !view.gone) void this.loadTasks(path);
+            return view;
         } catch (e) {
             this.fail(e);
+            return null;
         }
+    }
+
+    /**
+     * The button "Check again" of the banner of a gone floor. It reads the floor and the list again.
+     * A floor that is still gone says so in a toast, so that the click has a visible answer.
+     */
+    async checkFloorAgain(): Promise<void> {
+        const view = await this.reloadFloor();
+        await this.loadFloors();
+        if (view?.gone) this.toast(`The folder is still gone: ${view.path}.`, "info");
     }
 
     // ---- tasks (docs/ipc-m2.md) ----
@@ -772,6 +841,13 @@ class Store {
     /** The rules of `[permissions] allow` of the open floor. */
     permissions = $derived(this.openPath ? (this.permissionsByPath[this.openPath] ?? null) : null);
 
+    /** The warnings of the last save for the open floor. */
+    permissionWarnings = $derived(this.openPath ? (this.permissionWarningsByPath[this.openPath] ?? []) : []);
+
+    /** The rules that an old `[permissions]` table of the project offers for the open floor. Empty in normal use. */
+    proposedRules = $derived(this.openPath ? (this.proposedByPath[this.openPath] ?? []) : []);
+
+    /** Read the rules of the open floor, and the rules that the project proposes. */
     async loadPermissions(): Promise<void> {
         const path = this.openPath;
         if (!path) return;
@@ -780,19 +856,30 @@ class Store {
             this.permissionsByPath = { ...this.permissionsByPath, [path]: allow };
         } catch (e) {
             this.fail(e);
+            return;
+        }
+        try {
+            const proposed = await ipc.floorPermissionsProposed(path);
+            this.proposedByPath = { ...this.proposedByPath, [path]: proposed };
+        } catch (e) {
+            this.fail(e);
         }
     }
 
     /**
      * Write the rules of the open floor. Returns null on success, or the refusal text (it is
-     * for the form, not a toast).
+     * for the form, not a toast). The warnings of the answer show next to the rules. The rules are
+     * saved even when there is a warning. After a save the app config has an entry for the floor, so
+     * the proposal of the project is gone.
      */
     async savePermissions(allow: string[]): Promise<string | null> {
         const path = this.openPath;
         if (!path) return "No floor is open.";
         try {
-            const stored = await ipc.floorPermissionsSet(path, allow);
-            this.permissionsByPath = { ...this.permissionsByPath, [path]: stored };
+            const saved = await ipc.floorPermissionsSet(path, allow);
+            this.permissionsByPath = { ...this.permissionsByPath, [path]: saved.allow };
+            this.permissionWarningsByPath = { ...this.permissionWarningsByPath, [path]: saved.warnings };
+            if ((this.proposedByPath[path] ?? []).length > 0) this.proposedByPath = { ...this.proposedByPath, [path]: [] };
             return null;
         } catch (e) {
             return ipc.errorText(e);

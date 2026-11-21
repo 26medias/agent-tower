@@ -4,6 +4,7 @@
     import DebugPaste from "$lib/components/DebugPaste.svelte";
     import BuildingColumn from "$lib/components/BuildingColumn.svelte";
     import EmployeeForm from "$lib/components/EmployeeForm.svelte";
+    import GoneBanner from "$lib/components/GoneBanner.svelte";
     import Office from "$lib/components/Office.svelte";
     import ResizeHandle from "$lib/components/ResizeHandle.svelte";
     import SettingsPanel from "$lib/components/SettingsPanel.svelte";
@@ -93,6 +94,7 @@
     />
     <main class="work" bind:this={work}>
         <AttentionBar />
+        <GoneBanner />
         <Office onedit={(emp) => (form = emp)} onadd={() => (form = null)} />
         <Tabs />
         <TerminalArea />
@@ -129,7 +131,7 @@
 
     .work {
         display: grid;
-        grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+        grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
         min-width: 0;
         min-height: 0;
     }

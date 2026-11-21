@@ -15,6 +15,7 @@ import type {
     ModelCatalog,
     ModelKind,
     OutputMessage,
+    PermissionsSaved,
     ProgramName,
     Programs,
     SessionChangedPayload,
@@ -218,12 +219,21 @@ export const taskDiff = (path: string, id: number) => call<TaskDiff>("task_diff"
 /** Remove the worktree and the branch of a task that is not done, and set the status `blocked`. */
 export const taskDiscard = (path: string, id: number) => call<TaskView>("task_discard", { path, id });
 
-/** The rules of `[permissions] allow` of `floor.toml`. */
+/** The rules of the floor, as stored in the app config (not in the project folder). */
 export const floorPermissionsGet = (path: string) => call<string[]>("floor_permissions_get", { path });
 
-/** Writes `[permissions] allow`. A bad rule rejects the whole call. Returns the stored list. */
+/**
+ * Writes the rules in the app config (not in the project). A bad rule rejects the whole call. Returns the
+ * stored list and one warning for each rule that runs the code of the project.
+ */
 export const floorPermissionsSet = (path: string, allow: string[]) =>
-    call<string[]>("floor_permissions_set", { path, allow });
+    call<PermissionsSaved>("floor_permissions_set", { path, allow });
+
+/**
+ * The rules of an old `[permissions]` table in the `floor.toml` of the project that pass the check. Empty in
+ * normal use. An agent can have written them: the operator must read them and click "Use these rules".
+ */
+export const floorPermissionsProposed = (path: string) => call<string[]>("floor_permissions_proposed", { path });
 
 /** Resume the employees of `FloorView.resumable` in the background. Returns the progress at the start. */
 export const teamResume = (path: string) => call<ResumeProgress>("team_resume", { path });

@@ -120,6 +120,7 @@ describe("floor view and tabs", () => {
         defaults: { cli: null, model: null, effort: null, policy: null },
         resumable: [],
         resumeProgress: null,
+        gone: false,
     });
 
     it("replaces the sessions of the floor and keeps the other floors", () => {

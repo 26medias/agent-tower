@@ -1,4 +1,4 @@
-// Types copied from docs/ipc-m3.md (worktrees, the restore of the team, `[permissions]`), docs/ipc-m2.md (tasks),
+// Types copied from docs/ipc-final.md (`gone`), docs/ipc-m3.md (worktrees, the restore of the team, `[permissions]`), docs/ipc-m2.md (tasks),
 // docs/ipc-m1.md ("Types" and "Events"), docs/ipc-visuals-init.md (section 3) and docs/ipc-settings.md (section 3).
 // Keep in step with those files.
 
@@ -57,6 +57,7 @@ export interface FloorView {
     defaults: FloorDefaults; // [defaults] of floor.toml
     resumable: string[]; // employees that were live at the last close and can resume now, managers first (M3)
     resumeProgress: ResumeProgress | null; // the background resume of the last team, null when none runs (M3)
+    gone: boolean; // the folder of the floor is gone (docs/ipc-final.md). false in normal use
 }
 
 /** How far the resume of the last team is. `done` counts the starts that were tried (docs/ipc-m3.md). */
@@ -136,11 +137,31 @@ export interface TasksChangedPayload {
     path: string;
 }
 
+/**
+ * Kinds of the `notice` event that the UI knows (docs/ipc-m3.md and docs/ipc-final.md). The Rust side
+ * can send another kind later: the UI shows it as an information toast.
+ */
+export type NoticeKind =
+    | "task_blocked"
+    | "resume_failed"
+    | "task_done_unmerged"
+    | "floor_gone"
+    | "floor_back";
+
 /** Payload of the `notice` event (docs/ipc-m3.md): something the operator must see. */
 export interface NoticePayload {
     path: string;
-    kind: "task_blocked" | "resume_failed" | string;
+    kind: NoticeKind | string;
     text: string;
+}
+
+/**
+ * Result of `floor_permissions_set` (docs/ipc-m3.md, "Where the rules are"). `allow` is the stored list.
+ * Each warning is `<rule>: This rule lets each agent of the floor run the project's own code with no question.`
+ */
+export interface PermissionsSaved {
+    allow: string[];
+    warnings: string[];
 }
 
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "review" | "done";

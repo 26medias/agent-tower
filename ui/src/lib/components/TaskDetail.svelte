@@ -41,7 +41,7 @@
     const merged = $derived(task !== null && lastMerge !== null && lastMerge.id === task.id ? lastMerge.result : null);
 
     async function merge(): Promise<void> {
-        if (!task || gitBusy) return;
+        if (!task || gitBusy || store.gone) return;
         gitBusy = true;
         const id = task.id;
         const result = await store.mergeTask(id);
@@ -50,7 +50,7 @@
     }
 
     async function discard(): Promise<void> {
-        if (!task || gitBusy) return;
+        if (!task || gitBusy || store.gone) return;
         gitBusy = true;
         await store.discardTask(task.id);
         gitBusy = false;
@@ -67,7 +67,7 @@
     });
 
     async function assign(): Promise<void> {
-        if (!task || assignTo === "" || busy) return;
+        if (!task || assignTo === "" || busy || store.gone) return;
         busy = true;
         await store.assignTask(task.id, assignTo);
         busy = false;
@@ -75,7 +75,7 @@
 
     async function apply(event: SubmitEvent): Promise<void> {
         event.preventDefault();
-        if (!task || busy) return;
+        if (!task || busy || store.gone) return;
         busy = true;
         const done = await store.updateTask(task.id, statusChoice, note);
         busy = false;
@@ -133,8 +133,8 @@
                             type="button"
                             class="primary"
                             data-testid="merge"
-                            disabled={gitBusy}
-                            title="Merge the branch into {task.baseBranch}. The app removes the worktree and sets the task to done."
+                            disabled={gitBusy || store.gone}
+                            title={store.goneTitle(`Merge the branch into ${task.baseBranch}. The app removes the worktree and sets the task to done.`)}
                             onclick={merge}
                         >
                             Merge into {task.baseBranch}
@@ -145,7 +145,8 @@
                             label="Discard"
                             confirmLabel="Discard? Click again"
                             class="discard"
-                            title="Remove the worktree and the branch. The work on them is lost."
+                            disabled={store.gone}
+                            title={store.goneTitle("Remove the worktree and the branch. The work on them is lost.") ?? ""}
                             onconfirm={discard}
                         />
                     {/if}
@@ -197,13 +198,13 @@
                 <div class="field">
                     <label for="assign-to">Assign to</label>
                     <div class="row">
-                        <select id="assign-to" bind:value={assignTo} aria-label="Assign to">
+                        <select id="assign-to" bind:value={assignTo} aria-label="Assign to" disabled={store.gone} title={store.goneTitle()}>
                             <option value="" disabled>Choose an employee</option>
                             {#each store.orderedEmployees as emp (emp.slug)}
                                 <option value={emp.slug} title={emp.role}>{emp.name}</option>
                             {/each}
                         </select>
-                        <button type="button" disabled={busy || assignTo === "" || assignTo === task.assignee} onclick={assign}>
+                        <button type="button" disabled={busy || store.gone || assignTo === "" || assignTo === task.assignee} title={store.goneTitle()} onclick={assign}>
                             Assign
                         </button>
                     </div>
@@ -211,14 +212,14 @@
                 <form class="status-form" onsubmit={apply}>
                     <div class="field">
                         <label for="task-status">Status</label>
-                        <select id="task-status" bind:value={statusChoice} aria-label="Status">
+                        <select id="task-status" bind:value={statusChoice} aria-label="Status" disabled={store.gone} title={store.goneTitle()}>
                             {#each STATUS_CHOICES as s (s)}
                                 <option value={s}>{statusLabel(s)}</option>
                             {/each}
                         </select>
                     </div>
-                    <textarea rows="2" placeholder="Add a note (optional)" aria-label="Note" bind:value={note}></textarea>
-                    <button type="submit" class="primary" disabled={busy || (statusChoice === task.status && note.trim() === "")}>
+                    <textarea rows="2" placeholder="Add a note (optional)" aria-label="Note" bind:value={note} disabled={store.gone} title={store.goneTitle()}></textarea>
+                    <button type="submit" class="primary" disabled={busy || store.gone || (statusChoice === task.status && note.trim() === "")} title={store.goneTitle()}>
                         {statusChoice === task.status ? "Add the note" : "Set the status"}
                     </button>
                 </form>

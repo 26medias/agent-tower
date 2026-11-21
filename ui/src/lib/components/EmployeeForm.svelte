@@ -82,7 +82,7 @@
     const noInstructions = $derived(roleText.trim() === "");
 
     async function submit(): Promise<void> {
-        if (!valid || busy) return;
+        if (!valid || busy || store.gone) return;
         busy = true;
         const saved = await store.saveEmployee({
             slug,
@@ -199,7 +199,7 @@
             {#if blocked}
                 <span class="reason" data-testid="form-reason">{blocked}</span>
             {/if}
-            <button type="submit" class="primary" disabled={!valid || busy}>{editing ? "save" : "add"}</button>
+            <button type="submit" class="primary" disabled={!valid || busy || store.gone} title={store.goneTitle()}>{editing ? "save" : "add"}</button>
             <button type="button" onclick={onclose}>cancel</button>
         </div>
     </form>

@@ -4,7 +4,7 @@
 import { base64ToBytes, bytesToBase64, concatBytes } from "./codec";
 import type { Backend, Unlisten } from "./ipc";
 import { STANDARD_EFFORTS, isValidEffort, isValidModelName } from "./models";
-import { ALLOW_RULES_MAX, checkAllowRule } from "./permissions";
+import { ALLOW_RULES_MAX, checkAllowRule, ruleWarning } from "./permissions";
 import type {
     AttachResult,
     Employee,
@@ -15,6 +15,7 @@ import type {
     ModelKind,
     ModelOption,
     OutputMessage,
+    PermissionsSaved,
     ProgramName,
     Programs,
     ResumeProgress,
@@ -44,8 +45,12 @@ interface MockFloor {
     logoError: string | null;
     defaults: FloorDefaults;
     tasks: MockTask[];
-    /** `[permissions] allow` of `floor.toml`. */
+    /** The rules that the app stores for the floor (its own config, not the project). */
     permissions: string[];
+    /** The app config has an entry for the floor (also an empty list): the app offers no proposal then. */
+    permissionsStored: boolean;
+    /** The rules of an old `[permissions]` table in `floor.toml` that pass the check (`MockControl.setProposed`). */
+    proposed: string[];
     /** `FloorView.resumable`: the employees of the last team that can resume. */
     resumable: string[];
     resumeProgress: ResumeProgress | null;
@@ -53,6 +58,8 @@ interface MockFloor {
     mergeBlock: string | null;
     /** `FloorView.employeeErrors`: employee files that did not load. */
     employeeErrors: string[];
+    /** `FloorView.gone`: the folder of the floor is gone (`MockControl.goneFloor`). */
+    gone: boolean;
 }
 
 interface MockTask {
@@ -128,8 +135,20 @@ export interface MockControl {
     startSession(path: string, slug: string): string;
     /** Add `count` employees (engineers of the Project Manager) to a floor, with no model. A floor event follows. */
     addEmployees(path: string, count: number): void;
-    /** Send the `notice` event, as the Rust side does for a blocked merge. The UI shows it as an error toast. */
-    notice(path: string, text: string): void;
+    /** Send the `notice` event. `kind` is `task_blocked` (a blocked merge, an error toast) when it is left out. */
+    notice(path: string, text: string, kind?: string): void;
+    /**
+     * The folder of the floor is gone, as the app finds it: `gone` is true, then `floor-changed`,
+     * then the notice `floor_gone` (the text of docs/ipc-final.md). Commands on the floor give `FLOOR_GONE:`.
+     */
+    goneFloor(path: string): void;
+    /** The folder is back: `gone` is false, then `floor-changed`, then the notice `floor_back`. */
+    backFloor(path: string): void;
+    /**
+     * Put an old `[permissions]` table in the `floor.toml` of the floor, as an agent can write it. The rules show
+     * in `floor_permissions_proposed` until a `floor_permissions_set` stores a list. Each rule must pass the check.
+     */
+    setProposed(path: string, rules: string[]): void;
     /** The employee files that did not load (`FloorView.employeeErrors`). A floor event follows. */
     setEmployeeErrors(path: string, errors: string[]): void;
     /** Change the defaults or one employee of a floor. A floor event follows. */
@@ -303,10 +322,13 @@ export function createMockBackend(): Backend {
             defaults: noDefaults(),
             tasks: [],
             permissions: [],
+            permissionsStored: false,
+            proposed: [],
             resumable: [],
             resumeProgress: null,
             mergeBlock: null,
             employeeErrors: [],
+            gone: false,
         };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
@@ -540,8 +562,32 @@ export function createMockBackend(): Backend {
             defaults: { ...floor.defaults },
             resumable: floor.resumeProgress ? [] : [...floor.resumable],
             resumeProgress: floor.resumeProgress ? { ...floor.resumeProgress } : null,
+            gone: floor.gone,
         };
     }
+
+    /** Paths of floors that were gone when the operator forgot them. The app does not hold them: `NOT_FOUND:`. */
+    const forgottenGone = new Set<string>();
+
+    /**
+     * The path check of `floor_open` and `floor_create` (docs/ipc-final.md). `~` is expanded first.
+     * The mock knows four simple cases: a relative path, a path under `/missing/`, a path that ends in
+     * `.txt` (a file) and a path under `/readonly/`. Returns the path after the expansion of `~`.
+     */
+    function checkPath(typed: string): string {
+        let p = typed.trim();
+        if (p === "~" || p.startsWith("~/")) p = "/home/demo" + p.slice(1);
+        if (!p.startsWith("/")) throw "NOT_ABSOLUTE: Type the full path of the folder, for example /home/you/project.";
+        if (p === "/missing" || p.startsWith("/missing/") || forgottenGone.has(canonicalPath(p))) {
+            throw `NOT_FOUND: The folder ${p} does not exist.`;
+        }
+        if (p.endsWith(".txt")) throw `NOT_A_FOLDER: ${p} is a file, not a folder.`;
+        if (p === "/readonly" || p.startsWith("/readonly/")) throw `NO_WRITE: You cannot write in the folder ${p}.`;
+        return p;
+    }
+
+    /** Commands that still work on a gone floor (docs/ipc-final.md). `session_stop` has no path. */
+    const WORKS_ON_GONE = new Set(["floor_list", "floor_open", "floor_create", "floor_forget", "session_stop"]);
 
     function floorOf(path: string): MockFloor {
         const floor = floors.get(path);
@@ -753,6 +799,11 @@ export function createMockBackend(): Backend {
     }
 
     async function handle(command: string, raw?: Record<string, unknown>): Promise<unknown> {
+        // Each command that reads or writes a gone floor gives the same error and writes nothing.
+        const target = typeof raw?.path === "string" ? floors.get(raw.path) : undefined;
+        if (target?.gone && !WORKS_ON_GONE.has(command)) {
+            throw `FLOOR_GONE: The folder of this floor is gone: ${target.path}.`;
+        }
         switch (command) {
             case "floor_list": {
                 args(raw, []);
@@ -761,7 +812,7 @@ export function createMockBackend(): Backend {
                     return {
                         path,
                         name: floor ? floor.name : null,
-                        missing: !floor,
+                        missing: !floor || floor.gone,
                         logoVersion: floor ? floor.logoVersion : null,
                     };
                 });
@@ -770,7 +821,8 @@ export function createMockBackend(): Backend {
                 const { path } = args<{ path: string }>(raw, ["path"]);
                 const typed = path.trim();
                 if (typed === "") throw "the path is empty";
-                const clean = canonicalPath(typed);
+                const expanded = checkPath(typed);
+                const clean = canonicalPath(expanded);
                 const floor = floors.get(clean);
                 if (!floor) throw `NO_FLOOR: ${typed} has no .swarm/ folder`;
                 if (!known.includes(clean)) known.push(clean);
@@ -778,7 +830,7 @@ export function createMockBackend(): Backend {
             }
             case "floor_create": {
                 const { path, name } = args<{ path: string; name: string }>(raw, ["path", "name"]);
-                const clean = canonicalPath(path);
+                const clean = canonicalPath(checkPath(path));
                 if (floors.has(clean)) throw `${clean} already has a .swarm/ folder`;
                 if (name.trim() === "") throw "the floor name is empty";
                 const floor = addFloor(clean, name.trim(), [
@@ -789,8 +841,17 @@ export function createMockBackend(): Backend {
             }
             case "floor_forget": {
                 const { path } = args<{ path: string }>(raw, ["path"]);
+                // Like the real app: a floor with a live session is not forgotten.
+                if ([...sessions.values()].some((s) => s.path === path && s.view.status !== "stopped")) {
+                    throw "the floor has live sessions. Stop them before you forget the floor.";
+                }
                 const i = known.indexOf(path);
                 if (i >= 0) known.splice(i, 1);
+                // The app does not hold a gone floor that was forgotten: a later open gives `NOT_FOUND:`.
+                if (floors.get(path)?.gone) {
+                    floors.delete(path);
+                    forgottenGone.add(path);
+                }
                 return null;
             }
             case "employee_save": {
@@ -1155,8 +1216,16 @@ export function createMockBackend(): Backend {
                 }
                 if (clean.length > ALLOW_RULES_MAX) throw `there are ${clean.length} rules, and the limit is ${ALLOW_RULES_MAX}`;
                 floor.permissions = clean;
+                floor.permissionsStored = true;
                 emit("floor-changed", { path: a.path });
-                return [...clean];
+                // The server gives one warning for each rule that runs the code of the project.
+                const warnings = clean.map(ruleWarning).filter((w): w is string => w !== null);
+                return { allow: [...clean], warnings } satisfies PermissionsSaved;
+            }
+            case "floor_permissions_proposed": {
+                const a = args<{ path: string }>(raw, ["path"]);
+                const floor = floorOf(a.path);
+                return floor.permissionsStored ? [] : [...floor.proposed];
             }
             case "team_resume": {
                 const a = args<{ path: string }>(raw, ["path"]);
@@ -1276,8 +1345,27 @@ export function createMockBackend(): Backend {
             }
             emit("floor-changed", { path });
         },
-        notice(path, text) {
-            emit("notice", { path, kind: "task_blocked", text });
+        notice(path, text, kind = "task_blocked") {
+            emit("notice", { path, kind, text });
+        },
+        goneFloor(path) {
+            const floor = floorOf(path);
+            floor.gone = true;
+            const live = [...sessions.values()].filter((s) => s.path === path && s.view.status !== "stopped").length;
+            const running = live === 0 ? "" : live === 1 ? " 1 session of it still runs." : ` ${live} sessions of it still run.`;
+            emit("floor-changed", { path });
+            emit("notice", { path, kind: "floor_gone", text: `The folder of the floor ${floor.name} is gone: ${path}.${running}` });
+        },
+        backFloor(path) {
+            const floor = floorOf(path);
+            floor.gone = false;
+            emit("floor-changed", { path });
+            emit("notice", { path, kind: "floor_back", text: `The folder of the floor ${floor.name} is back: ${path}.` });
+        },
+        setProposed(path, rules) {
+            const floor = floorOf(path);
+            floor.proposed = [...rules];
+            floor.permissionsStored = false;
         },
         setEmployeeErrors(path, errors) {
             floorOf(path).employeeErrors = [...errors];

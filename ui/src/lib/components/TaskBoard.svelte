@@ -74,7 +74,7 @@
 
     async function create(event: SubmitEvent): Promise<void> {
         event.preventDefault();
-        if (busy || title.trim() === "") return;
+        if (busy || store.gone || title.trim() === "") return;
         busy = true;
         const made = await store.createTask(title, description);
         busy = false;
@@ -120,9 +120,9 @@
                     type="button"
                     class="new"
                     aria-expanded={creating}
-                    disabled={store.openPath === null}
+                    disabled={store.openPath === null || (store.gone && !creating)}
                     aria-label={narrow ? (creating ? "Cancel the new task" : "Make a new task") : undefined}
-                    title={creating ? "Cancel" : "Make a new task"}
+                    title={creating ? "Cancel" : (store.goneTitle("Make a new task"))}
                     onclick={() => (creating = !creating)}
                 >
                     {creating ? "Cancel" : narrow ? "+" : "+ New"}
@@ -164,7 +164,7 @@
                             {#if title.trim() === ""}
                                 <span class="reason" data-testid="new-task-reason">Give the task a title.</span>
                             {/if}
-                            <button type="submit" class="primary" disabled={busy || title.trim() === ""}>Make the task</button>
+                            <button type="submit" class="primary" disabled={busy || store.gone || title.trim() === ""} title={store.goneTitle()}>Make the task</button>
                         </div>
                     </form>
                 {/if}

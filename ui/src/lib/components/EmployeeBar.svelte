@@ -79,7 +79,8 @@
                     type="button"
                     class="primary start"
                     class:busy={busyKind === "start"}
-                    disabled={busy}
+                    disabled={busy || store.gone}
+                    title={store.goneTitle()}
                     aria-busy={busyKind === "start"}
                     onclick={() => store.startSession(emp.slug)}
                 >
@@ -90,7 +91,8 @@
                         type="button"
                         class="resume"
                         class:busy={busyKind === "resume"}
-                        disabled={busy}
+                        disabled={busy || store.gone}
+                        title={store.goneTitle()}
                         aria-busy={busyKind === "resume"}
                         onclick={() => store.resumeSession(emp.slug)}
                     >
@@ -98,12 +100,22 @@
                     </button>
                 {/if}
             {/if}
-            <button type="button" class="edit" title="Edit {emp.name}" aria-label="Edit {emp.name}" onclick={() => onedit(emp)}>edit</button>
+            <button
+                type="button"
+                class="edit"
+                disabled={store.gone}
+                title={store.goneTitle(`Edit ${emp.name}`)}
+                aria-label="Edit {emp.name}"
+                onclick={() => onedit(emp)}
+            >
+                edit
+            </button>
             <ConfirmButton
                 class="remove"
                 label="remove"
                 confirmLabel="sure?"
-                title="Remove {emp.name}"
+                disabled={store.gone}
+                title={store.goneTitle(`Remove ${emp.name}`) ?? ""}
                 onconfirm={() => store.removeEmployee(emp.slug)}
             />
         </div>
@@ -111,7 +123,7 @@
         <p class="hint">{store.floorView ? "Click a character or a tab to select an employee." : "Open a floor to see its employees."}</p>
     {/if}
     {#if store.floorView}
-        <button type="button" class="add" onclick={onadd}>+ employee</button>
+        <button type="button" class="add" disabled={store.gone} title={store.goneTitle()} onclick={onadd}>+ employee</button>
     {/if}
 </div>
 
@@ -174,6 +186,13 @@
         display: flex;
         gap: 4px;
         align-items: center;
+    }
+
+    /* The "stop" buttons stay above the dim of a gone floor (see Office.svelte), and they stay enabled. */
+    .actions :global(.stop),
+    .actions .stop-session {
+        position: relative;
+        z-index: 3;
     }
 
     .actions button.busy {

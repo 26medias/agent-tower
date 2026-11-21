@@ -7,6 +7,7 @@
     let path = $state("");
     let name = $state("");
     let busy = $state(false);
+    const showError = $derived(store.openError?.source === "empty");
 
     function basename(p: string): string {
         const parts = p.split(/[\\/]/).filter((x) => x !== "");
@@ -22,7 +23,7 @@
     async function open(): Promise<void> {
         if (busy) return;
         busy = true;
-        if (await store.openFloor(path)) path = "";
+        if (await store.openFloor(path, "empty")) path = "";
         busy = false;
     }
 
@@ -51,10 +52,24 @@
             <label for="start-path">Folder path</label>
             <div class="line">
                 <!-- svelte-ignore a11y_autofocus -->
-                <input id="start-path" type="text" placeholder="/path/to/project" autocomplete="off" spellcheck="false" autofocus bind:value={path} />
+                <input
+                    id="start-path"
+                    type="text"
+                    placeholder="/path/to/project"
+                    autocomplete="off"
+                    spellcheck="false"
+                    autofocus
+                    aria-invalid={showError ? "true" : undefined}
+                    aria-describedby={showError ? "start-path-error" : undefined}
+                    bind:value={path}
+                    oninput={() => store.clearOpenError()}
+                />
                 <button type="submit" class="primary" disabled={busy || path.trim() === ""}>Open</button>
             </div>
-            {#if path.trim() === ""}
+            {#if showError && store.openError}
+                <!-- The typed path stays in the field, so that the operator can correct it. No "create" is offered. -->
+                <p class="error" id="start-path-error" role="alert" data-testid="open-error">{store.openError.text}</p>
+            {:else if path.trim() === ""}
                 <p class="reason">Type a path to open it.</p>
             {/if}
         </form>
@@ -137,6 +152,14 @@
         margin: 0;
         color: var(--dim);
         font-size: 12px;
+    }
+
+    .error {
+        margin: 0;
+        color: var(--danger);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        user-select: text;
     }
 
     .create {

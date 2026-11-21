@@ -43,6 +43,11 @@
             onreset={() => layout.resetInfo()}
         />
     {/if}
+    {#if store.gone}
+        <!-- The folder of the floor is gone: dim the office. An overlay does it: a CSS `filter` on SVG children is not drawn by WebKitGTK.
+             The overlay takes no pointer event, so the "stop" buttons of live sessions (above it) and the resize handles still work. -->
+        <div class="dim" data-testid="gone-dim" aria-hidden="true"></div>
+    {/if}
     <ResizeHandle
         orientation="horizontal"
         label="Resize the office"
@@ -75,6 +80,14 @@
         min-height: 0;
         overflow-y: auto;
         padding: 8px 10px;
+    }
+
+    .dim {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        background: rgba(11, 17, 28, 0.55);
+        pointer-events: none;
     }
 
     /* The room fills the rest. The SVG inside scales to fit and stays centred. */

@@ -52,6 +52,10 @@ export async function repairChecks({ page, check, url, shots }) {
         await page.waitForSelector(`.storey.on[data-path="${path}"]`);
     }
 
+    // E2E_ONLY=gone runs only the sections G (a floor whose folder is gone, the notices, the open errors, the
+    // rules). It makes a run of those sections take about a minute. The default runs everything.
+    const everything = process.env.E2E_ONLY !== "gone";
+    if (everything) {
     // ================= B1. A question in a tab that is not active =================
     await fresh();
     await M("startSession", FLOOR, "ceo");
@@ -898,4 +902,368 @@ export async function repairChecks({ page, check, url, shots }) {
     await screens({ width: 1280, height: 800 }, "r1280");
     await screens({ width: 2560, height: 1400 }, "r2560");
     await page.setViewportSize({ width: 1280, height: 800 });
+
+    }
+
+    // ================= G. A floor whose folder is gone (docs/ipc-final.md) =================
+    const banner = page.locator('[data-testid="gone-banner"]');
+    const REASON = /folder of this floor is gone/i;
+    const GONE_TEXT = `The folder of this floor is gone: ${FLOOR}. The app cannot read or change this floor.`;
+    const flat = (t) => t.replace(/\s+/g, " ").trim();
+    const off = async (loc) => (await loc.count()) === 1 && (await loc.isDisabled());
+    const on = async (loc) => (await loc.count()) === 1 && !(await loc.isDisabled());
+    const reasoned = async (loc) => REASON.test((await loc.getAttribute("title")) ?? "");
+    const twice = async (loc) => {
+        await loc.click();
+        await loc.click();
+    };
+    const toastKinds = (re) =>
+        page.evaluate((r) => [...document.querySelectorAll(".toast")].filter((t) => new RegExp(r).test(t.textContent)).map((t) => t.dataset.kind), re.source);
+    const synthEnterNow = () =>
+        page.evaluate(() => {
+            const ta = document.querySelector(".pane:not(.hidden) .xterm-helper-textarea");
+            ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        });
+
+    // ---- G1. The banner, the disabled controls, the stop button, Check again, Forget, and back ----
+    await fresh();
+    check("G1: no banner and no dim while the floor is there", (await banner.count()) === 0 && (await page.locator('[data-testid="gone-dim"]').count()) === 0);
+    await M("startSession", FLOOR, "ceo");
+    await page.waitForSelector(".tab");
+    const gCeo = await page.evaluate(() => document.querySelector(".tab").dataset.session);
+    await M("setStatus", gCeo, "question");
+    await page.locator('[data-testid="attention-bar"]').waitFor();
+    await selectEmp("pm");
+    check("G1: control: before the floor is gone the start button of an employee is enabled", await on(page.locator(".bar button.start")));
+    // Load the rules and open a task now: a read of a gone floor gives FLOOR_GONE, so the panels must already hold their data.
+    await page.click("button.settings");
+    await page.locator('[data-section="permissions"] input[name="rule"]').waitFor();
+    check("G1: control: before the floor is gone the rule field and the defaults button work", (await on(page.locator('input[name="rule"]'))) && (await on(page.locator('select[name="defaultCli"]'))));
+    await page.fill('input[name="rule"]', "Bash(cargo test:*)");
+    await page.locator('[data-section="permissions"] button[type="submit"]').click();
+    await page.locator('[data-rule="Bash(cargo test:*)"]').waitFor();
+    await page.keyboard.press("Escape");
+    await page.locator('.board .card[data-task="3"]').click();
+    await page.waitForSelector('[data-testid="merge"]');
+    check("G1: control: before the floor is gone the merge button is enabled", await on(page.locator('[data-testid="merge"]')));
+    await clearToasts();
+    const gl0 = (await calls("floor_list")).length;
+    const go0 = (await calls("floor_open")).length;
+
+    await M("goneFloor", FLOOR);
+    await banner.waitFor();
+    check("G1: the banner names the folder and says that the app cannot read or change the floor", flat(await banner.innerText()).includes(GONE_TEXT), flat(await banner.innerText()));
+    check("G1: the banner has the buttons Forget this floor and Check again", (await banner.getByRole("button", { name: "Forget this floor" }).count()) === 1 && (await banner.getByRole("button", { name: "Check again" }).count()) === 1);
+    const rows = await page.evaluate(() => {
+        const r = (s) => document.querySelector(s).getBoundingClientRect();
+        return { banner: r('[data-testid="gone-banner"]'), office: r(".office"), work: r(".work"), attention: r('[data-testid="attention-bar"]') };
+    });
+    check("G1: the banner is a row of its own at the top of the work area, above the office", Math.abs(rows.banner.top - (rows.work.top + rows.attention.height)) < 1.5 && rows.banner.bottom <= rows.office.top + 0.5 && rows.banner.width >= rows.work.width - 1, JSON.stringify({ b: rows.banner.top, o: rows.office.top }));
+    check("G1: with the attention bar the banner is below it", rows.attention.bottom <= rows.banner.top + 0.5, JSON.stringify({ a: rows.attention.bottom, b: rows.banner.top }));
+    // The storey shows "missing" at once: the list is read again, and the plate and the class change.
+    await page.waitForSelector(`.storey.missing[data-path="${FLOOR}"]`);
+    check("G1: the storey of the floor shows missing at once (class and plate)", (await page.locator(`.storey[data-path="${FLOOR}"] .plate`).getAttribute("data-plate")) === "missing");
+    check("G1: floor-changed made the UI read floor_list and floor_open again", (await calls("floor_list")).length > gl0 && (await calls("floor_open")).length > go0);
+    check("G1: the floor_gone notice is an error toast that names the floor and the sessions that run", (await toastKinds(/The folder of the floor Demo Tower is gone: .*1 session of it still runs/)).join() === "error");
+    const dim = await page.evaluate(() => {
+        const d = document.querySelector('[data-testid="gone-dim"]');
+        const o = document.querySelector(".office").getBoundingClientRect();
+        const r = d.getBoundingClientRect();
+        const cs = getComputedStyle(d);
+        return { same: Math.abs(r.width - o.width) < 1.5 && Math.abs(r.height - o.height) < 2.5, alpha: Number((cs.backgroundColor.match(/[\d.]+/g) ?? [])[3] ?? 1), events: cs.pointerEvents, filter: cs.filter };
+    });
+    check("G1: the office is dimmed by an overlay (no CSS filter) that covers it and takes no pointer event", dim.same && dim.alpha > 0.2 && dim.alpha < 1 && dim.events === "none" && dim.filter === "none", JSON.stringify(dim));
+
+    // The floor_gone toast stays and covers a corner of the board: close it, so that a click reaches the board.
+    await clearToasts();
+    // The controls that write are disabled, with the reason as the title.
+    for (const [name, sel] of [
+        ["start", ".bar button.start"],
+        ["edit", ".bar button.edit"],
+        ["remove", ".bar button.remove"],
+        ["+ employee", ".bar button.add"],
+        ["Run the setup agent", ".office .buttons button.setup"],
+        ["New logo", ".office .buttons button.newlogo"],
+    ]) {
+        const loc = page.locator(sel);
+        check(`G1: ${name} is disabled while the floor is gone, and the title gives the reason`, (await off(loc)) && (await reasoned(loc)));
+    }
+    // The task detail was open before: merge, discard, assign and status are off.
+    for (const [name, sel] of [
+        ["merge", '[data-testid="merge"]'],
+        ["discard", ".detail button.discard"],
+        ["Assign to (select)", "#assign-to"],
+        ["Assign", ".detail .row button"],
+        ["Status (select)", "#task-status"],
+        ["the note", '.detail textarea[aria-label="Note"]'],
+        ["Set the status", ".status-form button[type=submit]"],
+    ]) {
+        const loc = page.locator(sel);
+        check(`G1: in the task detail ${name} is disabled while the floor is gone`, (await off(loc)) && (await reasoned(loc)));
+    }
+    await page.getByRole("button", { name: /Back/ }).click();
+    check("G1: + New of the task board is disabled while the floor is gone", (await off(page.locator(".board button.new"))) && (await reasoned(page.locator(".board button.new"))));
+    // Settings: the floor defaults and the commands with no question.
+    await page.click("button.settings");
+    await page.locator('[data-section="permissions"] input[name="rule"]').waitFor();
+    for (const [name, sel] of [
+        ["the default CLI", 'select[name="defaultCli"]'],
+        ["the default policy", 'select[name="defaultPolicy"]'],
+        ["save defaults", '[data-section="defaults"] button[type=submit]'],
+        ["the new rule field", 'input[name="rule"]'],
+        ["add a rule", '[data-section="permissions"] form.add button[type=submit]'],
+        ["remove a rule", '[data-rule="Bash(cargo test:*)"] button.remove'],
+        ["an example rule", "button.chip"],
+    ]) {
+        const loc = page.locator(sel).first();
+        check(`G1: in Settings ${name} is disabled while the floor is gone`, (await loc.isDisabled()) && (await reasoned(loc)));
+    }
+    check("G1: Settings still lets the operator change the app level fields (the image model)", await on(page.locator('select[name="imageModel"]')));
+    await page.keyboard.press("Escape");
+
+    // The stop button of a live session stays enabled, and the terminal stays usable.
+    await selectEmp("ceo");
+    const stop = page.locator(".bar button.stop");
+    check("G1: the stop button of a live session stays enabled", await on(stop));
+    const hit = await stop.evaluate((b) => {
+        const r = b.getBoundingClientRect();
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return top === b || b.contains(top);
+    });
+    check("G1: the stop button is above the dim (a click reaches it)", hit);
+    const gw0 = (await calls("pty_write")).length;
+    await page.locator(".pane:not(.hidden) .xterm").click();
+    await synthEnterNow();
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "pty_write").length > n, gw0);
+    check("G1: the terminal of a live session stays usable (a key reaches the session)", (await calls("pty_write")).length > gw0);
+    // The key answered the question in the mock. Ask again, so that the attention bar shows above the banner in the screenshot.
+    await M("setStatus", gCeo, "question");
+    await page.locator('[data-testid="attention-bar"]').waitFor();
+
+    // Forget with a live session: the existing error text shows, and the banner stays.
+    await clearToasts();
+    await twice(banner.locator("button.forget"));
+    await page.locator(".toast", { hasText: "live sessions" }).waitFor();
+    check("G1: Forget this floor with a live session shows the existing error and keeps the floor", (await banner.count()) === 1 && (await page.locator(".toast", { hasText: /Stop them before you forget the floor/ }).count()) === 1 && (await page.locator(`.floors li[data-path="${FLOOR}"]`).count()) === 1);
+    // Check again: floor_open is called, the banner stays, and a toast says that the folder is still gone.
+    await clearToasts();
+    const gc0 = (await calls("floor_open")).length;
+    await banner.getByRole("button", { name: "Check again" }).click();
+    await page.locator(".toast", { hasText: /still gone/ }).waitFor();
+    check("G1: Check again calls floor_open, and a floor that is still gone keeps its banner and says so", (await calls("floor_open")).length === gc0 + 1 && (await banner.count()) === 1 && (await toastKinds(/still gone/)).join() === "info");
+    // The screenshots of the banner state (the attention bar shows above it).
+    await clearToasts();
+    await page.waitForTimeout(250);
+    await shot("gone-banner-1280.png");
+    await page.setViewportSize({ width: 2560, height: 1400 });
+    await page.waitForTimeout(500);
+    await shot("gone-banner-2560.png");
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForTimeout(300);
+    // Stop the session: the bar goes, the banner stays.
+    await stop.click();
+    await page.locator('[data-testid="attention-bar"]').waitFor({ state: "detached" });
+    const goneStops = (await calls("session_stop")).length;
+    check("G1: a stop on a gone floor works (session_stop) and the banner stays", goneStops === 1 && (await banner.count()) === 1, `${goneStops} calls, ${await banner.count()} banner`);
+
+    // The folder comes back: the banner and the dim go, the controls work again, an information toast says so.
+    await M("backFloor", FLOOR);
+    await banner.waitFor({ state: "detached" });
+    await page.waitForSelector(`.storey[data-path="${FLOOR}"]:not(.missing)`);
+    check("G1: when the folder is back the banner, the dim and the missing mark go", (await page.locator('[data-testid="gone-dim"]').count()) === 0 && (await page.locator(`.storey[data-path="${FLOOR}"] .plate`).getAttribute("data-plate")) !== "missing");
+    check("G1: the floor_back notice is an information toast", (await toastKinds(/is back/)).join() === "info");
+    await selectEmp("pm");
+    check("G1: when the folder is back start is enabled again", (await on(page.locator(".bar button.start"))) && !(await reasoned(page.locator(".bar button.start"))));
+
+    // Forget a gone floor with no live session: the floor goes and the empty office shows.
+    await M("goneFloor", FLOOR);
+    await banner.waitFor();
+    await twice(banner.locator("button.forget"));
+    await page.locator('[data-testid="empty-office"]').waitFor();
+    check("G1: Forget this floor removes the floor from the list and the banner goes", (await banner.count()) === 0 && (await page.locator(`.floors li[data-path="${FLOOR}"]`).count()) === 0 && (await calls("floor_forget")).some((c) => c.args.path === FLOOR));
+
+    // The same inline error in the field of the empty office.
+    await page.fill("#start-path", "relative/path");
+    await page.keyboard.press("Enter");
+    await page.locator('[data-testid="empty-office"] [data-testid="open-error"]').waitFor();
+    check("G1: the field of the empty office shows the error under itself, keeps the path and offers no create", (await page.locator('[data-testid="open-error"]').innerText()) === "Type the full path of the folder, for example /home/you/project." && (await page.inputValue("#start-path")) === "relative/path" && (await page.locator(".create").count()) === 0);
+    await shot("gone-open-error-empty-1280.png");
+    await page.fill("#start-path", "relative/path2");
+    check("G1: the error goes when the operator types again", (await page.locator('[data-testid="open-error"]').count()) === 0);
+
+    // ---- G2. Each kind of notice ----
+    await fresh();
+    await clearToasts();
+    const gl1 = (await calls("floor_list")).length;
+    const go1 = (await calls("floor_open")).length;
+    await M("notice", FLOOR, "The folder of the floor Demo Tower is gone: /home/demo/tower.", "floor_gone");
+    await M("notice", FLOOR, "Task T-12 is set to done, but its branch task/T-12-x is not merged. The app did not merge it. Use the merge on the board to merge it.", "task_done_unmerged");
+    await M("notice", FLOOR, "The folder of the floor Demo Tower is back: /home/demo/tower.", "floor_back");
+    await M("notice", FLOOR, "A new kind of notice that the UI does not know.", "brand_new_kind");
+    await page.waitForFunction(() => document.querySelectorAll(".toast").length >= 4);
+    const kindOf = async (re) => (await toastKinds(re)).join();
+    check("G2: floor_gone is an error toast", (await kindOf(/is gone: \/home\/demo\/tower/)) === "error");
+    check("G2: task_done_unmerged is an information toast", (await kindOf(/is not merged/)) === "info");
+    check("G2: floor_back is an information toast", (await kindOf(/is back:/)) === "info");
+    check("G2: a kind that the UI does not know is an information toast with its text", (await kindOf(/A new kind of notice that the UI does not know/)) === "info");
+    await page.waitForFunction(([l, o]) => window.__towerMockCalls.filter((c) => c.command === "floor_list").length >= l && window.__towerMockCalls.filter((c) => c.command === "floor_open").length >= o, [gl1 + 2, go1 + 2], { timeout: 3000 }).catch(() => {});
+    check("G2: floor_gone and floor_back read floor_list and floor_open again", (await calls("floor_list")).length >= gl1 + 2 && (await calls("floor_open")).length >= go1 + 2);
+    // floor-changed alone (no notice): the list is read again for any known floor, and the floor is read again for the open one only.
+    const fc = { l: (await calls("floor_list")).length, o: (await calls("floor_open")).length };
+    await M("setResumable", BIG, []);
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "floor_list").length > n, fc.l, { timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(150);
+    check("G2: floor-changed of a known floor that is not open reads floor_list again, and not floor_open", (await calls("floor_list")).length > fc.l && (await calls("floor_open")).length === fc.o);
+    await M("setResumable", FLOOR, []);
+    await page.waitForFunction((n) => window.__towerMockCalls.filter((c) => c.command === "floor_open").length > n, fc.o, { timeout: 3000 }).catch(() => {});
+    check("G2: floor-changed of the open floor reads floor_open again", (await calls("floor_open")).length > fc.o);
+    await page.waitForTimeout(6600);
+    check("G2: after 6 s floor_back and the unknown kind closed by themselves", (await kindOf(/is back:/)) === "" && (await kindOf(/does not know/)) === "");
+    check("G2: after 6 s the error toasts and the task_done_unmerged toast (a warning) are still there", (await kindOf(/is gone: \/home\/demo\/tower/)) === "error" && (await kindOf(/is not merged/)) === "info");
+    await page.locator(".toast", { hasText: /is not merged/ }).locator('button[aria-label="Dismiss"]').click();
+    check("G2: the task_done_unmerged toast closes with its button", (await kindOf(/is not merged/)) === "");
+    await clearToasts();
+    await M("notice", FLOOR, "Task T-4 is blocked: a conflict.");
+    await page.locator(".toast", { hasText: /is blocked: a conflict/ }).waitFor();
+    check("G2: task_blocked is still an error toast", (await kindOf(/is blocked: a conflict/)) === "error");
+    await clearToasts();
+    await M("notice", FLOOR, "The setup agent tried to change the commands with no question. The app put the old list back.", "permissions_restored");
+    await page.locator(".toast", { hasText: /put the old list back/ }).waitFor();
+    check("G2: permissions_restored (removed by the app) is not special: an unknown kind, an information toast", (await kindOf(/put the old list back/)) === "info");
+    await clearToasts();
+
+    // ---- G3. The four errors of the open folder field, and NO_FLOOR ----
+    await fresh();
+    await clearToasts();
+    await page.click("details.floors > summary").catch(() => {});
+    const field = page.locator("#floor-path");
+    const colError = page.locator('.toolbar [data-testid="open-error"]');
+    let shotDone = false;
+    for (const [typed, want] of [
+        ["relative/folder", "Type the full path of the folder, for example /home/you/project."],
+        ["/missing/project", "The folder /missing/project does not exist."],
+        ["/tmp/notes.txt", "/tmp/notes.txt is a file, not a folder."],
+        ["/readonly/project", "You cannot write in the folder /readonly/project."],
+    ]) {
+        await field.fill(typed);
+        await page.keyboard.press("Enter");
+        await colError.waitFor();
+        const text = await colError.innerText();
+        check(`G3: "${typed}" shows "${want}" under the field`, text === want, text);
+        check(`G3: "${typed}" keeps the typed path, offers no create, and the floor stays open`, (await field.inputValue()) === typed && (await page.locator(".toolbar .create").count()) === 0 && (await page.locator(".storey.on").getAttribute("data-path")) === FLOOR);
+        check(`G3: "${typed}" shows its text under the field and not in a second toast`, (await page.locator(".toast", { hasText: want }).count()) === 0 && (await colError.isVisible()));
+        if (!shotDone) {
+            shotDone = true;
+            await shot("gone-open-error-1280.png");
+            await page.setViewportSize({ width: 2560, height: 1400 });
+            await page.waitForTimeout(400);
+            await shot("gone-open-error-2560.png");
+            await page.setViewportSize({ width: 1280, height: 800 });
+            await page.waitForTimeout(300);
+        }
+    }
+    await field.fill("~/nothing/here.txt");
+    check("G3: the error goes when the operator types again", (await colError.count()) === 0);
+    await page.keyboard.press("Enter");
+    await colError.waitFor();
+    check("G3: a path with ~ is expanded before the check", (await colError.innerText()) === "/home/demo/nothing/here.txt is a file, not a folder.");
+    // A good folder with no .swarm/ still offers "create", and the create works.
+    await field.fill("/home/demo/brand-new");
+    await page.keyboard.press("Enter");
+    await page.locator(".toolbar .create").waitFor();
+    check("G3: a folder with no .swarm/ (NO_FLOOR) still offers create, and shows no path error", (await colError.count()) === 0 && /No floor in/.test(await page.locator(".toolbar .create").innerText()));
+    await page.fill("#floor-name", "Brand New");
+    await page.locator(".toolbar .create button.primary").click();
+    await page.waitForSelector('.storey.on[data-path="/home/demo/brand-new"]');
+    check("G3: create makes the floor and opens it", (await page.locator(".office h2.name").innerText()) === "Brand New");
+
+    // ---- G4. Commands with no question: the object result, the warnings, the proposal, the new texts ----
+    await fresh();
+    await M("setProposed", FLOOR, ["Bash(cargo test:*)", "Read(./src/**)"]);
+    await page.click("button.settings");
+    const sec = page.locator('section[data-section="permissions"]');
+    await sec.locator('[data-testid="rule-list"]').waitFor();
+    const secText = async (id) => flat(await sec.locator(`[data-testid="${id}"]`).innerText());
+    const setCalls = () => calls("floor_permissions_set");
+    const WARN = "This rule lets each agent of the floor run the project's own code with no question.";
+    check("G4: the section says that the app stores the rules outside the project folder, so an agent cannot change them through the project",
+        /stores these rules in its own config folder, outside the project folder/.test(await secText("rules-storage")) && /cannot change them through the project/.test(await secText("rules-storage")), await secText("rules-storage"));
+    check("G4: the fixed warning about the rules and the build tools is always visible",
+        (await secText("rules-warning")) === "Each rule lets every agent of this floor run that command with no question. Build tools such as cargo, npm and make run the code of the project.", await secText("rules-warning"));
+    check("G4: the section asks the app for the proposal (floor_permissions_proposed)", (await calls("floor_permissions_proposed")).some((c) => c.args.path === FLOOR));
+    const box = sec.locator('[data-testid="rules-proposal"]');
+    check("G4: the old rules of the project show in a box with the warning that an agent can have written them",
+        (await box.count()) === 1 && flat(await box.innerText()).startsWith("This project has a list of rules from an older version. An agent can have written it. Read each rule before you use it.") &&
+        (await box.locator("li[data-proposed]").count()) === 2 && (await box.getByRole("button", { name: "Use these rules" }).count()) === 1);
+    check("G4: the app does not import the proposal by itself (the list is empty, no set call)", (await sec.locator("li[data-rule]").count()) === 0 && (await setCalls()).length === 0);
+    await box.getByRole("button", { name: "Use these rules" }).click();
+    await sec.locator('li[data-rule="Read(./src/**)"]').waitFor();
+    const used = (await setCalls()).pop();
+    check("G4: Use these rules calls floor_permissions_set with the current list plus the proposed rules", JSON.stringify(used.args) === JSON.stringify({ path: FLOOR, allow: ["Bash(cargo test:*)", "Read(./src/**)"] }), JSON.stringify(used.args));
+    check("G4: after the save the proposal box is gone", (await sec.locator('[data-testid="rules-proposal"]').count()) === 0);
+    const warnOn = async (rule) => {
+        const li = sec.locator(`li[data-rule="${rule}"]`);
+        return { mark: await li.locator(".mark").count(), text: (await li.locator('[data-testid="rule-warning"]').count()) === 1 ? flat(await li.locator('[data-testid="rule-warning"]').innerText()) : null };
+    };
+    const w1 = await warnOn("Bash(cargo test:*)");
+    const w2 = await warnOn("Read(./src/**)");
+    check("G4: the warning of the server shows on the rule that it is about (a mark and the text)", w1.mark === 1 && w1.text === WARN, JSON.stringify(w1));
+    check("G4: a rule with no warning has no mark", w2.mark === 0 && w2.text === null, JSON.stringify(w2));
+    // Bash(rtk cargo test:*) is accepted and saved, with a warning. Bash(ls:*) has none.
+    const g4In = sec.locator('input[aria-label="New rule"]');
+    const g4Add = sec.getByRole("button", { name: "add", exact: true });
+    await g4In.fill("Bash(rtk cargo test:*)");
+    await g4Add.click();
+    await sec.locator('li[data-rule="Bash(rtk cargo test:*)"]').waitFor();
+    await g4In.fill("Bash(ls:*)");
+    await g4Add.click();
+    await sec.locator('li[data-rule="Bash(ls:*)"]').waitFor();
+    const w3 = await warnOn("Bash(rtk cargo test:*)");
+    const w4 = await warnOn("Bash(ls:*)");
+    check("G4: Bash(rtk cargo test:*) is accepted and saved with a warning on that rule", w3.mark === 1 && w3.text === WARN && (await setCalls()).pop().args.allow.includes("Bash(ls:*)"), JSON.stringify(w3));
+    check("G4: Bash(ls:*) is saved with no warning, and the warnings of the other rules stay", w4.mark === 0 && (await sec.locator("li[data-rule] .mark").count()) === 2, JSON.stringify(w4));
+    // Refused by the client check of the new rules, with no call to the app.
+    const setsNow = (await setCalls()).length;
+    for (const [rule, reason] of [
+        ["Bash(rtk proxy:*)", /"rtk proxy" is not allowed/],
+        ["Bash(rtk:*)", /"rtk" alone/],
+        ["Bash(rtk -v ls)", /"rtk -v" is not allowed/],
+        ["Bash(find . -delete)", /"find" is not allowed/],
+        ["Bash(sed -i x)", /"sed" is not allowed/],
+        ["Bash(git commit:*)", /"git commit" is not allowed/],
+        ["Bash(git log --output=x)", /--output/],
+        ["Read(.swarm/state)", /\.swarm/],
+        ["Grep(.swarm/**)", /\.swarm/],
+        ["WebFetch(domain:127.0.0.1)", /IP address/],
+        ["WebFetch(domain:printer.local)", /local or internal/],
+    ]) {
+        await g4In.fill(rule);
+        await g4Add.click();
+        const text = await sec.locator('[data-testid="rule-error"]').innerText();
+        check(`G4: the rule ${JSON.stringify(rule)} is refused with a reason`, reason.test(text), text);
+    }
+    check("G4: a refused rule makes no call to the app", (await setCalls()).length === setsNow);
+    for (const rule of ["Bash(git status:*)", "Bash(git rev-parse:*)", "Bash(rtk git diff:*)", "Read(./.swarm/employees/**)", "WebFetch(domain:docs.rs)"]) {
+        await g4In.fill(rule);
+        await g4Add.click();
+        await sec.locator(`li[data-rule="${rule}"]`).waitFor();
+    }
+    check("G4: the read-only git rules and the good paths and hosts are accepted", (await setCalls()).length === setsNow + 5);
+    // The staged state for the screenshot: a warning on a rule, and a proposal of the project (the app config entry is gone).
+    await g4In.fill("");
+    await page.keyboard.press("Escape");
+    await M("setProposed", FLOOR, ["Bash(cargo test:*)", "Bash(npm test:*)"]);
+    await page.click("button.settings");
+    await sec.locator('[data-testid="rules-proposal"]').waitFor();
+    await sec.scrollIntoViewIfNeeded();
+    await sec.locator("h3").scrollIntoViewIfNeeded();
+    await page.waitForTimeout(250);
+    check("G4: the proposal and the warnings show together in the section", (await sec.locator('[data-testid="rules-proposal"]').count()) === 1 && (await sec.locator("li[data-rule] .mark").count()) === 2);
+    await shot("gone-permissions-1280.png");
+    const before = (await setCalls()).pop().args.allow;
+    await sec.getByRole("button", { name: "Use these rules" }).click();
+    await sec.locator('li[data-rule="Bash(npm test:*)"]').waitFor();
+    const merged = (await setCalls()).pop().args.allow;
+    check("G4: Use these rules keeps the rules of the list, adds the new proposed rule and drops the duplicate", JSON.stringify(merged) === JSON.stringify([...before, "Bash(npm test:*)"]), JSON.stringify(merged));
+    await page.keyboard.press("Escape");
 }

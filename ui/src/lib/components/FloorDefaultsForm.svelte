@@ -59,7 +59,7 @@
     }
 
     async function save(): Promise<void> {
-        if (busy || !dirty) return;
+        if (busy || !dirty || store.gone) return;
         busy = true;
         const ok = await store.setFloorDefaults(wanted);
         busy = false;
@@ -82,7 +82,7 @@
     <div class="grid">
         <label>
             <span>CLI</span>
-            <select name="defaultCli" value={cli} onchange={(e) => changeCli(e.currentTarget.value)}>
+            <select name="defaultCli" value={cli} disabled={store.gone} title={store.goneTitle()} onchange={(e) => changeCli(e.currentTarget.value)}>
                 <option value="">(not set)</option>
                 <option value="claude">claude</option>
                 <option value="codex">codex</option>
@@ -90,7 +90,7 @@
         </label>
         <label>
             <span>Policy</span>
-            <select name="defaultPolicy" value={policy} onchange={(e) => (policy = e.currentTarget.value as Policy | "")}>
+            <select name="defaultPolicy" value={policy} disabled={store.gone} title={store.goneTitle()} onchange={(e) => (policy = e.currentTarget.value as Policy | "")}>
                 <option value="">(not set)</option>
                 {#each POLICY_IDS as id (id)}
                     <option value={id}>{POLICY_INFO[id].label}</option>
@@ -99,7 +99,7 @@
         </label>
         <label>
             <span>Model</span>
-            <select name="defaultModel" disabled={cli === ""} value={model} onchange={(e) => changeModel(e.currentTarget.value)}>
+            <select name="defaultModel" disabled={cli === "" || store.gone} title={store.goneTitle()} value={model} onchange={(e) => changeModel(e.currentTarget.value)}>
                 <option value="">{cli === "" ? "Choose a CLI first" : "(not set)"}</option>
                 {#each modelOptions as choice (choice.value)}
                     <option value={choice.value}>{choice.label}</option>
@@ -108,7 +108,7 @@
         </label>
         <label>
             <span>Effort</span>
-            <select name="defaultEffort" disabled={cli === ""} value={effort} onchange={(e) => (effort = e.currentTarget.value)}>
+            <select name="defaultEffort" disabled={cli === "" || store.gone} title={store.goneTitle()} value={effort} onchange={(e) => (effort = e.currentTarget.value)}>
                 <option value="">{cli === "" ? "Choose a CLI first" : "(not set)"}</option>
                 {#each effortOptions as choice (choice.value)}
                     <option value={choice.value}>{choice.label}</option>
@@ -125,7 +125,7 @@
         {:else if !dirty}
             <span class="reason" data-testid="defaults-reason">No change to save.</span>
         {/if}
-        <button type="submit" class="primary" disabled={!dirty || busy}>save defaults</button>
+        <button type="submit" class="primary" disabled={!dirty || busy || store.gone} title={store.goneTitle()}>save defaults</button>
     </div>
 </form>
 

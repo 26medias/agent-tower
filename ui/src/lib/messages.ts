@@ -3,7 +3,48 @@
 // with a capital letter and a full stop, and with a hint about what to do when it knows one.
 // The raw text stays for the code that tests it (`startsWith("NO_KEY:")`). Only the display changes.
 
-const CODE_PREFIX = /^(?:NO_FLOOR|NO_KEY|BUSY|REFUSED|NOT_FOUND|INVALID)\s*:\s*/;
+const CODE_PREFIX = /^(?:NO_FLOOR|NO_KEY|BUSY|REFUSED|NOT_FOUND|INVALID|NOT_ABSOLUTE|NOT_A_FOLDER|NO_WRITE|FLOOR_GONE)\s*:\s*/;
+
+/**
+ * The four errors of `floor_open` and `floor_create` for a path that cannot be a floor (docs/ipc-final.md).
+ * The field "open folder" shows their text under the field. They do not offer "create".
+ */
+const PATH_ERROR = /^(?:NOT_ABSOLUTE|NOT_FOUND|NOT_A_FOLDER|NO_WRITE)\s*:/;
+
+/** True for an error text of a path that cannot be a floor. */
+export function isPathError(raw: string): boolean {
+    return PATH_ERROR.test(raw.trim());
+}
+
+/** True for the error text of a command on a floor whose folder is gone. */
+export function isFloorGone(raw: string): boolean {
+    return /^FLOOR_GONE\s*:/.test(raw.trim());
+}
+
+/** How a toast shows a notice (`notice` event). `stay`: an information toast that the operator must close. */
+export interface NoticePlan {
+    tone: "error" | "info";
+    stay: boolean;
+}
+
+/**
+ * The kinds that the UI knows (docs/ipc-m3.md and docs/ipc-final.md). A kind that it does not know
+ * gives an information toast with the text, so that a new kind of the Rust side is never hidden.
+ */
+export function noticePlan(kind: string): NoticePlan {
+    switch (kind) {
+        case "task_blocked":
+        case "resume_failed":
+        case "floor_gone":
+            return { tone: "error", stay: true };
+        case "task_done_unmerged":
+            // It carries a warning, so it stays until the operator closes it.
+            return { tone: "info", stay: true };
+        default:
+            // "floor_back" and a kind that the UI does not know (also `permissions_restored`: the app removed it).
+            return { tone: "info", stay: false };
+    }
+}
 
 /** Where an error comes from, so that the toast can offer a button for it. */
 export type ErrorAction = "settings-programs" | null;

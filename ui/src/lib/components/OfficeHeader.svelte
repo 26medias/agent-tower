@@ -72,7 +72,7 @@
     }
 
     async function generate(): Promise<void> {
-        if (busy) return;
+        if (busy || store.gone) return;
         const text = promptDraft.trim();
         logoForm = false;
         // An empty field is "no change", unless the operator emptied a prompt that had a value:
@@ -120,8 +120,8 @@
             <!-- The choice has its own row. "New logo" is not part of it. -->
             <div class="choose" role="group" aria-label="Choose the CLI of the setup agent">
                 <span class="ask">Run the setup agent with</span>
-                <button type="button" class="cli-claude" class:primary={(defaultCli ?? "claude") === "claude"} onclick={() => runSetup("claude")}>claude</button>
-                <button type="button" class="cli-codex" class:primary={defaultCli === "codex"} onclick={() => runSetup("codex")}>codex</button>
+                <button type="button" class="cli-claude" class:primary={(defaultCli ?? "claude") === "claude"} disabled={store.gone} title={store.goneTitle()} onclick={() => runSetup("claude")}>claude</button>
+                <button type="button" class="cli-codex" class:primary={defaultCli === "codex"} disabled={store.gone} title={store.goneTitle()} onclick={() => runSetup("codex")}>codex</button>
                 <button type="button" class="ghost" onclick={() => (askCli = false)}>cancel</button>
             </div>
         {:else}
@@ -129,17 +129,18 @@
                 type="button"
                 class="setup"
                 class:primary={needsSetup && !resumePrimary}
-                title={defaultCli ? `Starts the setup agent with ${defaultCli}, the CLI that the floor defaults name.` : "Choose claude or codex, then the setup agent reads the project and proposes a team."}
+                disabled={store.gone}
+                title={store.goneTitle(defaultCli ? `Starts the setup agent with ${defaultCli}, the CLI that the floor defaults name.` : "Choose claude or codex, then the setup agent reads the project and proposes a team.")}
                 onclick={clickSetup}
             >
                 Run the setup agent
             </button>
             {#if defaultCli}
-                <button type="button" class="ghost other-cli" onclick={() => (askCli = true)}>other CLI</button>
+                <button type="button" class="ghost other-cli" disabled={store.gone} title={store.goneTitle()} onclick={() => (askCli = true)}>other CLI</button>
             {/if}
         {/if}
         {#if !askCli}
-            <button type="button" class="newlogo" aria-expanded={logoForm} disabled={busy} onclick={toggleLogoForm}>
+            <button type="button" class="newlogo" aria-expanded={logoForm} disabled={busy || store.gone} title={store.goneTitle()} onclick={toggleLogoForm}>
                 {busy ? "Making a logo..." : "New logo"}
             </button>
         {/if}
@@ -149,9 +150,9 @@
                 class="resume-team"
                 class:primary={resumePrimary}
                 data-testid="resume-team"
-                disabled={resume.busy || resumeBusy}
+                disabled={resume.busy || resumeBusy || store.gone}
                 aria-busy={resume.busy}
-                title="Resume the sessions that were live when the app closed, one by one: {resumeLabels.join(', ')}"
+                title={store.goneTitle(`Resume the sessions that were live when the app closed, one by one: ${resumeLabels.join(", ")}`)}
                 onclick={resumeTeam}
             >
                 {#if resume.busy || resumeBusy}<Spinner size={11} />{/if}
@@ -185,7 +186,7 @@
                     placeholder="A golden honeycomb hexagon with a small bee."
                     bind:value={promptDraft}
                 />
-                <button type="submit" class="primary">generate</button>
+                <button type="submit" class="primary" disabled={store.gone} title={store.goneTitle()}>generate</button>
             </div>
         </form>
     {/if}
@@ -338,6 +339,12 @@
 
     .buttons button {
         text-transform: none;
+    }
+
+    /* The "stop" button stays above the dim of a gone floor (see Office.svelte), and it stays enabled. */
+    .buttons button.stop-setup {
+        position: relative;
+        z-index: 3;
     }
 
     .buttons button.busy-setup {

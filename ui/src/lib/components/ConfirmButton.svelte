@@ -6,12 +6,15 @@
         label,
         confirmLabel = "sure?",
         title = "",
+        disabled = false,
         onconfirm,
         class: klass = "",
     }: {
         label: string;
         confirmLabel?: string;
         title?: string;
+        /** A disabled button does not arm and does not confirm. */
+        disabled?: boolean;
         onconfirm: () => void;
         class?: string;
     } = $props();
@@ -20,6 +23,7 @@
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     function click(): void {
+        if (disabled) return;
         if (armed) {
             armed = false;
             clearTimeout(timer);
@@ -33,7 +37,7 @@
     onDestroy(() => clearTimeout(timer));
 </script>
 
-<button type="button" class="{klass} {armed ? 'danger armed' : ''}" {title} onclick={click}>
+<button type="button" class="{klass} {armed ? 'danger armed' : ''}" {title} {disabled} onclick={click}>
     {armed ? confirmLabel : label}
 </button>
 
