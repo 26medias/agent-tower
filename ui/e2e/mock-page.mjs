@@ -6,11 +6,14 @@
 //      E2E_SETTINGS_SHOTS (folder for the screenshots of the settings panel and the employee
 //      form; default /tmp/agent-tower-review/settings),
 //      E2E_REPAIR_SHOTS (folder for the screenshots of e2e/repair-checks.mjs; default
-//      /tmp/agent-tower-review/final-b-repair).
+//      /tmp/agent-tower-review/final-b-repair),
+//      E2E_LAST_SHOTS (folder for the screenshots of e2e/last-checks.mjs; default
+//      /tmp/agent-tower-review/final-b3).
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { lastChecks } from "./last-checks.mjs";
 import { repairChecks } from "./repair-checks.mjs";
 
 const url = process.env.E2E_URL ?? "http://127.0.0.1:1420";
@@ -20,6 +23,9 @@ mkdirSync(settingsShots, { recursive: true });
 // The screenshots of the repair checks (e2e/repair-checks.mjs).
 const repairShots = process.env.E2E_REPAIR_SHOTS ?? "/tmp/agent-tower-review/final-b-repair";
 mkdirSync(repairShots, { recursive: true });
+// The screenshots of the last checks (e2e/last-checks.mjs).
+const lastShots = process.env.E2E_LAST_SHOTS ?? "/tmp/agent-tower-review/final-b3";
+mkdirSync(lastShots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -125,6 +131,12 @@ async function clearToasts() {
     while ((await dismiss.count()) > 0) await dismiss.first().click();
 }
 
+// "New logo" is in the menu "More" of the office header: open the menu, then click the item.
+async function clickNewLogo() {
+    await page.click('[data-testid="more"]');
+    await page.click("button.newlogo");
+}
+
 async function openDebug() {
     // The debug paste bar is hidden by default. Ctrl+Shift+D shows it.
     if ((await page.locator("details.debug-area").count()) === 0) await page.keyboard.press("Control+Shift+D");
@@ -155,9 +167,9 @@ try {
         (await page.locator('.storey.missing[data-path="/home/demo/gone"]').getAttribute("aria-disabled")) === "true",
     );
     check(
-        "the office header shows the name, the path and the description",
-        (await page.locator(".office .name").innerText()) === "Demo Tower" &&
-            (await page.locator(".office .path").innerText()) === "/home/demo/tower" &&
+        "the top strip shows the name and the path, and the office header the description",
+        (await page.locator(".strip .name").innerText()) === "Demo Tower" &&
+            (await page.locator(".strip .path").innerText()) === "/home/demo/tower" &&
             (await page.locator(".office .description").innerText()).includes("demo project"),
     );
     check(
@@ -237,7 +249,7 @@ try {
     await page.waitForSelector('.storey.on[data-path="/home/demo/second"]');
     check(
         "a click on a storey opens that floor",
-        (await page.locator(".office .name").innerText()) === "Second Floor" && (await page.locator(".emp").count()) === 1,
+        (await page.locator(".strip .name").innerText()) === "Second Floor" && (await page.locator(".emp").count()) === 1,
     );
     const goneOpens = async () => (await calls("floor_open")).filter((c) => c.args.path === "/home/demo/gone").length;
     const goneBefore = await goneOpens();
@@ -445,7 +457,8 @@ try {
         (await page.locator(".toast").first().evaluate((el) => getComputedStyle(el.parentElement).position)) === "fixed" &&
             toastBox.x + toastBox.width > 1280 - 40 &&
             toastBox.y + toastBox.height < areaBoxT.y &&
-            officeBox.y === 0 &&
+            // Changed on purpose (N1): the top strip (30 px) is always there, so the office starts under it.
+            officeBox.y === 30 &&
             Math.abs(officeBox.height - 336) <= 1,
         `toast ${JSON.stringify(toastBox)}, office y=${officeBox.y} h=${officeBox.height}`,
     );
@@ -563,7 +576,8 @@ try {
     const areaBox2 = await page.locator(".area").boundingBox();
     check(
         "the terminal keeps at least half of the height with 5 employees",
-        officeBox2.height <= 337 && areaBox2.height >= 400,
+        // Changed on purpose (N1): the top strip (30 px) is always there, so the terminal needs 30 px less than half.
+        officeBox2.height <= 337 && areaBox2.height >= 400 - 30,
         `office ${officeBox2.height}, terminal area ${areaBox2.height}`,
     );
     await page.waitForTimeout(300);
@@ -598,7 +612,7 @@ try {
     await page.waitForSelector('.storey.on[data-path="/home/demo/second"]');
     check(
         "a typed path with ~, .. and a trailing slash opens the canonical floor",
-        (await page.locator(".office .path").innerText()) === "/home/demo/second",
+        (await page.locator(".strip .path").innerText()) === "/home/demo/second",
     );
     check(
         "the building has no second storey for the typed text",
@@ -627,7 +641,7 @@ try {
     await page.fill("#floor-path", "/home/demo/link");
     await page.click(".open button.primary");
     await page.waitForSelector('.storey.on[data-path="/home/demo/tower"]');
-    check("a symlink path opens the real floor", (await page.locator(".office .path").innerText()) === "/home/demo/tower");
+    check("a symlink path opens the real floor", (await page.locator(".strip .path").innerText()) === "/home/demo/tower");
     await page.waitForSelector(".tab:has-text('Ada')");
 
     // 11. Error toast, no dialog.
@@ -647,7 +661,7 @@ try {
     );
     check("a floor with a logo shows the logo image on the wall", (await page.locator('.storey[data-path="/home/demo/tower"] image.logo').count()) === 1);
     check("the header shows no logo image when there is no logo", (await page.locator(".office .logo img").count()) === 0);
-    await page.click("button.newlogo");
+    await clickNewLogo();
     check("New logo shows a field with the stored prompt (empty here)", (await page.locator("#logo-prompt").inputValue()) === "");
     await page.fill("#logo-prompt", "A small blue boat.");
     await page.click(".logoform button.primary");
@@ -670,7 +684,7 @@ try {
         "a NO_KEY call error is gone after the operator opens another floor and comes back",
         (await page.locator('[data-error="logo"]').count()) === 0 && (await page.locator("#openai-key").count()) === 0,
     );
-    await page.click("button.newlogo");
+    await clickNewLogo();
     check("the prompt that was sent is stored (the field shows it)", (await page.locator("#logo-prompt").inputValue()) === "A small blue boat.");
     await page.click(".logoform button.primary");
     await page.waitForSelector('[data-error="logo"]');
@@ -694,7 +708,7 @@ try {
     // A second "New logo", now that a key is set: busy, then a new image.
     const logoBefore = await page.locator(".office .logo img").getAttribute("src");
     await page.waitForTimeout(20);
-    await page.click("button.newlogo");
+    await clickNewLogo();
     check("New logo field holds the stored prompt", (await page.locator("#logo-prompt").inputValue()) === "A small blue boat.");
     await page.fill("#logo-prompt", "");
     await page.click(".logoform button.primary");
@@ -706,7 +720,7 @@ try {
     const gen2 = (await calls("logo_generate")).pop();
     check("an emptied prompt field sends the empty text (remove the stored prompt)", gen2.args.prompt === "", JSON.stringify(gen2.args));
     // The stored prompt is gone now. An empty field that had no value means "no change" (null).
-    await page.click("button.newlogo");
+    await clickNewLogo();
     check("after the removal the New logo field is empty", (await page.locator("#logo-prompt").inputValue()) === "");
     await page.click(".logoform button.primary");
     await page.waitForSelector(".office .logo.busy");
@@ -2091,12 +2105,16 @@ try {
     }
 
     // 21. The repairs of the review "final-b" (B1, D1 to D3, D6 to D10, M6, the polish list).
-    await repairChecks({ page, check, url, shots: repairShots });
+    // E2E_ONLY=last runs the page checks and the last checks only (it skips the long repair checks).
+    if (process.env.E2E_ONLY !== "last") await repairChecks({ page, check, url, shots: repairShots });
+
+    // 22. The last repairs of the review "final-b2" (N1 to N3, the one row of buttons, the Team activity list).
+    await lastChecks({ page, check, url, shots: lastShots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);
 } catch (e) {
-    problems.push(`script error: ${e.message}`);
+    problems.push(`script error: ${e.message}\n${(e.stack ?? "").split("\n").filter((l) => l.includes("e2e/")).slice(0, 2).join("\n")}`);
     await page.screenshot({ path: shot.replace(/\.png$/, "-fail.png") }).catch(() => {});
 }
 

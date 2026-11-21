@@ -1,6 +1,6 @@
 <script lang="ts">
-    // The toasts are an overlay at the top right, over the task board. They never change the layout
-    // and they never take the focus. The newest toast is on top. At most 4 show. An information
+    // The toasts are an overlay at the top right, under the top strip and over the task board. They never
+    // change the layout and they never take the focus. The newest toast is on top. At most 4 show. An information
     // toast closes by itself (see TOAST_INFO_MS in the store). An error toast stays until the
     // operator closes it.
     import { TOASTS_VISIBLE, store } from "$lib/store.svelte";
@@ -29,8 +29,9 @@
     .toasts {
         position: fixed;
         z-index: 60;
-        /* Under the header of the task board, so that "New" and "collapse" stay in reach. */
-        top: 48px;
+        /* Under the top strip (its attention bar and its banner buttons) and under the header of the
+           task board, so that "Open", "Forget this floor", "New" and "collapse" stay in reach. */
+        top: calc(var(--strip-h) + 18px);
         right: 10px;
         display: flex;
         flex-direction: column;
@@ -72,6 +73,10 @@
     .act {
         flex: none;
         border-color: var(--danger);
+    }
+
+    .toast.info .act {
+        border-color: var(--accent);
     }
 
     .more {

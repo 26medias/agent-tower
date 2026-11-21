@@ -15,7 +15,11 @@ import {
     storeyY,
     roleColor,
     TAG_ROLE_MAX_EMPLOYEES,
+    CHIP_GAP,
+    TAG_NATURAL_PX,
+    chipBoxWidth,
     chipWidth,
+    nameWidth,
     rolePopWidth,
     roleChip,
     tagBoxWidth,
@@ -165,8 +169,14 @@ describe("building", () => {
 });
 
 describe("name tags", () => {
-    it("uses the prototype width rule", () => {
-        expect(tagWidth("Ada")).toBe(58 + 3 * 17);
+    it("sizes the name by the width of its letters, not by a flat width", () => {
+        // The tag is the glyph area (58) plus the width of the name.
+        expect(tagWidth("Ada")).toBeCloseTo(58 + nameWidth("Ada"), 9);
+        // "Maya" has wide letters: it needs more than 4 flat units of 17.
+        expect(nameWidth("Maya")).toBeGreaterThan(4 * 17);
+        // Narrow letters take less than wide ones.
+        expect(nameWidth("Ili")).toBeLessThan(nameWidth("Moo"));
+        expect(nameWidth("")).toBe(0);
     });
 
     it("cuts a long name", () => {
@@ -194,6 +204,23 @@ describe("name tags", () => {
         expect(readableTagScale(0.36, 0, 10)).toBe(1);
         // The tag never grows without a limit.
         expect(readableTagScale(0.2, 0.01, 10)).toBe(1.6);
+    });
+
+    it("makes the tag grow with the zoom up to its natural size", () => {
+        // 25 employees: small desks. The room is drawn at 0.26 px for one unit when the whole room shows.
+        const k = 0.15;
+        const px = (zoom: number): number => 26 * readableTagScale(k, 0.26 * zoom, 10, zoom) * 0.26 * zoom;
+        expect(px(1)).toBeCloseTo(10, 5);
+        // A zoom of 1.2 makes the text bigger than at zoom 1 (the old rule kept it at 10 px up to a zoom of 2).
+        expect(px(1.2)).toBeGreaterThan(px(1) + 1);
+        expect(px(1.2)).toBeLessThanOrEqual(TAG_NATURAL_PX + 1e-9);
+        // It reaches the natural size and does not pass it while the desks are still small.
+        expect(px(1.4)).toBeCloseTo(TAG_NATURAL_PX, 5);
+        expect(px(2)).toBeCloseTo(TAG_NATURAL_PX, 5);
+        // At a high zoom the tag follows the desks (its scale in SVG units does not shrink below the base).
+        expect(readableTagScale(k, 0.26 * 4, 10, 4)).toBe(tagScale(k));
+        // The old call (no zoom argument) still means zoom 1.
+        expect(readableTagScale(k, 0.26, 10)).toBe(readableTagScale(k, 0.26, 10, 1));
     });
 
     it("puts the tag above the head", () => {
@@ -224,6 +251,18 @@ describe("role line of the tag", () => {
         expect(tagBoxWidth("Ada", "", chip)).toBe(tagWidth("Ada") + chipWidth(chip));
         expect(tagBoxWidth("Ada", "", null)).toBe(tagWidth("Ada"));
         expect(rolePopWidth("ENGINEER")).toBeGreaterThan(rolePopWidth("QA"));
+    });
+
+    it("gives the chip its own space: the tag is wider by the gap and the chip", () => {
+        const chip = roleChip("Project Manager");
+        expect(chipWidth(chip)).toBe(CHIP_GAP + chipBoxWidth(chip));
+        expect(CHIP_GAP).toBeGreaterThan(0);
+        // The chip starts after the end of the name and ends inside the tag.
+        const name = "Maya";
+        const content = tagWidth(name) + chipWidth(chip);
+        const nameStart = -content / 2 + 24 + 20;
+        const chipStart = nameStart + nameWidth(name) + CHIP_GAP;
+        expect(chipStart + chipBoxWidth(chip)).toBeLessThanOrEqual(content / 2);
     });
 
     it("shows the role line only for a small team", () => {

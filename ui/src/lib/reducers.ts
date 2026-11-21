@@ -1,5 +1,5 @@
 // Pure state reducers for the session store. No Svelte, no Tauri.
-import type { EmployeeStartedPayload, FloorView, SessionView, TrackedSession } from "./types";
+import type { Employee, EmployeeStartedPayload, FloorView, SessionView, TrackedSession } from "./types";
 
 export interface SessionState {
     /** Sessions by session ID, for all floors that the UI knows. */
@@ -148,4 +148,13 @@ export function nextAfter<T extends { sessionId: string }>(list: T[], last: stri
     if (list.length === 0) return null;
     const at = list.findIndex((q) => q.sessionId === last);
     return list[(at + 1) % list.length];
+}
+
+/**
+ * "Eli (Engineer)": the name and the role of an employee. `employees` is the list of the floor, or
+ * `undefined` when the UI does not know the floor yet. Then the text is the slug: nothing else is known.
+ */
+export function employeeLabel(employees: readonly Employee[] | undefined, slug: string): string {
+    const emp = employees?.find((e) => e.slug === slug);
+    return emp ? `${emp.name} (${emp.role})` : slug;
 }

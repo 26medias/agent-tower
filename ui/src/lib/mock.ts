@@ -151,6 +151,8 @@ export interface MockControl {
     setProposed(path: string, rules: string[]): void;
     /** The employee files that did not load (`FloorView.employeeErrors`). A floor event follows. */
     setEmployeeErrors(path: string, errors: string[]): void;
+    /** Set the `[brand]` description of a floor (`null` removes it). A floor event follows. */
+    setDescription(path: string, text: string | null): void;
     /** Change the defaults or one employee of a floor. A floor event follows. */
     patchFloor(path: string, change: { defaults?: Partial<FloorDefaults>; employee?: { slug: string; patch: Partial<Employee> } }): void;
 }
@@ -1369,6 +1371,10 @@ export function createMockBackend(): Backend {
         },
         setEmployeeErrors(path, errors) {
             floorOf(path).employeeErrors = [...errors];
+            emit("floor-changed", { path });
+        },
+        setDescription(path, text) {
+            floorOf(path).description = text;
             emit("floor-changed", { path });
         },
         patchFloor(path, change) {

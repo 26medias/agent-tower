@@ -185,7 +185,7 @@
                             autocomplete="off"
                             bind:value={filter.query}
                         />
-                        <label class="compact" title="One line for each task">
+                        <label class="compact-toggle" title="One line for each task">
                             <input type="checkbox" data-testid="filter-compact" checked={compact} onchange={(e) => setCompact(e.currentTarget.checked)} />
                             <span>Compact</span>
                         </label>
@@ -412,11 +412,19 @@
         font-size: 12px;
     }
 
+    /* The filter stays at the top of the list while the operator scrolls a long list (50 tasks). */
     .filter {
+        position: sticky;
+        top: -8px;
+        z-index: 2;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
         gap: 4px 6px;
+        margin: -8px -8px 0;
+        padding: 8px 8px 6px;
+        background: var(--bg);
+        border-bottom: 1px solid var(--line);
     }
 
     .filter select {
@@ -427,7 +435,8 @@
         flex: 2 1 110px;
     }
 
-    .compact {
+    /* Not `.compact`: that class also marks the list and the cards of the compact view. */
+    .compact-toggle {
         display: flex;
         align-items: center;
         gap: 4px;
@@ -509,12 +518,14 @@
         align-items: center;
         gap: 6px;
         padding: 2px 6px 2px 8px;
+        font-size: 12px;
     }
 
     .card.compact .c-title.one {
         flex: 1;
         min-width: 0;
         display: block;
+        overflow: hidden;
         white-space: nowrap;
         text-overflow: ellipsis;
     }

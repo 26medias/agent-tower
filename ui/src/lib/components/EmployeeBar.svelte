@@ -38,9 +38,7 @@
             <StatusDot status={setup.status} />
             <span class="name">Setup agent</span>
             <span class="role">reads the project and proposes a team</span>
-        </div>
-        <div class="meta">
-            <span class="state">{setup.status}</span>
+            <span class="state end">{setup.status}</span>
         </div>
         <div class="actions">
             {#if setupLive}
@@ -48,17 +46,18 @@
             {:else}
                 <span class="state">The setup is stopped.</span>
             {/if}
+            {@render addButton()}
         </div>
     {:else if emp}
         <div class="who">
             <StatusDot status={session?.status ?? "stopped"} />
             <span class="name">{emp.name}</span>
             <span class="role">{emp.role}</span>
+            <span class="state end">{session?.status ?? "no session"}</span>
         </div>
         <div class="meta">
             <span class="cli {emp.cli}">{emp.cli}</span>
             <span class="model" data-testid="bar-model">{modelText}</span>
-            <span class="state">{session?.status ?? "no session"}</span>
         </div>
         <div class="actions">
             {#if live && session}
@@ -118,21 +117,29 @@
                 title={store.goneTitle(`Remove ${emp.name}`) ?? ""}
                 onconfirm={() => store.removeEmployee(emp.slug)}
             />
+            {@render addButton()}
         </div>
     {:else}
-        <p class="hint">{store.floorView ? "Click a character or a tab to select an employee." : "Open a floor to see its employees."}</p>
-    {/if}
-    {#if store.floorView}
-        <button type="button" class="add" disabled={store.gone} title={store.goneTitle()} onclick={onadd}>+ employee</button>
+        <div class="idle">
+            <p class="hint">{store.floorView ? "Click a character or a tab to select an employee." : "Open a floor to see its employees."}</p>
+            {@render addButton()}
+        </div>
     {/if}
 </div>
 
+{#snippet addButton()}
+    {#if store.floorView}
+        <button type="button" class="add" disabled={store.gone} title={store.goneTitle()} onclick={onadd}>+ employee</button>
+    {/if}
+{/snippet}
+
 <style>
+    /* Three rows at most: who, the CLI and the model, and the buttons (with "+ employee" at the end). */
     .bar {
         display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 6px 10px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
         padding: 6px 8px;
         background: var(--bg-deep);
         border: 1px solid var(--line);
@@ -144,6 +151,18 @@
         align-items: center;
         gap: 6px;
         min-width: 0;
+    }
+
+    .who .role {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .state.end {
+        margin-left: auto;
+        flex: none;
     }
 
     .name {
@@ -164,6 +183,14 @@
         display: flex;
         align-items: center;
         gap: 6px;
+        min-width: 0;
+    }
+
+    .model {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .cli {
@@ -186,6 +213,7 @@
         display: flex;
         gap: 4px;
         align-items: center;
+        min-width: 0;
     }
 
     /* The "stop" buttons stay above the dim of a gone floor (see Office.svelte), and they stay enabled. */
@@ -205,6 +233,18 @@
         margin-left: auto;
         border-style: dashed;
         color: var(--dim);
+    }
+
+    .idle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+    }
+
+    .idle .hint {
+        flex: 1;
+        min-width: 0;
     }
 
     .hint {

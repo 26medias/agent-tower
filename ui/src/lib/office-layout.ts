@@ -202,9 +202,30 @@ export function tagLabel(name: string): string {
     return chars.length > TAG_NAME_MAX ? chars.slice(0, TAG_NAME_MAX - 1).join("") + "…" : clean;
 }
 
-/** Width of the tag in SVG units, for a label (see `tagLabel`). */
+/**
+ * Width of a name in SVG units at the font size of the tag (`TAG_FONT`). The font of the tag is a
+ * wide bold sans (DejaVu Sans Bold on Linux), so each character has its own width: a flat width
+ * for each character cut the last letter of "Maya" when a chip came after it. The numbers are
+ * within a few percent of the measured widths (the e2e check measures them in the page). The gap
+ * before the chip (`CHIP_GAP`) takes the rest, so the name never touches the chip.
+ */
+export function nameWidth(label: string): number {
+    let em = 0;
+    for (const ch of label) {
+        if ("ijl.,:;!'|I ".includes(ch)) em += 0.4;
+        else if ("frt-".includes(ch)) em += 0.52;
+        else if ("mwMW…".includes(ch)) em += 1.04;
+        else if (/[A-Z]/.test(ch)) em += 0.84;
+        else if (/[0-9]/.test(ch)) em += 0.72;
+        else if (/[a-z]/.test(ch)) em += 0.7;
+        else em += 0.9;
+    }
+    return em * TAG_FONT;
+}
+
+/** Width of the tag in SVG units, for a label (see `tagLabel`): the glyph, the name and some space. */
 export function tagWidth(label: string): number {
-    return 58 + [...label].length * 17;
+    return 58 + nameWidth(label);
 }
 
 const TAG_ROLE_MAX = 16;
@@ -239,9 +260,17 @@ export function roleChip(role: string): RoleChip | null {
     return null;
 }
 
-/** Width of a chip in SVG units, with the gap before it. */
-export function chipWidth(chip: RoleChip | null): number {
+/** The space between the name and its chip, in SVG units. */
+export const CHIP_GAP = 8;
+
+/** Width of the chip itself (the rounded box), in SVG units. */
+export function chipBoxWidth(chip: RoleChip | null): number {
     return chip ? 16 + [...chip.text].length * 14 : 0;
+}
+
+/** The width that a chip adds to the tag: the gap before it and the chip. The tag is wider by this much. */
+export function chipWidth(chip: RoleChip | null): number {
+    return chip ? CHIP_GAP + chipBoxWidth(chip) : 0;
 }
 
 /** Width of the tag for the name label, the role line and the chip: the wider of the lines. */
@@ -270,14 +299,29 @@ export function tagScale(k: number): number {
 /** Font size of the tag text before scaling, in SVG units. */
 export const TAG_FONT = 26;
 
+/** The text of a tag on the screen is at least this high (px), at any zoom. */
+export const TAG_MIN_PX = 10;
+
+/** The text of a tag grows with the zoom of the room up to this size (px). This is its natural size. */
+export const TAG_NATURAL_PX = 14;
+
 /**
- * Scale of the tag when the SVG is drawn at `viewScale` (screen pixels for one SVG unit). The text
- * never gets smaller than `minFontPx` on the screen, and the tag never grows past 1.6.
+ * Scale of the tag when the SVG is drawn at `viewScale` (screen pixels for one SVG unit) and the
+ * room is zoomed by `zoom` (1 = the whole room). The text on the screen is `minFontPx` at zoom 1.
+ * A zoom makes it grow in step with the room, up to `naturalFontPx`. Then the tag keeps the size
+ * of the desks. The tag never grows past 1.6.
  */
-export function readableTagScale(k: number, viewScale: number, minFontPx = 10): number {
+export function readableTagScale(
+    k: number,
+    viewScale: number,
+    minFontPx = TAG_MIN_PX,
+    zoom = 1,
+    naturalFontPx = TAG_NATURAL_PX,
+): number {
     const base = tagScale(k);
     if (!(viewScale > 0)) return base;
-    return Math.min(1.6, Math.max(base, minFontPx / (TAG_FONT * viewScale)));
+    const wanted = Math.min(naturalFontPx, minFontPx * Math.max(1, zoom));
+    return Math.min(1.6, Math.max(base, wanted / (TAG_FONT * viewScale)));
 }
 
 /** Y of the tag centre above the feet of the agent. */

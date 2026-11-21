@@ -1,10 +1,8 @@
 <script lang="ts">
     import { onDestroy, onMount, tick } from "svelte";
-    import AttentionBar from "$lib/components/AttentionBar.svelte";
     import DebugPaste from "$lib/components/DebugPaste.svelte";
     import BuildingColumn from "$lib/components/BuildingColumn.svelte";
     import EmployeeForm from "$lib/components/EmployeeForm.svelte";
-    import GoneBanner from "$lib/components/GoneBanner.svelte";
     import Office from "$lib/components/Office.svelte";
     import ResizeHandle from "$lib/components/ResizeHandle.svelte";
     import SettingsPanel from "$lib/components/SettingsPanel.svelte";
@@ -13,6 +11,7 @@
     import TaskReader from "$lib/components/TaskReader.svelte";
     import TerminalArea from "$lib/components/TerminalArea.svelte";
     import Toasts from "$lib/components/Toasts.svelte";
+    import TopStrip from "$lib/components/TopStrip.svelte";
     import { setWindowTitle } from "$lib/ipc";
     import { layout } from "$lib/layout.svelte";
     import { store } from "$lib/store.svelte";
@@ -25,7 +24,7 @@
 
     /**
      * Tell the layout the size of the window and of the area that the office and the terminal
-     * share: the height of the work area minus the rows around them (attention bar, tabs, debug bar).
+     * share: the height of the work area minus the rows around them (the top strip, tabs, debug bar).
      */
     function measure(): void {
         if (!work) return;
@@ -93,8 +92,7 @@
         onreset={() => layout.resetColumn()}
     />
     <main class="work" bind:this={work}>
-        <AttentionBar />
-        <GoneBanner />
+        <TopStrip />
         <Office onedit={(emp) => (form = emp)} onadd={() => (form = null)} />
         <Tabs />
         <TerminalArea />
@@ -131,7 +129,7 @@
 
     .work {
         display: grid;
-        grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+        grid-template-rows: auto auto auto minmax(0, 1fr) auto;
         min-width: 0;
         min-height: 0;
     }

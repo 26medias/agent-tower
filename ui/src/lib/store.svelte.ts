@@ -2,6 +2,14 @@
 // employee, logos, settings, toasts.
 // Svelte 5 runes. The pure state changes live in ./reducers.ts.
 import { tick } from "svelte";
+import {
+    ACTIVITY_KEPT,
+    sessionDrafts,
+    startedDraft,
+    taskDrafts,
+    type ActivityDraft,
+    type ActivityEntry,
+} from "./activity";
 import * as ipc from "./ipc";
 import { describeError, isPathError, noticePlan, tidyError, type ErrorAction } from "./messages";
 import { modalOpen } from "./modal";
@@ -13,6 +21,7 @@ import {
     applySessionChanged,
     dismissTab,
     emptySessionState,
+    employeeLabel,
     employeeStartedText,
     finishedTurns,
     isLive,
@@ -143,6 +152,9 @@ class Store {
     reader = $state<"report" | "diff" | null>(null);
     /** The employees of each floor that the UI opened. The attention bar names sessions of any floor with it. */
     employeesByPath = $state.raw<Record<string, Employee[]>>({});
+    /** The lines of the "Team activity" list, for all floors, oldest first. The list shows the open floor only. */
+    activity = $state.raw<ActivityEntry[]>([]);
+    private activitySeq = 0;
     /** The order in which sessions started to ask a question, by session ID. Lower is older. */
     private questionSince = $state.raw<Record<string, number>>({});
     private questionSeq = 0;
@@ -255,13 +267,16 @@ class Store {
         try {
             this.unlisten.push(
                 await ipc.onSessionChanged((payload) => {
-                    this.commitSessions(applySessionChanged(this.sessionState, payload));
+                    this.commitSessions(applySessionChanged(this.sessionState, payload), true);
                 }),
                 // The tab and the status of the new session come from `session-changed`, as for a
                 // session that the operator starts. This event adds only the notice. It does not
                 // change the active tab: the operator keeps the tab that is open.
                 await ipc.onEmployeeStarted((payload) => {
                     this.toast(employeeStartedText(payload), "info");
+                    // "Ada started Lin" says more than the line "Lin started" of the same session. Keep only the first.
+                    this.activity = this.activity.filter((e) => !(e.sessionId === payload.sessionId && e.kind === "session" && e.words === "started"));
+                    this.addActivity([startedDraft(payload.path, payload.byName, payload.name, payload.sessionId, payload.slug)]);
                 }),
                 await ipc.onTasksChanged((payload) => {
                     // The tasks of another floor load when the operator opens that floor.
@@ -299,12 +314,12 @@ class Store {
      * Show a toast. An information toast closes after `TOAST_INFO_MS`, unless `stay` is true. An
      * error toast stays until the operator closes it. An error is shown as text for a person (see
      * messages.ts), and a problem with a program path offers a button for Settings. The same text
-     * twice shows once.
+     * twice shows once. `buttons` is a button that the toast offers (an information toast can have one).
      */
-    toast(text: string, kind?: "info", stay = false): void {
+    toast(text: string, kind?: "info", stay = false, buttons?: Toast["action"]): void {
         const id = ++this.toastId;
         let shown = text;
-        let action: Toast["action"];
+        let action: Toast["action"] = buttons;
         if (kind !== "info") {
             const described = describeError(text);
             shown = described.text;
@@ -322,7 +337,12 @@ class Store {
      */
     private onNotice(payload: NoticePayload): void {
         const plan = noticePlan(payload.kind);
-        if (plan.tone === "error") this.toast(payload.text);
+        // The banner of the open floor already says that its folder is gone. A toast would only
+        // cover the buttons of the banner. The toast stays for the other floors.
+        const bannerSaysIt = payload.kind === "floor_gone" && payload.path === this.openPath;
+        if (bannerSaysIt) {
+            // No toast.
+        } else if (plan.tone === "error") this.toast(payload.text);
         else this.toast(payload.text, "info", plan.stay);
         if (payload.kind === "floor_gone" || payload.kind === "floor_back") {
             void this.loadFloors();
@@ -382,15 +402,47 @@ class Store {
      * Put a new session state in place. It compares the old and the new state to keep the
      * question order and the unread marks, and to tell the operator about a turn that finished.
      */
-    private commitSessions(next: SessionState): void {
+    private commitSessions(next: SessionState, announceNew = false): void {
         const prev = this.sessionState;
         const tracked = trackQuestions(this.questionSince, next, this.questionSeq);
         this.questionSeq = tracked.seq;
         if (tracked.since !== this.questionSince) this.questionSince = tracked.since;
         const finished = finishedTurns(prev, next);
         this.sessionState = next;
+        // A question on a floor that the UI never opened is named with the employees of that floor.
+        for (const s of Object.values(next.byId)) if (s.status === "question") this.loadEmployeesOf(s.path);
+        this.addActivity(sessionDrafts(prev, next, (s) => this.sessionLabel(s), announceNew));
         for (const s of finished) this.turnFinished(s);
         this.markRead();
+    }
+
+    /** Add lines to the "Team activity" list. Each line gets an ID and the time of now. */
+    private addActivity(drafts: ActivityDraft[]): void {
+        if (drafts.length === 0) return;
+        const at = Date.now();
+        const lines = drafts.map((d): ActivityEntry => ({ ...d, id: ++this.activitySeq, at }));
+        this.activity = [...this.activity, ...lines].slice(-ACTIVITY_KEPT);
+    }
+
+    private employeeLoads = new Set<string>();
+
+    /**
+     * Read the employees of a floor that the UI never opened, so that a question there names the
+     * employee ("Bo (Engineer)") and not the slug. `floor_open` only reads the floor and returns its view.
+     * The view is not used for anything else: the open floor does not change. An error leaves the
+     * slug in the text. Each floor is asked once.
+     */
+    private loadEmployeesOf(path: string): void {
+        if (path in this.employeesByPath || this.employeeLoads.has(path)) return;
+        this.employeeLoads.add(path);
+        void ipc
+            .floorOpen(path)
+            .then((view) => {
+                if (!(path in this.employeesByPath)) this.employeesByPath = { ...this.employeesByPath, [path]: view.employees };
+            })
+            .catch(() => {
+                // The folder is gone, or the call failed: the text keeps the slug.
+            });
     }
 
     /** The tab of this session is in front of the operator now. */
@@ -402,7 +454,12 @@ class Store {
         if (this.inView(s)) return;
         this.unread = { ...this.unread, [s.sessionId]: true };
         // One notice, for the session that the operator last typed in.
-        if (s.sessionId === this.lastInputId) this.toast(`${this.sessionLabel(s)} finished a turn`, "info");
+        if (s.sessionId === this.lastInputId) {
+            this.toast(`${this.sessionLabel(s)} answered`, "info", false, {
+                label: "Open",
+                run: () => void this.openSession(s.sessionId),
+            });
+        }
     }
 
     /** Clear the unread mark of the tab that is in view. */
@@ -435,8 +492,7 @@ class Store {
     /** "Eli (Engineer)", or "Setup agent". Works for a session of any floor that the UI opened. */
     sessionLabel(s: { path: string; slug: string }): string {
         if (s.slug === SETUP_SLUG) return "Setup agent";
-        const emp = (this.employeesByPath[s.path] ?? []).find((e) => e.slug === s.slug);
-        return emp ? `${emp.name} (${emp.role})` : s.slug;
+        return employeeLabel(this.employeesByPath[s.path], s.slug);
     }
 
     /** The sessions in `question` on all floors that the UI knows, the oldest first. */
@@ -463,9 +519,15 @@ class Store {
      * employee (this makes its tab the active tab), and put the keyboard focus in its terminal.
      */
     async openQuestion(sessionId: string): Promise<void> {
+        if (!this.sessionState.byId[sessionId]) return;
+        this.lastOpenedQuestion = sessionId;
+        await this.openSession(sessionId);
+    }
+
+    /** Open the tab of a session, as "Open" of a question does, without a change of the question order. */
+    async openSession(sessionId: string): Promise<void> {
         const s = this.sessionState.byId[sessionId];
         if (!s) return;
-        this.lastOpenedQuestion = sessionId;
         if (s.path !== this.openPath && !(await this.openFloor(s.path))) return;
         this.selectedByPath = { ...this.selectedByPath, [s.path]: s.slug };
         this.selectTab(sessionId);
@@ -649,6 +711,9 @@ class Store {
         try {
             const tasks = await ipc.taskList(path);
             if (this.taskLoads.get(path) !== call) return;
+            const names = (slug: string): string =>
+                slug === "operator" ? "You" : ((this.employeesByPath[path] ?? []).find((e) => e.slug === slug)?.name ?? slug);
+            this.addActivity(taskDrafts(path, this.tasksByPath[path], tasks, names));
             this.tasksByPath = { ...this.tasksByPath, [path]: tasks };
         } catch (e) {
             if (this.taskLoads.get(path) === call) this.fail(e);
@@ -997,7 +1062,7 @@ class Store {
     }
 
     private adopt(path: string, session: SessionView): void {
-        this.commitSessions(upsertSession(this.sessionState, path, session));
+        this.commitSessions(upsertSession(this.sessionState, path, session), true);
         // Show the new tab only when the operator still looks at the same floor.
         if (this.openPath === path) this.selectTab(session.sessionId);
     }

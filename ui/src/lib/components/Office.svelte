@@ -11,8 +11,32 @@
     import OfficeRoom from "./OfficeRoom.svelte";
     import ResizeHandle from "./ResizeHandle.svelte";
     import Roster from "./Roster.svelte";
+    import TeamActivity from "./TeamActivity.svelte";
 
     let { onedit, onadd }: { onedit: (employee: Employee) => void; onadd: () => void } = $props();
+
+    // The list "Team activity" shows under the roster only when the info panel has room for it. At
+    // 1280 x 800 the panel is full, so the list is hidden. It does not change what `.top` needs.
+    const ACTIVITY_MIN_PX = 160;
+    let infoEl = $state<HTMLElement | null>(null);
+    let topEl = $state<HTMLElement | null>(null);
+    let spare = $state(0);
+    const showActivity = $derived(spare >= ACTIVITY_MIN_PX);
+
+    function measureSpare(): void {
+        if (!infoEl || !topEl) return;
+        // The padding of the panel (8 px up and down) and the gap before the list (8 px) are not free.
+        spare = infoEl.clientHeight - 16 - topEl.offsetHeight - 8;
+    }
+
+    $effect(() => {
+        if (!infoEl || !topEl) return;
+        const observer = new ResizeObserver(measureSpare);
+        observer.observe(infoEl);
+        observer.observe(topEl);
+        measureSpare();
+        return () => observer.disconnect();
+    });
 
     // The default height of the office depends on the number of employees.
     $effect(() => {
@@ -24,10 +48,15 @@
     {#if !store.floorView && store.ready}
         <EmptyOffice />
     {:else}
-        <div class="info">
-            <OfficeHeader />
-            <EmployeeBar {onedit} {onadd} />
-            <Roster />
+        <div class="info" bind:this={infoEl} data-testid="info-panel">
+            <div class="top" bind:this={topEl}>
+                <OfficeHeader />
+                <EmployeeBar {onedit} {onadd} />
+                <Roster />
+            </div>
+            {#if showActivity}
+                <TeamActivity />
+            {/if}
         </div>
         <div class="room">
             <OfficeRoom />
@@ -80,6 +109,14 @@
         min-height: 0;
         overflow-y: auto;
         padding: 8px 10px;
+    }
+
+    .top {
+        display: flex;
+        flex: none;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 0;
     }
 
     .dim {

@@ -20,6 +20,9 @@
     --st-done: #5ee0c0;
     --st-stopped: #6b7896;
 
+    /* The top strip of the work area: one row of a fixed height (TopStrip.svelte). The toasts start under it. */
+    --strip-h: 30px;
+
     --display: "Chakra Petch", "Trebuchet MS", "DejaVu Sans", system-ui, sans-serif;
     --sans: system-ui, "Segoe UI", "DejaVu Sans", sans-serif;
     --mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;

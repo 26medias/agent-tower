@@ -38,7 +38,8 @@
 <style>
     .roster {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+        /* Two columns in the info panel at 1280 px, more in a wide panel. The role is cut with an ellipsis. */
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 128px), 1fr));
         gap: 3px 6px;
         margin: 0;
         padding: 0;

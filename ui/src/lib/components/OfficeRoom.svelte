@@ -10,8 +10,11 @@
         TAG_FONT,
         TAG_ROLE_FONT,
         TAG_ROLE_MAX_EMPLOYEES,
+        CHIP_GAP,
+        chipBoxWidth,
         chipWidth,
         layoutOffice,
+        nameWidth,
         readableTagScale,
         roleChip,
         roleColor,
@@ -47,7 +50,8 @@
     let boxH = $state(0);
     let svg: SVGSVGElement;
     const viewScale = $derived(boxW > 0 && boxH > 0 ? Math.min(boxW / view.w, boxH / view.h) : 0);
-    const tagScaleNow = $derived(readableTagScale(layout.k, viewScale, 10));
+    // The tag grows with the zoom up to its natural size (see `readableTagScale`).
+    const tagScaleNow = $derived(readableTagScale(layout.k, viewScale, 10, ART.w / view.w));
 
     function statusOf(slug: string): Status {
         return store.sessionOfEmployee(slug)?.status ?? "stopped";
@@ -175,8 +179,8 @@
                 {@const w = tagBoxWidth(label, role, chip)}
                 {@const content = tagWidth(label) + chipWidth(chip)}
                 {@const gx = -content / 2 + 24}
-                {@const chipX = gx + 22 + [...label].length * 17}
-                {@const chipW = chip ? chipWidth(chip) - 2 : 0}
+                {@const chipX = gx + 20 + nameWidth(label) + CHIP_GAP}
+                {@const chipW = chipBoxWidth(chip)}
                 {@const ink = asking ? "#1a1400" : "#e6ecf8"}
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <g

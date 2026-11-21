@@ -84,8 +84,12 @@ export async function repairChecks({ page, check, url, shots }) {
     check("B1: the window title shows the count", (await page.title()) === "(1) Agent Tower", await page.title());
     const barBox = await attention.boundingBox();
     const officeBox = await page.locator(".office").boundingBox();
-    check("B1: the bar takes its own row above the office and covers nothing",
-        barBox.y === 0 && Math.abs(barBox.y + barBox.height - officeBox.y) <= 1 && barBox.width > 500, `bar ${JSON.stringify(barBox)} office y=${officeBox.y}`);
+    // Changed on purpose (N1): the bar lives in the top strip, a row of fixed height that is always there.
+    const stripBox = await page.locator('[data-testid="top-strip"]').boundingBox();
+    check("B1: the bar is in the top strip: its own row above the office, and it covers nothing",
+        stripBox.y === 0 && Math.abs(stripBox.y + stripBox.height - officeBox.y) <= 1 && stripBox.width > 500 &&
+            barBox.y >= stripBox.y && barBox.y + barBox.height <= stripBox.y + stripBox.height + 0.5,
+        `strip ${JSON.stringify(stripBox)} bar ${JSON.stringify(barBox)} office y=${officeBox.y}`);
     check("B1: the bar is not a toast", (await page.locator(".toast").count()) === 0 && (await attention.getAttribute("role")) === "status");
     const tag = page.locator('.tag[data-slug="eng-lin"]');
     const tagBox = await tag.locator("rect.box").evaluate((el) => ({ fill: el.getAttribute("fill"), stroke: el.getAttribute("stroke") }));
@@ -130,7 +134,7 @@ export async function repairChecks({ page, check, url, shots }) {
     await page.waitForSelector(`.storey.on[data-path="${BIG}"]`);
     await page.waitForFunction((id) => document.querySelector(`.tab[data-session="${id}"].active`), piaId);
     check("B1: the second Open opens the other floor, then its tab, its employee and its terminal",
-        (await page.locator(".office h2.name").innerText()) === "Big Office" && (await bar.getAttribute("data-slug")) === "pm" && (await focusInTerminal(piaId)),
+        (await page.locator(".strip h2.name").innerText()) === "Big Office" && (await bar.getAttribute("data-slug")) === "pm" && (await focusInTerminal(piaId)),
         JSON.stringify({ slug: await bar.getAttribute("data-slug"), focus: await page.evaluate(() => document.activeElement?.tagName + "." + document.activeElement?.className), inView: await inView(piaId) }));
     await shot("b1-two-floors-1280.png");
     await M("setStatus", linId, "idle");
@@ -142,7 +146,8 @@ export async function repairChecks({ page, check, url, shots }) {
     await page.waitForFunction(() => !document.querySelector('[data-testid="attention-bar"]'));
     check("B1: the bar and the title go away when the last question ends", (await page.title()) === "Agent Tower" && (await page.locator(".badge").count()) === 0 && (await page.locator('[data-testid="tab-asks"]').count()) === 0);
     const officeAfter = await page.locator(".office").boundingBox();
-    check("B1: the office is back at the top of the work area", officeAfter.y === 0);
+    // Changed on purpose (N1): the strip stays, so the office is at the same place as before the question.
+    check("B1: the office is where it was before the question (under the strip)", officeAfter.y === stripBox.height && officeAfter.y === officeBox.y);
 
     // ================= D2. The tab and the bar are in step =================
     await fresh();
@@ -229,7 +234,8 @@ export async function repairChecks({ page, check, url, shots }) {
     await tabOf(ceo6).locator("button.main").click();
     await M("setStatus", lin6, "working");
     await M("setStatus", lin6, "idle");
-    const finished = page.locator('.toast[data-kind="info"]').filter({ hasText: "Lin (Engineer) finished a turn" });
+    // Changed on purpose (N3): the text is "Lin (Engineer) answered" with an Open button (jargon removed).
+    const finished = page.locator('.toast[data-kind="info"]').filter({ hasText: "Lin (Engineer) answered" });
     await finished.waitFor();
     check("D6: one information toast for the session that the operator typed in", (await finished.count()) === 1 && (await page.locator(".toast").count()) === 1);
     check("D6: Lin also has the unread mark", (await page.locator(`.tab[data-session="${lin6}"] [data-testid="tab-unread"]`).count()) === 1);
@@ -328,7 +334,7 @@ export async function repairChecks({ page, check, url, shots }) {
     check("D9: a floor row shows its live count and its questions", /1 live, 1 asks/.test((await rowOf(FLOOR).innerText()).replace(/\s+/g, " ")), (await rowOf(FLOOR).innerText()).replace(/\s+/g, " "));
     await rowOf("/home/demo/second").locator('[data-testid="floor-open"]').click();
     await page.waitForSelector('.storey.on[data-path="/home/demo/second"]');
-    check("D9: a click on a row of the Floors list opens that floor", (await page.locator(".office h2.name").innerText()) === "Second Floor");
+    check("D9: a click on a row of the Floors list opens that floor", (await page.locator(".strip h2.name").innerText()) === "Second Floor");
     await rowOf(BIG).locator("button:not(.floor-text)").click();
     await page.waitForTimeout(100);
     check("D9: the forget button has its own click: the first click asks and does not open the floor",
@@ -809,7 +815,7 @@ export async function repairChecks({ page, check, url, shots }) {
     await page.fill("#start-path", "/home/demo/second");
     await page.keyboard.press("Enter");
     await page.waitForSelector('.storey.on[data-path="/home/demo/second"]');
-    check("P1: a path in the card opens the floor", (await page.locator('[data-testid="empty-office"]').count()) === 0 && (await page.locator(".office h2.name").innerText()) === "Second Floor");
+    check("P1: a path in the card opens the floor", (await page.locator('[data-testid="empty-office"]').count()) === 0 && (await page.locator(".strip h2.name").innerText()) === "Second Floor");
 
     // ================= Wide windows (P7, P8) and the screenshots of each repaired screen =================
     async function screens(size, tag) {
@@ -911,7 +917,8 @@ export async function repairChecks({ page, check, url, shots }) {
     // ================= G. A floor whose folder is gone (docs/ipc-final.md) =================
     const banner = page.locator('[data-testid="gone-banner"]');
     const REASON = /folder of this floor is gone/i;
-    const GONE_TEXT = `The folder of this floor is gone: ${FLOOR}. The app cannot read or change this floor.`;
+    // Changed on purpose (N1): the strip says "The folder is gone:" (the strip is about the open floor, and "this floor" was redundant).
+    const GONE_TEXT = `The folder is gone: ${FLOOR}. The app cannot read or change this floor.`;
     const flat = (t) => t.replace(/\s+/g, " ").trim();
     const off = async (loc) => (await loc.count()) === 1 && (await loc.isDisabled());
     const on = async (loc) => (await loc.count()) === 1 && !(await loc.isDisabled());
@@ -957,17 +964,19 @@ export async function repairChecks({ page, check, url, shots }) {
     await banner.waitFor();
     check("G1: the banner names the folder and says that the app cannot read or change the floor", flat(await banner.innerText()).includes(GONE_TEXT), flat(await banner.innerText()));
     check("G1: the banner has the buttons Forget this floor and Check again", (await banner.getByRole("button", { name: "Forget this floor" }).count()) === 1 && (await banner.getByRole("button", { name: "Check again" }).count()) === 1);
+    // Changed on purpose (N1): the banner and the attention bar are two parts of the top strip, a row of fixed height.
     const rows = await page.evaluate(() => {
         const r = (s) => document.querySelector(s).getBoundingClientRect();
-        return { banner: r('[data-testid="gone-banner"]'), office: r(".office"), work: r(".work"), attention: r('[data-testid="attention-bar"]') };
+        return { banner: r('[data-testid="gone-banner"]'), strip: r('[data-testid="top-strip"]'), office: r(".office"), work: r(".work"), attention: r('[data-testid="attention-bar"]') };
     });
-    check("G1: the banner is a row of its own at the top of the work area, above the office", Math.abs(rows.banner.top - (rows.work.top + rows.attention.height)) < 1.5 && rows.banner.bottom <= rows.office.top + 0.5 && rows.banner.width >= rows.work.width - 1, JSON.stringify({ b: rows.banner.top, o: rows.office.top }));
-    check("G1: with the attention bar the banner is below it", rows.attention.bottom <= rows.banner.top + 0.5, JSON.stringify({ a: rows.attention.bottom, b: rows.banner.top }));
+    check("G1: the banner is in the top strip: the one row at the top of the work area, above the office", rows.strip.top === rows.work.top && Math.abs(rows.strip.bottom - rows.office.top) < 1 && rows.strip.width >= rows.work.width - 1 && rows.banner.top >= rows.strip.top - 0.5 && rows.banner.bottom <= rows.strip.bottom + 0.5 && rows.strip.height === 30, JSON.stringify({ s: rows.strip.height, b: rows.banner.top, o: rows.office.top }));
+    check("G1: with the attention bar the two share the strip: the bar is right of the banner and the strip did not grow", rows.banner.right <= rows.attention.left + 0.5 && rows.attention.bottom <= rows.strip.bottom + 0.5 && rows.strip.height === 30, JSON.stringify({ a: rows.attention.left, b: rows.banner.right }));
     // The storey shows "missing" at once: the list is read again, and the plate and the class change.
     await page.waitForSelector(`.storey.missing[data-path="${FLOOR}"]`);
     check("G1: the storey of the floor shows missing at once (class and plate)", (await page.locator(`.storey[data-path="${FLOOR}"] .plate`).getAttribute("data-plate")) === "missing");
     check("G1: floor-changed made the UI read floor_list and floor_open again", (await calls("floor_list")).length > gl0 && (await calls("floor_open")).length > go0);
-    check("G1: the floor_gone notice is an error toast that names the floor and the sessions that run", (await toastKinds(/The folder of the floor Demo Tower is gone: .*1 session of it still runs/)).join() === "error");
+    // Changed on purpose (N2): the banner of the open floor already says it, so the notice shows no toast (it covered the buttons).
+    check("N2: the floor_gone notice of the OPEN floor shows no toast (the banner says it)", (await toastKinds(/is gone/)).length === 0 && (await page.locator(".toast").count()) === 0);
     const dim = await page.evaluate(() => {
         const d = document.querySelector('[data-testid="gone-dim"]');
         const o = document.querySelector(".office").getBoundingClientRect();
@@ -1100,12 +1109,15 @@ export async function repairChecks({ page, check, url, shots }) {
     const gl1 = (await calls("floor_list")).length;
     const go1 = (await calls("floor_open")).length;
     await M("notice", FLOOR, "The folder of the floor Demo Tower is gone: /home/demo/tower.", "floor_gone");
+    // Changed on purpose (N2): the floor_gone toast shows for a floor that is not open. The open floor has the banner.
+    await M("notice", BIG, "The folder of the floor Big Office is gone: /home/demo/big.", "floor_gone");
     await M("notice", FLOOR, "Task T-12 is set to done, but its branch task/T-12-x is not merged. The app did not merge it. Use the merge on the board to merge it.", "task_done_unmerged");
     await M("notice", FLOOR, "The folder of the floor Demo Tower is back: /home/demo/tower.", "floor_back");
     await M("notice", FLOOR, "A new kind of notice that the UI does not know.", "brand_new_kind");
     await page.waitForFunction(() => document.querySelectorAll(".toast").length >= 4);
     const kindOf = async (re) => (await toastKinds(re)).join();
-    check("G2: floor_gone is an error toast", (await kindOf(/is gone: \/home\/demo\/tower/)) === "error");
+    check("G2: floor_gone of another floor is an error toast", (await kindOf(/is gone: \/home\/demo\/big/)) === "error");
+    check("G2: floor_gone of the open floor shows no toast", (await kindOf(/is gone: \/home\/demo\/tower/)) === "");
     check("G2: task_done_unmerged is an information toast", (await kindOf(/is not merged/)) === "info");
     check("G2: floor_back is an information toast", (await kindOf(/is back:/)) === "info");
     check("G2: a kind that the UI does not know is an information toast with its text", (await kindOf(/A new kind of notice that the UI does not know/)) === "info");
@@ -1122,7 +1134,7 @@ export async function repairChecks({ page, check, url, shots }) {
     check("G2: floor-changed of the open floor reads floor_open again", (await calls("floor_open")).length > fc.o);
     await page.waitForTimeout(6600);
     check("G2: after 6 s floor_back and the unknown kind closed by themselves", (await kindOf(/is back:/)) === "" && (await kindOf(/does not know/)) === "");
-    check("G2: after 6 s the error toasts and the task_done_unmerged toast (a warning) are still there", (await kindOf(/is gone: \/home\/demo\/tower/)) === "error" && (await kindOf(/is not merged/)) === "info");
+    check("G2: after 6 s the error toast of another floor and the task_done_unmerged toast (a warning) are still there", (await kindOf(/is gone: \/home\/demo\/big/)) === "error" && (await kindOf(/is not merged/)) === "info");
     await page.locator(".toast", { hasText: /is not merged/ }).locator('button[aria-label="Dismiss"]').click();
     check("G2: the task_done_unmerged toast closes with its button", (await kindOf(/is not merged/)) === "");
     await clearToasts();
@@ -1178,7 +1190,7 @@ export async function repairChecks({ page, check, url, shots }) {
     await page.fill("#floor-name", "Brand New");
     await page.locator(".toolbar .create button.primary").click();
     await page.waitForSelector('.storey.on[data-path="/home/demo/brand-new"]');
-    check("G3: create makes the floor and opens it", (await page.locator(".office h2.name").innerText()) === "Brand New");
+    check("G3: create makes the floor and opens it", (await page.locator(".strip h2.name").innerText()) === "Brand New");
 
     // ---- G4. Commands with no question: the object result, the warnings, the proposal, the new texts ----
     await fresh();

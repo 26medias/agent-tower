@@ -1,6 +1,8 @@
 <script lang="ts">
-    // The header of the office: logo, name, path, description, and the buttons "Run the setup
-    // agent" and "New logo". A failed logo shows its error. `NO_KEY:` shows a field for the key.
+    // The header of the office: logo, description, and ONE row of buttons: one main button and a
+    // "More" menu for the others. The name and the path of the floor are in the top strip
+    // (TopStrip.svelte). A failed logo shows its error. `NO_KEY:` shows a field for the key.
+    import { tick } from "svelte";
     import { splitFileError, tidyError } from "$lib/messages";
     import { resumeButton, resumeWho } from "$lib/resume";
     import { store } from "$lib/store.svelte";
@@ -40,6 +42,42 @@
         resumeBusy = true;
         await store.resumeTeam();
         resumeBusy = false;
+    }
+
+    // The menu "More": the setup agent (when the resume is the main button), the other CLI and the new logo.
+    let moreOpen = $state(false);
+    let menuEl = $state<HTMLElement | null>(null);
+
+    function onWindowClick(e: MouseEvent): void {
+        if (moreOpen && menuEl && !menuEl.contains(e.target as Node)) moreOpen = false;
+    }
+
+    function onMenuKey(e: KeyboardEvent): void {
+        if (e.key === "Escape" && moreOpen) {
+            e.stopPropagation();
+            moreOpen = false;
+        }
+    }
+
+    // The description shows two lines. "more" shows all of it, when it is longer.
+    let expanded = $state(false);
+    let clipped = $state(false);
+
+    function watchClip(node: HTMLElement, _text: string | null) {
+        const check = (): void => {
+            if (!expanded) clipped = node.scrollHeight > node.clientHeight + 1;
+        };
+        const observer = new ResizeObserver(check);
+        observer.observe(node);
+        check();
+        return {
+            // The new text is in the page after the next tick. Then the clip can be measured.
+            update: () => {
+                expanded = false;
+                void tick().then(check);
+            },
+            destroy: () => observer.disconnect(),
+        };
     }
 
     let askCli = $state(false);
@@ -90,6 +128,8 @@
     }
 </script>
 
+<svelte:window onclick={onWindowClick} />
+
 {#if view}
     <div class="head">
         <div class="logo" class:busy aria-busy={busy}>
@@ -102,11 +142,16 @@
                 <span class="spinner" role="status" aria-label="Making a logo"></span>
             {/if}
         </div>
-        <div class="text">
-            <h2 class="name">{view.name}</h2>
-            <span class="path" title={view.path}>{view.path}</span>
+        <div class="about">
             {#if view.description}
-                <p class="description">{view.description}</p>
+                <p class="description" class:expanded use:watchClip={view.description} data-testid="description">{view.description}</p>
+                {#if clipped || expanded}
+                    <button type="button" class="more-text" aria-expanded={expanded} data-testid="description-more" onclick={() => (expanded = !expanded)}>
+                        {expanded ? "less" : "more"}
+                    </button>
+                {/if}
+            {:else if needsSetup}
+                <p class="hint">This floor has no description yet. The setup agent reads the project and proposes a team.</p>
             {/if}
         </div>
     </div>
@@ -117,37 +162,17 @@
         {:else if setupBusy}
             <button type="button" class="setup busy-setup" disabled aria-busy="true"><Spinner size={11} /> starting...</button>
         {:else if askCli}
-            <!-- The choice has its own row. "New logo" is not part of it. -->
+            <!-- The choice has its own row. The menu is not part of it. -->
             <div class="choose" role="group" aria-label="Choose the CLI of the setup agent">
                 <span class="ask">Run the setup agent with</span>
                 <button type="button" class="cli-claude" class:primary={(defaultCli ?? "claude") === "claude"} disabled={store.gone} title={store.goneTitle()} onclick={() => runSetup("claude")}>claude</button>
                 <button type="button" class="cli-codex" class:primary={defaultCli === "codex"} disabled={store.gone} title={store.goneTitle()} onclick={() => runSetup("codex")}>codex</button>
                 <button type="button" class="ghost" onclick={() => (askCli = false)}>cancel</button>
             </div>
-        {:else}
+        {:else if resume.visible}
             <button
                 type="button"
-                class="setup"
-                class:primary={needsSetup && !resumePrimary}
-                disabled={store.gone}
-                title={store.goneTitle(defaultCli ? `Starts the setup agent with ${defaultCli}, the CLI that the floor defaults name.` : "Choose claude or codex, then the setup agent reads the project and proposes a team.")}
-                onclick={clickSetup}
-            >
-                Run the setup agent
-            </button>
-            {#if defaultCli}
-                <button type="button" class="ghost other-cli" disabled={store.gone} title={store.goneTitle()} onclick={() => (askCli = true)}>other CLI</button>
-            {/if}
-        {/if}
-        {#if !askCli}
-            <button type="button" class="newlogo" aria-expanded={logoForm} disabled={busy || store.gone} title={store.goneTitle()} onclick={toggleLogoForm}>
-                {busy ? "Making a logo..." : "New logo"}
-            </button>
-        {/if}
-        {#if resume.visible && !askCli}
-            <button
-                type="button"
-                class="resume-team"
+                class="resume-team main"
                 class:primary={resumePrimary}
                 data-testid="resume-team"
                 disabled={resume.busy || resumeBusy || store.gone}
@@ -158,15 +183,74 @@
                 {#if resume.busy || resumeBusy}<Spinner size={11} />{/if}
                 {resume.text}
             </button>
+        {:else}
+            <button
+                type="button"
+                class="setup main"
+                class:primary={needsSetup}
+                disabled={store.gone}
+                title={store.goneTitle(defaultCli ? `Starts the setup agent with ${defaultCli}, the CLI that the floor defaults name.` : "Choose claude or codex, then the setup agent reads the project and proposes a team.")}
+                onclick={clickSetup}
+            >
+                Run the setup agent
+            </button>
+        {/if}
+        {#if !askCli}
+            <div class="menu-wrap" bind:this={menuEl} role="presentation" onkeydown={onMenuKey}>
+                <button
+                    type="button"
+                    class="more"
+                    data-testid="more"
+                    aria-haspopup="menu"
+                    aria-expanded={moreOpen}
+                    title="More actions"
+                    onclick={() => (moreOpen = !moreOpen)}
+                >
+                    More <span aria-hidden="true">&#9662;</span>
+                </button>
+                <!-- Always in the page, hidden while the menu is closed. -->
+                <div class="menu" role="menu" hidden={!moreOpen} data-testid="more-menu">
+                    {#if resume.visible && !setupRunning && !setupBusy}
+                        <button
+                            type="button"
+                            role="menuitem"
+                            class="setup"
+                            disabled={store.gone}
+                            title={store.goneTitle(defaultCli ? `Starts the setup agent with ${defaultCli}, the CLI that the floor defaults name.` : "Choose claude or codex, then the setup agent reads the project and proposes a team.")}
+                            onclick={() => {
+                                moreOpen = false;
+                                clickSetup();
+                            }}
+                        >
+                            Run the setup agent
+                        </button>
+                    {/if}
+                    {#if defaultCli && !setupRunning && !setupBusy}
+                        <button type="button" role="menuitem" class="other-cli" disabled={store.gone} title={store.goneTitle()} onclick={() => { moreOpen = false; askCli = true; }}>
+                            Run it with the other CLI
+                        </button>
+                    {/if}
+                    <button
+                        type="button"
+                        role="menuitem"
+                        class="newlogo"
+                        aria-expanded={logoForm}
+                        disabled={busy || store.gone}
+                        title={store.goneTitle()}
+                        onclick={() => {
+                            moreOpen = false;
+                            toggleLogoForm();
+                        }}
+                    >
+                        {busy ? "Making a logo..." : "New logo"}
+                    </button>
+                </div>
+            </div>
         {/if}
     </div>
 
     {#if resume.visible && resumeLabels.length > 0 && !resume.busy}
         <p class="hint who" data-testid="resume-who">Resumes: {resumeWho(resumeLabels)}</p>
-    {/if}
-
-    {#if needsSetup}
-        <p class="hint">This floor has no description yet. The setup agent reads the project and proposes a team.</p>
     {/if}
 
     {#if logoForm && !busy}
@@ -247,8 +331,8 @@
     .logo {
         position: relative;
         flex: none;
-        width: 44px;
-        height: 44px;
+        width: 40px;
+        height: 40px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -274,12 +358,12 @@
         border: 3px solid #fff;
         border-radius: 11px;
         background: #33487a;
-        font: 700 22px var(--display);
+        font: 700 20px var(--display);
     }
 
     .spinner {
         position: absolute;
-        inset: 12px;
+        inset: 11px;
         border: 4px solid var(--line);
         border-top-color: var(--accent);
         border-radius: 50%;
@@ -297,48 +381,75 @@
         }
     }
 
-    .text {
+    .about {
+        flex: 1;
         min-width: 0;
+        min-height: 40px;
         display: flex;
         flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
     }
 
-    .name {
-        font-family: var(--display);
-        font-size: 15px;
+    /* Two lines. "more" shows all of the text. */
+    .description,
+    .about .hint {
+        margin: 0;
+        font-size: 12px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+    }
+
+    .description {
         color: var(--text);
-        text-transform: none;
-        letter-spacing: 0.02em;
     }
 
-    .path {
-        color: var(--dim);
+    .description.expanded {
+        -webkit-line-clamp: unset;
+        line-clamp: unset;
+        display: block;
+    }
+
+    .more-text {
+        padding: 0;
+        border: 0;
+        background: none;
+        color: var(--accent);
         font-size: 11px;
+    }
+
+    .more-text:hover:not(:disabled) {
+        text-decoration: underline;
+    }
+
+    /* One row: the main button and the menu. It does not wrap. */
+    .buttons {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+    }
+
+    .buttons button {
+        text-transform: none;
+    }
+
+    .buttons .main {
+        flex: 0 1 auto;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
 
-    .description {
-        margin: 2px 0 0;
-        color: var(--text);
-        font-size: 12px;
-        display: -webkit-box;
-        -webkit-line-clamp: 1;
-        line-clamp: 1;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-    }
-
-    .buttons {
-        display: flex;
-        flex-wrap: wrap;
+    .buttons .resume-team {
+        display: inline-flex;
         align-items: center;
-        gap: 6px;
-    }
-
-    .buttons button {
-        text-transform: none;
+        gap: 5px;
     }
 
     /* The "stop" button stays above the dim of a gone floor (see Office.svelte), and it stays enabled. */
@@ -351,6 +462,48 @@
         display: inline-flex;
         align-items: center;
         gap: 5px;
+    }
+
+    .menu-wrap {
+        position: relative;
+        flex: none;
+        margin-left: auto;
+    }
+
+    .menu-wrap .more {
+        color: var(--dim);
+        background: transparent;
+    }
+
+    .menu {
+        position: absolute;
+        z-index: 5;
+        top: calc(100% + 4px);
+        right: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 170px;
+        padding: 4px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .menu[hidden] {
+        display: none;
+    }
+
+    .menu button {
+        text-align: left;
+        border-color: transparent;
+        background: transparent;
+        white-space: nowrap;
+    }
+
+    .menu button:hover:not(:disabled) {
+        background: var(--panel-2);
     }
 
     .ask {
