@@ -302,10 +302,17 @@ export async function lastChecks({ page, check, url, shots }) {
     const activity = page.locator('[data-testid="team-activity"]');
     await activity.waitFor();
     const lineTexts = () => activity.locator("li .text").allInnerTexts();
+    // A short pause after each event: two events in the same millisecond have no fixed order in
+    // the list, and real events are seconds apart.
+    const pause = () => page.waitForTimeout(120);
     await M("setStatus", ceoId, "working");
+    await pause();
     await M("setStatus", ceoId, "idle");
+    await pause();
     await M("setStatus", pmId, "question");
+    await pause();
     await M("taskByEmployee", FLOOR, "pm", { create: "Plan the demo" });
+    await pause();
     await M("employeeStart", FLOOR, "ceo", "eng-lin");
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-activity"] li').length >= 6 && /made T-6/.test(document.querySelector('[data-testid="team-activity"]').textContent) && /Ada started Lin/.test(document.querySelector('[data-testid="team-activity"]').textContent));
     const texts = await lineTexts();

@@ -7,7 +7,7 @@
     // security boundary. It tells the operator what each rule gives. An old `[permissions]` table in the project is only
     // proposed (an agent can have written it): the operator reads it and clicks "Use these rules".
     import { onMount } from "svelte";
-    import { EXAMPLE_RULES, addRule, mergeRules, removeRule } from "$lib/permissions";
+    import { EXAMPLE_RULES, addRule, mergeRules, removeRule, ruleWarning } from "$lib/permissions";
     import { store } from "$lib/store.svelte";
 
     let draft = $state("");
@@ -20,9 +20,13 @@
     const examples = $derived(EXAMPLE_RULES.filter((r) => !(rules ?? []).includes(r)));
     const proposed = $derived(store.proposedRules);
 
-    /** The warning of the server for a rule, without the rule in front of it. `null` when it has none. */
+    /**
+     * The warning for a rule, without the rule in front of it. `null` when it has none. The warning
+     * of the server from the last save comes first. A rule that was saved earlier (before a restart
+     * of the app) gets the same text from the copy of the check in the UI, so the warning always shows.
+     */
     function warningOf(rule: string): string | null {
-        const w = store.permissionWarnings.find((x) => x.startsWith(`${rule}: `));
+        const w = store.permissionWarnings.find((x) => x.startsWith(`${rule}: `)) ?? ruleWarning(rule);
         return w ? w.slice(rule.length + 2) : null;
     }
 

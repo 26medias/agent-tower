@@ -2,8 +2,10 @@
     // The first start: no floor is open. A centred card asks for the project folder. The same
     // actions are in the left column (the "Open folder" form), but the first thing that an operator
     // sees must be here, in the middle of the office area.
+    import { onMount } from "svelte";
     import { store } from "$lib/store.svelte";
 
+    let field = $state<HTMLInputElement | null>(null);
     let path = $state("");
     let name = $state("");
     let busy = $state(false);
@@ -18,6 +20,12 @@
         // Offer the folder name as the default name of the new floor.
         const pending = store.pendingCreate;
         if (pending) name = basename(pending.path);
+    });
+
+    onMount(() => {
+        // The `autofocus` attribute works only for the first load of a page in some webviews. So
+        // the card takes the focus itself, unless a panel that is open has it.
+        if (!document.querySelector('[aria-modal="true"]')) field?.focus();
     });
 
     async function open(): Promise<void> {
@@ -51,14 +59,13 @@
         >
             <label for="start-path">Folder path</label>
             <div class="line">
-                <!-- svelte-ignore a11y_autofocus -->
                 <input
                     id="start-path"
+                    bind:this={field}
                     type="text"
                     placeholder="/path/to/project"
                     autocomplete="off"
                     spellcheck="false"
-                    autofocus
                     aria-invalid={showError ? "true" : undefined}
                     aria-describedby={showError ? "start-path-error" : undefined}
                     bind:value={path}

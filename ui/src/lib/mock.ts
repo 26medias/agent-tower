@@ -541,10 +541,28 @@ export function createMockBackend(): Backend {
 
     // ---- helpers ----
 
+    // Events wait in one queue and go out in the order of `emit`, each with a copy of its payload
+    // from the moment of the call. So a later change of a session does not change an event that
+    // waits, and two events of the same moment keep their order (as the events of the real app do).
+    const outbox: Array<() => void> = [];
+    let draining = false;
+
     function emit(event: string, payload: unknown): void {
-        for (const handler of listeners.get(event) ?? []) {
-            setTimeout(() => handler(payload), 0);
-        }
+        const copy = payload === undefined ? payload : structuredClone(payload);
+        for (const handler of listeners.get(event) ?? []) outbox.push(() => handler(copy));
+        if (draining) return;
+        draining = true;
+        setTimeout(() => {
+            draining = false;
+            const batch = outbox.splice(0);
+            for (const send of batch) {
+                try {
+                    send();
+                } catch (error) {
+                    console.error(error);
+                }
+            }
+        }, 0);
     }
 
     function viewOf(floor: MockFloor): FloorView {

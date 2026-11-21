@@ -92,7 +92,8 @@
         align-items: flex-end;
         gap: 2px;
         padding: 4px 8px 0;
-        min-height: 30px;
+        /* A fixed height: the row must not change when the first tab comes (the terminal would jump). */
+        height: 33px;
         overflow-x: auto;
         background: var(--bg);
         border-bottom: 1px solid var(--line);

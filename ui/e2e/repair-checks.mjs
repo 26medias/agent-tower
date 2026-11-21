@@ -388,10 +388,12 @@ export async function repairChecks({ page, check, url, shots }) {
     await page.locator(".pane:not(.hidden) .xterm").click();
     const focusBefore = await page.evaluate(() => document.activeElement?.className);
     const box0 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox(), tabs: await page.locator(".tabs").boundingBox() };
-    await M("notice", FLOOR, "First notice");
-    await M("notice", FLOOR, "Second notice");
-    await M("notice", FLOOR, "Third notice");
-    await page.waitForFunction(() => document.querySelectorAll(".toast").length === 3);
+    // Wait for each toast before the next notice: the mock sends events with no fixed order when
+    // they come in the same moment.
+    for (const [n, text] of ["First notice", "Second notice", "Third notice"].entries()) {
+        await M("notice", FLOOR, text);
+        await page.waitForFunction((count) => document.querySelectorAll(".toast").length === count, n + 1);
+    }
     const box3 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox(), tabs: await page.locator(".tabs").boundingBox() };
     check("D10: with 3 toasts the office, the tabs and the terminal area are exactly where they were", JSON.stringify(box0) === JSON.stringify(box3), JSON.stringify({ box0, box3 }));
     const toastBoxes = await page.$$eval(".toast", (els) => els.map((e) => ({ ...e.getBoundingClientRect().toJSON(), text: e.querySelector(".text").textContent })));
@@ -1092,6 +1094,9 @@ export async function repairChecks({ page, check, url, shots }) {
     await banner.waitFor();
     await twice(banner.locator("button.forget"));
     await page.locator('[data-testid="empty-office"]').waitFor();
+    // The list is read again after the forget: wait for that before the check (at most 5 s).
+    await page.locator(`.floors li[data-path="${FLOOR}"]`).waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
+    await banner.waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
     check("G1: Forget this floor removes the floor from the list and the banner goes", (await banner.count()) === 0 && (await page.locator(`.floors li[data-path="${FLOOR}"]`).count()) === 0 && (await calls("floor_forget")).some((c) => c.args.path === FLOOR));
 
     // The same inline error in the field of the empty office.
