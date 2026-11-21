@@ -79,6 +79,8 @@ pub struct Events {
     pub started: Mutex<Vec<(PathBuf, EmployeeStarted)>>,
     /// The floors of the `tasks_changed` events, oldest first.
     pub tasks: Mutex<Vec<PathBuf>>,
+    /// The `notice` events (floor, kind, text), oldest first.
+    pub notices: Mutex<Vec<(PathBuf, String, String)>>,
 }
 
 impl Observer for Events {
@@ -99,6 +101,11 @@ impl Observer for Events {
 
     fn tasks_changed(&self, path: &Path) {
         lock(&self.tasks).push(path.to_path_buf());
+        self.changed.notify_all();
+    }
+
+    fn notice(&self, path: &Path, kind: &str, text: &str) {
+        lock(&self.notices).push((path.to_path_buf(), kind.to_owned(), text.to_owned()));
         self.changed.notify_all();
     }
 }
@@ -206,6 +213,10 @@ pub struct Call {
     pub env: EnvMap,
     /// The MCP server that the app gave to the session (`None` for the setup session).
     pub mcp: Option<McpAccess>,
+    /// `StartContext::worktrees`: the floor is a git repository with worktrees.
+    pub worktrees: bool,
+    /// `StartContext::floor_allow`: the rules of `[permissions] allow` that the app gave.
+    pub floor_allow: Vec<String>,
 }
 
 #[derive(Default)]
@@ -217,6 +228,8 @@ pub struct Shared {
     pub extra_args: Mutex<Vec<String>>,
     /// Replace the program (the test of a process that ignores SIGHUP).
     pub program: Mutex<Option<(PathBuf, Vec<String>)>>,
+    /// The adapter refuses to make a plan for these employee slugs (a start that fails).
+    pub fail_slugs: Mutex<std::collections::HashSet<String>>,
 }
 
 pub struct TestAdapter {
@@ -239,6 +252,11 @@ impl TestAdapter {
         resume: Option<&str>,
     ) -> tower_core::adapter::Result<SpawnPlan> {
         let id = &ctx.app_session_id;
+        if lock(&self.shared.fail_slugs).contains(&ctx.employee.slug) {
+            return Err(tower_core::adapter::AdapterError::BadCliSessionId(
+                "forced test failure".to_owned(),
+            ));
+        }
         let cli_id = match (resume, self.kind) {
             (Some(resume), _) => resume.to_owned(),
             (None, CliKind::Claude) => format!("claude-{}", &id[..8]),
@@ -298,6 +316,8 @@ impl TestAdapter {
             parent_env: ctx.parent_env.clone(),
             env: env.clone(),
             mcp: ctx.mcp.clone(),
+            worktrees: ctx.worktrees,
+            floor_allow: ctx.floor_allow.clone(),
         });
         Ok(SpawnPlan {
             spec: SpawnSpec {
@@ -501,6 +521,90 @@ impl Rig {
     pub fn stop_and_wait(&self, id: &str) {
         self.tower.session_stop(id).expect("stop");
         self.events.wait_status(id, Status::Stopped);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Git, for the worktree tests. Temporary repositories only.
+// ---------------------------------------------------------------------------------------------
+
+/// Run `git` in a folder under the temp folder, and return its output. A test never runs git in a
+/// real repository: the folder must be under the temp dir.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let real = std::fs::canonicalize(dir).unwrap();
+    assert!(
+        real.starts_with(&temp),
+        "{} is not under the temp dir: a test must not run git there",
+        real.display()
+    );
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Like `git`, but the exit code is returned, and the output is stdout and stderr.
+pub fn git_try(dir: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text.trim().to_owned())
+}
+
+/// Make `dir` the top of a repository on the branch `main`, with one commit: `notes.txt` has
+/// three lines. The repository has a user (`Operator`, `operator@example.test`).
+pub fn init_repo(dir: &Path) {
+    git(dir, &["init", "-q", "-b", "main"]);
+    git(dir, &["config", "user.name", "Operator"]);
+    git(dir, &["config", "user.email", "operator@example.test"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    git(dir, &["add", "notes.txt"]);
+    git(dir, &["commit", "-q", "-m", "first"]);
+}
+
+impl Rig {
+    /// Add an employee with the policy `edit-in-worktree` (a Claude employee).
+    pub fn add_editor(&self, slug: &str, manager: Option<&str>) {
+        self.tower
+            .employee_save(
+                &self.cwd,
+                Employee {
+                    name: slug.to_uppercase(),
+                    slug: slug.to_owned(),
+                    role: format!("Role of {slug}"),
+                    manager: manager.map(str::to_owned),
+                    cli: CliKind::Claude,
+                    model: None,
+                    effort: None,
+                    permission: PermissionPolicy::EditInWorktree,
+                    role_text: format!("Role text of {slug}."),
+                },
+            )
+            .expect("save the employee");
+    }
+
+    /// Run git in the floor folder (the main checkout).
+    pub fn git(&self, args: &[&str]) -> String {
+        git(&self.cwd, args)
+    }
+
+    /// The worktree folder of a task.
+    pub fn worktree(&self, id: i64) -> PathBuf {
+        self.cwd.join(format!(".swarm/worktrees/T-{id}"))
     }
 }
 

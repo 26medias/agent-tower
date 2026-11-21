@@ -149,6 +149,9 @@ complete and that they can stop this session.
       file when the status is `review` or `done`.
     - `task_get(task)`, `task_list(status?, assignee?)` and `task_comment(task, text)`: any
       employee of the floor may use them.
+    - `task_diff(task)`: any employee of the floor may read the changes of a task that has a git
+      branch (the diffstat and the patch).
+    - `task_merge(task)`: only the `pm`, the `ceo` and the operator. See "Worktrees and merge".
     - A message about a task has the header `[task T-12 from <Name> (<Role>)]`. It does not count
       for the limit of 30 messages.
     - **Report files.** When an employee completes a task, it writes a report to
@@ -164,17 +167,53 @@ complete and that they can stop this session.
       an employee to set `in_progress` when it starts and `review` when it is ready.
     - The operator sees the tasks on a board in the app, and can make, give and change tasks
       there too.
-- **Permission with the CLI `claude`.**
+- **Worktrees and merge.** When the project folder is the top of a git repository that has a
+  commit, and its main checkout is on a branch, the app works with git for the tasks:
+    - When a task is given to an employee with the permission `edit-in-worktree`, the app makes a
+      git worktree and a branch for that task: `.swarm/worktrees/<task-id>/` and
+      `task/<task-id>-<short title>`. The branch starts from the branch that the main checkout has
+      at that moment. The app tells the assignee the path of the worktree. The session of the
+      employee stays in the main checkout (a session cannot change its folder), so the employee
+      must write its files with paths inside the worktree.
+    - The employee does not commit. When it sets the status `review`, the app commits the
+      worktree. The commit has the message `<task-id>: <title>`.
+    - The `pm`, the `ceo` or the operator calls `task_merge`. The app merges the branch with
+      `git merge --no-ff` into the base branch, removes the worktree and the branch, and sets the
+      task to `done`. The main checkout must be on the base branch, and it must have no
+      uncommitted change in tracked files outside `.swarm/`. If not, or if the merge has a
+      conflict, the app stops, sets the task to `blocked` and tells the reason. A conflict goes to
+      an engineer as a new task. The app never forces a merge, never pushes, and never changes
+      the branch of the main checkout.
+    - A worktree has its own copy of the tracked files, `.swarm/employees/` too. A change of
+      that copy is a change of the task branch. Its merge is a decision of the `pm` and of the
+      operator. Write in the role text of the `pm` that it must look for such changes in
+      `task_diff`.
+    - A floor that is not a git repository (or has no commit, or has no branch) gets no
+      worktree. The task works as before: the employee edits the project folder directly, and
+      `task_merge` only sets the task to `done`.
+    - A task for an employee with `read-only` or `ask-always` gets no worktree.
+    - The operator can also merge, see the diff and discard a task on the board. A discard
+      removes the worktree and the branch of a task that is not done.
+- **Permission with the CLI `claude`.** (Changed in M3, 2026-11-21.)
     - `read-only`: the CLI asks the operator before each file edit and before each shell command
-      that the operator's own CLI settings do not already permit. The employee can read all
-      files. Use it for seats that plan, decide and read.
-    - `edit-in-worktree`: the CLI edits files in the project folder with no question. A shell
-      command (tests, builds, a browser) still asks the operator, unless the operator's own CLI
-      settings permit it. Use it for seats that write code, documents, data or assets, and for
-      seats that must run and build things.
-    - `ask-always`: the same as `read-only` for the CLI. Use it for a seat that must ask the
-      operator before each action.
-    - There is no separate worktree yet: edits go into the project folder.
+      that the operator's own CLI settings do not already permit. The one exception is the
+      report files in `.swarm/reports/`: an employee can write them with no question. The
+      employee can read all files. Use it for seats that plan, decide and read.
+    - `edit-in-worktree`, in a git repository: the CLI edits files inside the task worktrees
+      (`.swarm/worktrees/`) and the report files with no question. An edit of a file of the main
+      checkout asks the operator. A shell command (tests, builds, a browser) still asks the
+      operator, unless the operator's own CLI settings or the table `[permissions]` of
+      `floor.toml` permit it. Use it for seats that write code, documents, data or assets, and
+      for seats that must run and build things.
+    - `edit-in-worktree`, with no git repository: the CLI edits files in the project folder with
+      no question, as before, because no worktree exists.
+    - `ask-always`: the CLI asks before each action. Use it for a seat that must ask the operator
+      before each action.
+    - **`[permissions]` in `floor.toml`.** The operator can list commands that need no question,
+      for example `allow = ["Bash(cargo test:*)", "Bash(git status:*)"]`. The app adds these
+      rules to each `claude` employee, except an `ask-always` employee. The operator sets the list
+      in Settings. Do NOT write this table, and do not ask the operator for it in the team
+      proposal. It applies at the next start of a session.
 - **Permission with the CLI `codex`.** The CLI does not enforce `read-only` or
   `edit-in-worktree` on this machine: only the role text limits the employee. So write the limit
   as an order in the role text (for example "Do not edit files."). `ask-always` does not work
@@ -286,7 +325,8 @@ write program code: give each change of code to the engineer who owns that area.
 ## The file `.swarm/floor.toml`
 
 This file already exists. It has the version, the name of the floor and maybe default values.
-Do not change the lines `version`, `name` and `[defaults]`. Add or change only the table `[brand]`.
+Do not change the lines `version`, `name` and the tables `[defaults]` and `[permissions]`. Add or
+change only the table `[brand]`.
 Example of a complete file after your change:
 
 ```
@@ -297,13 +337,16 @@ name = "Acme"
 cli = "claude"
 model = "sonnet"
 
+[permissions]
+allow = ["Bash(cargo test:*)"]
+
 [brand]
 description = "A web shop for hand-made candles."
 logo_prompt = "A golden honeycomb hexagon with a small bee."
 ```
 
-The table `[defaults]` can be missing or empty. Keep it as it is. If the file has no `[brand]`
-table, add it at the end of the file.
+The tables `[defaults]` and `[permissions]` can be missing or empty. Keep them as they are. If the
+file has no `[brand]` table, add it at the end of the file.
 
 ## Rules
 

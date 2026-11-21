@@ -115,6 +115,14 @@ pub struct StartContext {
     pub log: Option<LogConfig>,
     /// The MCP server of the app for this session. `None` for the setup session.
     pub mcp: Option<McpAccess>,
+    /// The floor folder is the top of a git repository, so the app makes a worktree for each task
+    /// that it gives to an employee with the policy `edit-in-worktree` (spec 4.8). Claude then
+    /// asks the operator for an edit in the main checkout. With `false` (no repository), the
+    /// mode `acceptEdits` stays for that policy, as in M1.
+    pub worktrees: bool,
+    /// The rules of `[permissions] allow` of the floor. The caller has checked them
+    /// (`model::valid_allow_rules`). Claude only. They are not used for the policy `ask-always`.
+    pub floor_allow: Vec<String>,
 }
 
 /// What to start, and what the app learns at once.

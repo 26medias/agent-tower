@@ -23,21 +23,35 @@
 //! A status change tells the person who assigned the task, or the creator if nobody assigned it.
 //! It tells nobody when that person is the caller (or the operator).
 //!
+//! # Worktrees (M3, spec 4.8)
+//!
+//! `task_assign` makes the git worktree and the branch of a task when the assignee has the policy
+//! `edit-in-worktree` and the floor folder is the top of a git repository with a commit, on a
+//! branch (`gitwork::repo_state`). The worktree is `{floor}/.swarm/worktrees/T-<id>/`. The task
+//! keeps the branch, the base branch, the base commit and the worktree folder. The assignment
+//! message tells the assignee the rules (`bus::assign_orders`). When the status goes to `review`,
+//! the app commits the worktree (`gitwork::snapshot`). The merge, the diff and the discard are in
+//! `merge.rs`.
+//!
 //! # Reports
 //!
 //! A report is a file under `{floor}/.swarm/reports/`. `check_report` refuses a path outside that
 //! folder (also with `..` and with a symbolic link), and, for the status `review` and `done`, a
 //! path that has no file. The task keeps the path relative to the floor folder.
 
-use super::bus::{Identity, Sent, Slot, db_error, may_start, one_line, sanitize_message};
+use super::bus::{
+    Identity, Sent, Slot, Workplace, assign_orders, db_error, may_start, one_line, review_orders,
+    sanitize_message,
+};
 use super::{
     FloorHandle, OPERATOR, REPORTS_DIR, Result, SETUP_SLUG, TowerCore, TowerError, locked, now_ms,
     other,
 };
-use crate::model::Employee;
+use crate::gitwork::{self, RepoState, Snapshot};
+use crate::model::{Employee, PermissionPolicy};
 use crate::store::{
     KIND_TASK_ASSIGN, KIND_TASK_STATUS, NewTaskMessage, StoreError, TaskChange, TaskEventRecord,
-    TaskRecord, TaskStatus,
+    TaskRecord, TaskStatus, WorktreeRecord,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -55,7 +69,7 @@ pub const REPORT_READ_MAX_BYTES: usize = 256 * 1024;
 
 /// The task that the operator reads is the task of this floor. `T-12`, `t-12`, `12` and the
 /// number 12 all name the same task.
-fn parse_task_ref(value: Option<&Value>) -> std::result::Result<i64, String> {
+pub(super) fn parse_task_ref(value: Option<&Value>) -> std::result::Result<i64, String> {
     let bad = || "The argument \"task\" must be a task ID, for example \"T-12\".".to_owned();
     let text = match value {
         Some(Value::String(text)) => text.trim().to_owned(),
@@ -197,7 +211,7 @@ fn check_report(
 }
 
 /// The text of a status message: the title, the new status, the note and the report path.
-fn status_body(task: &TaskRecord, note: Option<&str>) -> String {
+pub(super) fn status_body(task: &TaskRecord, note: Option<&str>) -> String {
     let mut lines = vec![
         format!("Title: {}", task.title),
         format!("Status: {}", task.status.as_str()),
@@ -221,14 +235,14 @@ fn assign_body(task: &TaskRecord) -> String {
 }
 
 /// Who acts: an employee (its slug and name), or the operator.
-struct Actor {
-    slug: String,
-    name: String,
-    operator: bool,
+pub(super) struct Actor {
+    pub slug: String,
+    pub name: String,
+    pub operator: bool,
 }
 
 impl Actor {
-    fn employee(who: &Identity, team: &[Employee]) -> Actor {
+    pub(super) fn employee(who: &Identity, team: &[Employee]) -> Actor {
         let name = team
             .iter()
             .find(|e| e.slug == who.slug)
@@ -240,7 +254,7 @@ impl Actor {
         }
     }
 
-    fn operator() -> Actor {
+    pub(super) fn operator() -> Actor {
         Actor {
             slug: OPERATOR.to_owned(),
             name: "Operator".to_owned(),
@@ -251,7 +265,7 @@ impl Actor {
 
 impl TowerCore {
     /// The caller must be an employee of its floor. Returns the floor, the team and the actor.
-    fn task_actor(
+    pub(super) fn task_actor(
         &self,
         who: &Identity,
     ) -> std::result::Result<(Arc<FloorHandle>, Vec<Employee>, Actor), String> {
@@ -372,7 +386,7 @@ impl TowerCore {
 
     // ---- the rules, for an employee and for the operator ----
 
-    fn read_task(
+    pub(super) fn read_task(
         &self,
         floor: &FloorHandle,
         id: i64,
@@ -457,15 +471,52 @@ impl TowerCore {
             self.check_start_slot(&floor.path)?;
         }
         let from = actor.slug.clone();
-        let (task, message_id) = locked(&floor.store)
+        let existing = locked(&floor.store)
             .db()
-            .assign_task(id, to, &actor.slug, now_ms(), |after| NewTaskMessage {
-                from_slug: from,
-                to_slug: to.to_owned(),
-                text: assign_body(after),
-                kind: KIND_TASK_ASSIGN,
-            })
-            .map_err(task_error)?;
+            .get_task(id)
+            .map_err(db_error)?
+            .ok_or_else(|| StoreError::UnknownTask(id).to_string())?;
+        let (new_worktree, no_worktree_reason) = self.prepare_worktree(floor, target, &existing)?;
+        let floor_path = floor.path.clone();
+        let stored = locked(&floor.store).db().assign_task(
+            id,
+            to,
+            &actor.slug,
+            now_ms(),
+            new_worktree.as_ref(),
+            |after| {
+                let workplace = if after.worktree.is_some() {
+                    Workplace::Worktree(after)
+                } else if let Some(why) = no_worktree_reason {
+                    Workplace::Direct { why }
+                } else {
+                    Workplace::NoEdit
+                };
+                NewTaskMessage {
+                    from_slug: from.clone(),
+                    to_slug: to.to_owned(),
+                    text: assign_body(after),
+                    kind: KIND_TASK_ASSIGN,
+                    orders: assign_orders(&floor_path, after.id, &from, &workplace),
+                }
+            },
+        );
+        let (task, message_id) = match stored {
+            Ok(done) => done,
+            Err(error) => {
+                // The worktree was made for this assignment only. Take it away again.
+                if let Some(made) = &new_worktree {
+                    let _guard = locked(&floor.git);
+                    let _ = gitwork::discard_worktree(
+                        &floor.path,
+                        id,
+                        Some(&made.path),
+                        Some(&made.branch),
+                    );
+                }
+                return Err(task_error(error));
+            }
+        };
         // From here on, the task and the message are stored: no `Err` any more.
         self.notifier.tasks_changed(&floor.path);
         let subject = format!("The message for task T-{}", task.id);
@@ -485,6 +536,90 @@ impl TowerCore {
             "Task T-{} is given to {}. {report}",
             task.id, target.name
         ))
+    }
+
+    /// The worktree for a task that is given to `target`. Returns the record of a new worktree
+    /// (`None` when the task has one already, or none is made) and, when `target` edits files and
+    /// no worktree exists, the reason. `Err` is a git failure: nothing is stored then.
+    fn prepare_worktree(
+        &self,
+        floor: &Arc<FloorHandle>,
+        target: &Employee,
+        task: &TaskRecord,
+    ) -> std::result::Result<(Option<WorktreeRecord>, Option<&'static str>), String> {
+        if task.worktree.is_some() || target.permission != PermissionPolicy::EditInWorktree {
+            return Ok((None, None));
+        }
+        let _git = locked(&floor.git);
+        match gitwork::repo_state(&floor.path) {
+            RepoState::Ready { branch, head } => {
+                let made = gitwork::create_worktree(&floor.path, task.id, &task.title, &head)
+                    .map_err(|e| {
+                        format!(
+                            "The app could not make the git worktree for task T-{}: {e}. The task is not given.",
+                            task.id
+                        )
+                    })?;
+                Ok((
+                    Some(WorktreeRecord {
+                        branch: made.branch,
+                        base_branch: branch,
+                        base_commit: head,
+                        path: gitwork::worktree_relative(task.id),
+                    }),
+                    None,
+                ))
+            }
+            other => Ok((None, Some(other.why_no_worktree()))),
+        }
+    }
+
+    /// May `actor` change the status of the task? (The assignee, the creator, the `ceo`, the
+    /// `pm` and the operator.)
+    fn may_change_status(actor: &Actor, task: &TaskRecord) -> bool {
+        actor.operator
+            || task.assignee.as_deref() == Some(actor.slug.as_str())
+            || task.creator == actor.slug
+            || actor.slug == "ceo"
+            || actor.slug == "pm"
+    }
+
+    /// The task goes to `review`: commit what the worktree has. Returns the line for the note of
+    /// the status event. `Err` is the text for the caller. Nothing changes then.
+    fn snapshot_for_review(
+        &self,
+        floor: &Arc<FloorHandle>,
+        team: &[Employee],
+        task: &TaskRecord,
+    ) -> std::result::Result<String, String> {
+        let Some(relative) = &task.worktree else {
+            return Ok(String::new());
+        };
+        let assignee = task
+            .assignee
+            .as_deref()
+            .and_then(|slug| team.iter().find(|e| e.slug == slug));
+        let author = gitwork::Author {
+            slug: assignee.map_or("employee", |e| e.slug.as_str()),
+            name: assignee.map_or("Employee", |e| e.name.as_str()),
+            role: assignee.map_or("Employee", |e| e.role.as_str()),
+        };
+        let path = gitwork::worktree_path(&floor.path, task.id, relative)?;
+        let _git = locked(&floor.git);
+        let result = gitwork::snapshot(&path, task.id, &task.title, &author).map_err(|e| {
+            format!(
+                "The app could not commit the changes of the worktree of task T-{}: {e}. The status is not changed.",
+                task.id
+            )
+        })?;
+        Ok(match result {
+            Snapshot::NoChanges => "[app] No changes in the worktree: no commit.".to_owned(),
+            Snapshot::Committed { commit } => format!(
+                "[app] The app committed the worktree on {} ({}).",
+                task.branch.as_deref().unwrap_or("the task branch"),
+                &commit[..commit.len().min(12)]
+            ),
+        })
     }
 
     /// `task_update` for an employee or the operator.
@@ -511,12 +646,30 @@ impl TowerCore {
             )?),
             None => None,
         };
+        // The status `review` of a task with a worktree: the app commits the worktree first.
+        // The rule of the guard is checked before, so a caller that may not change the task
+        // makes no commit.
+        let mut note = note;
+        if status == TaskStatus::Review {
+            let current = locked(&floor.store).db().get_task(id).map_err(db_error)?;
+            if let Some(task) = current.filter(|t| t.worktree.is_some()) {
+                if !Self::may_change_status(actor, &task) {
+                    return Err("Only the assignee, the creator, the ceo and the pm may change the status of this task.".to_owned());
+                }
+                let line = self.snapshot_for_review(floor, team, &task)?;
+                note = Some(match note.as_deref().filter(|n| !n.trim().is_empty()) {
+                    Some(text) => format!("{text}\n{line}"),
+                    None => line,
+                });
+            }
+        }
         let change = TaskChange {
             status,
             note: note.as_deref(),
             report: report.as_deref(),
             author: &actor.slug,
         };
+        let floor_path = floor.path.clone();
         let outcome = locked(&floor.store)
             .db()
             .update_task(
@@ -524,12 +677,7 @@ impl TowerCore {
                 &change,
                 now_ms(),
                 |before| {
-                    let allowed = actor.operator
-                        || before.assignee.as_deref() == Some(actor.slug.as_str())
-                        || before.creator == actor.slug
-                        || actor.slug == "ceo"
-                        || actor.slug == "pm";
-                    if allowed {
+                    if Self::may_change_status(actor, before) {
                         Ok(())
                     } else {
                         Err("Only the assignee, the creator, the ceo and the pm may change the status of this task.".to_owned())
@@ -544,11 +692,20 @@ impl TowerCore {
                     if to == actor.slug || to == OPERATOR || !team.iter().any(|e| e.slug == to) {
                         return None;
                     }
+                    // A task in review with a worktree: the manager gets the merge steps.
+                    let orders = (after.status == TaskStatus::Review
+                        && after.worktree.is_some()
+                        && after.branch.is_some())
+                    .then(|| {
+                        let may_merge = to == "pm" || to == "ceo";
+                        review_orders(&floor_path, after, may_merge)
+                    });
                     Some(NewTaskMessage {
                         from_slug: actor.slug.clone(),
                         to_slug: to.to_owned(),
                         text: status_body(after, change.note),
                         kind: KIND_TASK_STATUS,
+                        orders,
                     })
                 },
             )
@@ -661,7 +818,7 @@ impl TowerCore {
 }
 
 /// A store error as the text for the caller.
-fn task_error(error: StoreError) -> String {
+pub(super) fn task_error(error: StoreError) -> String {
     match error {
         StoreError::UnknownTask(_) | StoreError::Rule(_) => error.to_string(),
         other => db_error(other),
@@ -679,6 +836,9 @@ fn task_json(task: &TaskRecord) -> Value {
         "assigned_by": task.assigner,
         "status": task.status.as_str(),
         "report": task.report,
+        "branch": task.branch,
+        "base_branch": task.base_branch,
+        "worktree": task.worktree,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     })

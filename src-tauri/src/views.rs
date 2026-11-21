@@ -187,6 +187,27 @@ pub struct FloorView {
     pub setup_session_id: Option<String>,
     /// `[defaults]` of `floor.toml`.
     pub defaults: FloorDefaults,
+    /// Slugs of the employees that were live at the last close and can resume now (M3).
+    pub resumable: Vec<String>,
+    /// The background resume of the last team. `null` when none runs.
+    pub resume_progress: Option<ResumeProgress>,
+}
+
+/// How far the resume of the last team is (`docs/ipc-m3.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+impl From<app::ResumeProgress> for ResumeProgress {
+    fn from(progress: app::ResumeProgress) -> ResumeProgress {
+        ResumeProgress {
+            done: progress.done,
+            total: progress.total,
+        }
+    }
 }
 
 /// `FloorDefaults`: the `[defaults]` of `floor.toml`. It goes in both directions. A missing field
@@ -291,6 +312,8 @@ impl From<app::FloorView> for FloorView {
             logo_error: view.logo_error,
             setup_session_id: view.setup_session_id,
             defaults: view.defaults.into(),
+            resumable: view.resumable,
+            resume_progress: view.resume_progress.map(ResumeProgress::from),
         }
     }
 }
@@ -410,6 +433,16 @@ pub struct FloorChanged {
     pub path: String,
 }
 
+/// Payload of the event `notice` (`docs/ipc-m3.md`): something that the operator must see.
+/// `kind` is `task_blocked` or `resume_failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub path: String,
+    pub kind: String,
+    pub text: String,
+}
+
 /// Payload of the event `tasks-changed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -437,6 +470,12 @@ pub struct TaskView {
     pub report: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The git branch of the task, or `null` (`docs/ipc-m3.md`).
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub base_commit: Option<String>,
+    /// The worktree folder, relative to the floor folder, or `null` when there is none now.
+    pub worktree: Option<String>,
 }
 
 impl From<TaskRecord> for TaskView {
@@ -453,6 +492,10 @@ impl From<TaskRecord> for TaskView {
             report: task.report,
             created_at: task.created_at,
             updated_at: task.updated_at,
+            branch: task.branch,
+            base_branch: task.base_branch,
+            base_commit: task.base_commit,
+            worktree: task.worktree,
         }
     }
 }
@@ -482,6 +525,51 @@ impl From<TaskEventRecord> for TaskEvent {
             kind: event.kind,
             value: event.value,
             text: event.text,
+        }
+    }
+}
+
+/// The result of `task_merge` (`docs/ipc-m3.md`). A merge that is blocked has `merged` false: the
+/// status of the task is `blocked` then, and `message` says why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskMerge {
+    pub merged: bool,
+    pub message: String,
+    pub task: TaskView,
+}
+
+impl From<app::MergeReport> for TaskMerge {
+    fn from(report: app::MergeReport) -> TaskMerge {
+        TaskMerge {
+            merged: report.merged,
+            message: report.text,
+            task: report.task.into(),
+        }
+    }
+}
+
+/// The result of `task_diff` (`docs/ipc-m3.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDiff {
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub stat: String,
+    pub patch: String,
+    pub truncated: bool,
+    pub note: Option<String>,
+}
+
+impl From<app::TaskDiffView> for TaskDiff {
+    fn from(view: app::TaskDiffView) -> TaskDiff {
+        TaskDiff {
+            branch: view.branch,
+            base_branch: view.base_branch,
+            stat: view.stat,
+            patch: view.patch,
+            truncated: view.truncated,
+            note: view.note,
         }
     }
 }
@@ -609,6 +697,8 @@ mod tests {
                 effort: None,
                 policy: Some(Policy::AskAlways),
             },
+            resumable: vec!["pm".into(), "eng".into()],
+            resume_progress: Some(ResumeProgress { done: 1, total: 2 }),
         };
         assert_eq!(
             to_json(&floor),
@@ -620,7 +710,9 @@ mod tests {
                 "logoError": "NO_KEY: x", "setupSessionId": null,
                 "defaults": {
                     "cli": "codex", "model": "gpt-6-luna", "effort": null, "policy": "ask_always"
-                }
+                },
+                "resumable": ["pm", "eng"],
+                "resumeProgress": {"done": 1, "total": 2}
             })
         );
         let entry = FloorEntry {
@@ -746,6 +838,26 @@ mod tests {
             json!({"path": "/p"})
         );
         assert_eq!(
+            to_json(&Notice {
+                path: "/p".into(),
+                kind: "task_blocked".into(),
+                text: "T-1 is blocked".into()
+            }),
+            json!({"path": "/p", "kind": "task_blocked", "text": "T-1 is blocked"})
+        );
+        assert_eq!(
+            to_json(&TaskDiff {
+                branch: Some("task/T-1-x".into()),
+                base_branch: Some("main".into()),
+                stat: " a.txt | 1 +\n".into(),
+                patch: "diff".into(),
+                truncated: false,
+                note: None
+            }),
+            json!({"branch": "task/T-1-x", "baseBranch": "main", "stat": " a.txt | 1 +\n",
+                "patch": "diff", "truncated": false, "note": null})
+        );
+        assert_eq!(
             to_json(&EmployeeStarted {
                 path: "/p".into(),
                 session_id: "s2".into(),
@@ -773,6 +885,10 @@ mod tests {
             report: Some(".swarm/reports/T-12.md".into()),
             created_at: 1000,
             updated_at: 2000,
+            branch: Some("task/T-12-add-hello".into()),
+            base_branch: Some("main".into()),
+            base_commit: Some("a".repeat(40)),
+            worktree: Some(".swarm/worktrees/T-12".into()),
         };
         assert_eq!(
             to_json(&TaskView::from(record.clone())),
@@ -780,7 +896,9 @@ mod tests {
                 "id": 12, "title": "Add hello", "description": "Write hello.txt",
                 "parent": 3, "creator": "pm", "assignee": "eng", "assigner": "operator",
                 "status": "in_progress", "report": ".swarm/reports/T-12.md",
-                "createdAt": 1000, "updatedAt": 2000
+                "createdAt": 1000, "updatedAt": 2000,
+                "branch": "task/T-12-add-hello", "baseBranch": "main",
+                "baseCommit": "a".repeat(40), "worktree": ".swarm/worktrees/T-12"
             })
         );
         for (status, word) in [

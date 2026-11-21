@@ -5,7 +5,7 @@
     // that shows the number of open tasks. The width has a drag handle, like the other panes.
     import { layout } from "$lib/layout.svelte";
     import { store } from "$lib/store.svelte";
-    import { defaultOpenGroups, groupTasks, openCount, personName, statusLabel, taskLabel } from "$lib/tasks";
+    import { defaultOpenGroups, groupTasks, hasBranch, openCount, personName, statusLabel, taskLabel } from "$lib/tasks";
     import type { TaskStatus } from "$lib/types";
     import ResizeHandle from "./ResizeHandle.svelte";
     import TaskDetail from "./TaskDetail.svelte";
@@ -142,7 +142,12 @@
                                                 <span class="c-status">{statusLabel(t.status)}</span>
                                             </span>
                                             <span class="c-title">{t.title}</span>
-                                            <span class="c-who">{personName(t.assignee, names)}</span>
+                                            <span class="c-bottom">
+                                                <span class="c-who">{personName(t.assignee, names)}</span>
+                                                {#if hasBranch(t)}
+                                                    <span class="c-branch mono" data-testid="branch-mark" title="Git branch {t.branch}">branch</span>
+                                                {/if}
+                                            </span>
                                         </button>
                                     </li>
                                 {/each}
@@ -331,8 +336,26 @@
         overflow-wrap: anywhere;
     }
 
+    .c-bottom {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+    }
+
     .c-who {
         color: var(--dim);
         font-size: 12px;
+    }
+
+    /* A small mark: the task has its own git branch and worktree. */
+    .c-branch {
+        flex: none;
+        padding: 0 5px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--dim);
+        font-size: 10px;
+        line-height: 14px;
     }
 </style>

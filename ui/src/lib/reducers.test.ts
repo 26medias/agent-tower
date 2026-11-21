@@ -114,6 +114,8 @@ describe("floor view and tabs", () => {
         logoError: null,
         setupSessionId: null,
         defaults: { cli: null, model: null, effort: null, policy: null },
+        resumable: [],
+        resumeProgress: null,
     });
 
     it("replaces the sessions of the floor and keeps the other floors", () => {

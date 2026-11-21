@@ -14,7 +14,8 @@
 
 use crate::views::{
     AttachResult, Cli, Employee, FloorDefaults, FloorEntry, FloorView, ModelCatalog, OutputMessage,
-    Programs, SessionView, Settings, TaskDetail, TaskStatus, TaskView,
+    Programs, ResumeProgress, SessionView, Settings, TaskDetail, TaskDiff, TaskMerge, TaskStatus,
+    TaskView,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -449,6 +450,78 @@ pub async fn task_report(
     id: i64,
 ) -> Result<Option<String>, String> {
     blocking(&tower, move |t| t.task_report(&path_of(&path), id)).await
+}
+
+/// The operator merges a task (`docs/ipc-m3.md`). A merge that is blocked is a result with
+/// `merged: false`, not an error.
+#[tauri::command]
+pub async fn task_merge(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+) -> Result<TaskMerge, String> {
+    blocking(&tower, move |t| {
+        t.task_merge(&path_of(&path), id).map(TaskMerge::from)
+    })
+    .await
+}
+
+/// The changes of a task branch: the diffstat and the patch (cut at 60000 bytes).
+#[tauri::command]
+pub async fn task_diff(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+) -> Result<TaskDiff, String> {
+    blocking(&tower, move |t| {
+        t.task_diff(&path_of(&path), id).map(TaskDiff::from)
+    })
+    .await
+}
+
+/// The operator discards a task that is not done: worktree and branch go, status `blocked`.
+#[tauri::command]
+pub async fn task_discard(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+) -> Result<TaskView, String> {
+    blocking(&tower, move |t| {
+        t.task_discard(&path_of(&path), id).map(TaskView::from)
+    })
+    .await
+}
+
+/// The rules of `[permissions] allow` of `floor.toml`.
+#[tauri::command]
+pub async fn floor_permissions_get(
+    tower: State<'_, Shared>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    blocking(&tower, move |t| t.floor_permissions_get(&path_of(&path))).await
+}
+
+/// Write `[permissions] allow`. A bad rule refuses the whole call.
+#[tauri::command]
+pub async fn floor_permissions_set(
+    tower: State<'_, Shared>,
+    path: String,
+    allow: Vec<String>,
+) -> Result<Vec<String>, String> {
+    blocking(&tower, move |t| {
+        t.floor_permissions_set(&path_of(&path), allow)
+    })
+    .await
+}
+
+/// Resume the employees of `FloorView.resumable` in the background (`docs/ipc-m3.md`). It
+/// returns at once with the progress at the start.
+#[tauri::command]
+pub async fn team_resume(tower: State<'_, Shared>, path: String) -> Result<ResumeProgress, String> {
+    blocking(&tower, move |t| {
+        t.team_resume(&path_of(&path)).map(ResumeProgress::from)
+    })
+    .await
 }
 
 #[cfg(test)]

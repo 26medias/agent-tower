@@ -18,7 +18,8 @@
 //! The caller gives all times (Unix milliseconds). The store has no clock.
 
 use crate::model::{
-    Brand, CliKind, Employee, Floor, FloorDefaults, PermissionPolicy, SessionRecord,
+    Brand, CliKind, Employee, Floor, FloorDefaults, FloorPermissions, PermissionPolicy,
+    SessionRecord, check_allow_rule,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -153,6 +154,12 @@ struct FloorFile {
     defaults: FloorDefaults,
     #[serde(default, skip_serializing_if = "brand_is_empty")]
     brand: Brand,
+    #[serde(default, skip_serializing_if = "permissions_is_empty")]
+    permissions: FloorPermissions,
+}
+
+fn permissions_is_empty(permissions: &FloorPermissions) -> bool {
+    *permissions == FloorPermissions::default()
 }
 
 fn brand_is_empty(brand: &Brand) -> bool {
@@ -174,6 +181,7 @@ fn read_floor_file(path: &Path) -> Result<Floor, StoreError> {
         name: file.name,
         defaults: file.defaults,
         brand: file.brand,
+        permissions: file.permissions,
     })
 }
 
@@ -183,6 +191,7 @@ fn write_floor_file(path: &Path, floor: &Floor) -> Result<(), StoreError> {
         name: floor.name.clone(),
         defaults: floor.defaults.clone(),
         brand: floor.brand.clone(),
+        permissions: floor.permissions.clone(),
     };
     let text = toml::to_string(&file).map_err(|e| invalid(path, e))?;
     write_atomic(path, text.as_bytes())
@@ -347,6 +356,19 @@ const MIGRATIONS: &[&str] = &[
         text    TEXT
     );
     CREATE INDEX task_events_by_task ON task_events (task_id, id);",
+    // 3 -> 4: worktrees and restore (M3). A task keeps its branch, the branch it started from, the
+    // commit it started from, and the worktree folder (relative to the floor folder; NULL when
+    // there is none now). A message can carry the orders that the app wrote for it. The table
+    // `resume_marks` holds the employees that had a live session when the app closed.
+    "ALTER TABLE tasks ADD COLUMN branch TEXT;
+    ALTER TABLE tasks ADD COLUMN base_branch TEXT;
+    ALTER TABLE tasks ADD COLUMN base_commit TEXT;
+    ALTER TABLE tasks ADD COLUMN worktree TEXT;
+    ALTER TABLE messages ADD COLUMN orders TEXT;
+    CREATE TABLE resume_marks (
+        slug      TEXT PRIMARY KEY,
+        marked_at INTEGER NOT NULL
+    );",
 ];
 
 /// Schema version that this build writes and reads.
@@ -541,6 +563,9 @@ pub struct MessageRecord {
     pub task_id: Option<i64>,
     /// `message`, `task_assign` or `task_status` (the constants `KIND_*`).
     pub kind: String,
+    /// The orders that the app wrote for this task message (worktree rules, merge steps). `None`:
+    /// the default orders of `bus::format_task_message`.
+    pub orders: Option<String>,
 }
 
 /// An ordinary message from one employee to another.
@@ -560,11 +585,12 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> 
         delivered_at: row.get(5)?,
         task_id: row.get(6)?,
         kind: row.get(7)?,
+        orders: row.get(8)?,
     })
 }
 
 const MESSAGE_COLUMNS: &str =
-    "id, from_slug, to_slug, text, created_at, delivered_at, task_id, kind";
+    "id, from_slug, to_slug, text, created_at, delivered_at, task_id, kind, orders";
 
 impl Database {
     /// Store a message. `delivered_at` is `Some` for a message that goes out at once (the first
@@ -735,6 +761,36 @@ pub struct TaskRecord {
     pub report: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The branch of the task, `task/T-12-add-login`. `None` when the task has no worktree.
+    pub branch: Option<String>,
+    /// The branch that the main checkout had when the worktree was made.
+    pub base_branch: Option<String>,
+    /// The commit that the main checkout had when the worktree was made.
+    pub base_commit: Option<String>,
+    /// The worktree folder, relative to the floor folder (`.swarm/worktrees/T-12`). `None` when
+    /// there is none now (no worktree was made, or it was removed).
+    pub worktree: Option<String>,
+}
+
+/// What the app records when it makes the worktree of a task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRecord {
+    pub branch: String,
+    pub base_branch: String,
+    pub base_commit: String,
+    /// Relative to the floor folder.
+    pub path: String,
+}
+
+/// What `Database::finish_task` does with the git fields of the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitAfter {
+    /// The git fields stay as they are.
+    Keep,
+    /// The worktree folder is gone (a merge). The branch fields stay, as a record.
+    WorktreeGone,
+    /// The worktree and the branch are gone (a discard). All git fields are cleared.
+    AllGone,
 }
 
 /// One row of the `task_events` table.
@@ -760,6 +816,8 @@ pub struct NewTaskMessage {
     pub to_slug: String,
     pub text: String,
     pub kind: &'static str,
+    /// The orders that the app writes after the body. `None`: the default orders.
+    pub orders: Option<String>,
 }
 
 /// What `Database::update_task` changes.
@@ -780,7 +838,7 @@ pub struct TaskOutcome {
     pub message_id: Option<i64>,
 }
 
-const TASK_COLUMNS: &str = "id, title, description, parent_id, creator, assignee, assigner, status, report, created_at, updated_at";
+const TASK_COLUMNS: &str = "id, title, description, parent_id, creator, assignee, assigner, status, report, created_at, updated_at, branch, base_branch, base_commit, worktree";
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     let status: String = row.get(7)?;
@@ -797,6 +855,10 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         report: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        branch: row.get(11)?,
+        base_branch: row.get(12)?,
+        base_commit: row.get(13)?,
+        worktree: row.get(14)?,
     })
 }
 
@@ -846,15 +908,16 @@ fn message_in(
     at: i64,
 ) -> Result<i64, StoreError> {
     tx.execute(
-        "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at, task_id, kind)
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+        "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at, task_id, kind, orders)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
         params![
             message.from_slug,
             message.to_slug,
             message.text,
             at,
             task_id,
-            message.kind
+            message.kind,
+            message.orders
         ],
     )?;
     Ok(tx.last_insert_rowid())
@@ -932,6 +995,7 @@ impl Database {
         assignee: &str,
         author: &str,
         now: i64,
+        worktree: Option<&WorktreeRecord>,
         message: impl FnOnce(&TaskRecord) -> NewTaskMessage,
     ) -> Result<(TaskRecord, i64), StoreError> {
         let tx = self.write_transaction()?;
@@ -941,6 +1005,33 @@ impl Database {
             params![id, assignee, author, now],
         )?;
         event_in(&tx, id, now, author, "assigned", Some(assignee), None)?;
+        if let Some(worktree) = worktree {
+            tx.execute(
+                "UPDATE tasks SET branch = ?2, base_branch = ?3, base_commit = ?4, worktree = ?5 WHERE id = ?1",
+                params![
+                    id,
+                    worktree.branch,
+                    worktree.base_branch,
+                    worktree.base_commit,
+                    worktree.path
+                ],
+            )?;
+            let note = format!(
+                "Branch {} from {} at {}.",
+                worktree.branch,
+                worktree.base_branch,
+                &worktree.base_commit[..worktree.base_commit.len().min(12)]
+            );
+            event_in(
+                &tx,
+                id,
+                now,
+                author,
+                "worktree",
+                Some(&worktree.branch),
+                Some(&note),
+            )?;
+        }
         let after = task_in(&tx, id)?;
         let message_id = message_in(&tx, &message(&after), id, now)?;
         tx.commit()?;
@@ -1018,6 +1109,107 @@ impl Database {
         tx.commit()?;
         Ok(task)
     }
+
+    /// Set the status after a git action of the app (a merge, a discard), and change the git
+    /// fields as `git` says. The event is of the kind `status` when the status changes, else of
+    /// the kind `comment`. It stores no message: `insert_task_message` does that. Returns the task
+    /// before and after.
+    pub fn finish_task(
+        &self,
+        id: i64,
+        author: &str,
+        status: TaskStatus,
+        note: &str,
+        git: GitAfter,
+        now: i64,
+    ) -> Result<(TaskRecord, TaskRecord), StoreError> {
+        let tx = self.write_transaction()?;
+        let before = task_in(&tx, id)?;
+        tx.execute(
+            "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, status.as_str(), now],
+        )?;
+        match git {
+            GitAfter::Keep => {}
+            GitAfter::WorktreeGone => {
+                tx.execute(
+                    "UPDATE tasks SET worktree = NULL WHERE id = ?1",
+                    params![id],
+                )?;
+            }
+            GitAfter::AllGone => {
+                tx.execute(
+                    "UPDATE tasks SET branch = NULL, base_branch = NULL, base_commit = NULL, worktree = NULL WHERE id = ?1",
+                    params![id],
+                )?;
+            }
+        }
+        if status != before.status {
+            event_in(
+                &tx,
+                id,
+                now,
+                author,
+                "status",
+                Some(status.as_str()),
+                Some(note),
+            )?;
+        } else {
+            event_in(&tx, id, now, author, "comment", None, Some(note))?;
+        }
+        let after = task_in(&tx, id)?;
+        tx.commit()?;
+        Ok((before, after))
+    }
+
+    /// Store one message for a task (outside of `update_task`). Returns its ID.
+    pub fn insert_task_message(
+        &self,
+        task_id: i64,
+        message: &NewTaskMessage,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let tx = self.write_transaction()?;
+        let id = message_in(&tx, message, task_id, now)?;
+        tx.commit()?;
+        Ok(id)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The restore list
+// ---------------------------------------------------------------------------------------------
+
+impl Database {
+    /// Replace the list of employees that had a live session at the last close.
+    pub fn replace_resume_marks(&self, slugs: &[String], at: i64) -> Result<(), StoreError> {
+        let tx = self.write_transaction()?;
+        tx.execute("DELETE FROM resume_marks", [])?;
+        for slug in slugs {
+            tx.execute(
+                "INSERT OR REPLACE INTO resume_marks (slug, marked_at) VALUES (?1, ?2)",
+                params![slug, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Take one employee out of the list (the operator stopped its session by hand).
+    pub fn clear_resume_mark(&self, slug: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM resume_marks WHERE slug = ?1", params![slug])?;
+        Ok(())
+    }
+
+    /// The slugs in the list, in the order they were stored.
+    pub fn resume_marks(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT slug FROM resume_marks ORDER BY rowid")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 fn require_one(changed: usize, app_session_id: &str) -> Result<(), StoreError> {
@@ -1061,6 +1253,7 @@ impl FloorStore {
             name: name.to_owned(),
             defaults: FloorDefaults::default(),
             brand: Brand::default(),
+            permissions: FloorPermissions::default(),
         };
         write_floor_file(&swarm.join(FLOOR_FILE), &floor)?;
         write_atomic(&swarm.join(".gitignore"), GITIGNORE.as_bytes())?;
@@ -1141,6 +1334,28 @@ impl FloorStore {
         let text = toml::to_string(&table).map_err(|e| invalid(&path, e))?;
         write_atomic(&path, text.as_bytes())?;
         self.floor.defaults = defaults;
+        Ok(())
+    }
+
+    /// Write the `[permissions]` table of `floor.toml`. The rest of the file stays (see
+    /// `set_brand`). Each rule is checked first (`check_allow_rule`), and nothing is written when
+    /// one is bad. A list with no rule removes the table.
+    pub fn set_permissions(&mut self, permissions: FloorPermissions) -> Result<(), StoreError> {
+        for rule in &permissions.allow {
+            check_allow_rule(rule).map_err(StoreError::Rule)?;
+        }
+        let path = self.swarm_dir().join(FLOOR_FILE);
+        let text = read_text(&path)?;
+        let mut table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;
+        if permissions_is_empty(&permissions) {
+            table.remove("permissions");
+        } else {
+            let value = toml::Value::try_from(&permissions).map_err(|e| invalid(&path, e))?;
+            table.insert("permissions".to_owned(), value);
+        }
+        let text = toml::to_string(&table).map_err(|e| invalid(&path, e))?;
+        write_atomic(&path, text.as_bytes())?;
+        self.floor.permissions = permissions;
         Ok(())
     }
 
@@ -1407,6 +1622,7 @@ mod tests {
                 permission: Some(PermissionPolicy::EditInWorktree),
             },
             brand: Brand::default(),
+            permissions: FloorPermissions::default(),
         };
         let path = dir.path().join(".swarm/floor.toml");
         write_floor_file(&path, &floor).unwrap();
@@ -1801,8 +2017,8 @@ mod tests {
         let tables: Vec<_> = schema.iter().filter(|s| s.starts_with("table:")).collect();
         assert_eq!(
             tables.len(),
-            6,
-            "sessions, status_events, messages, tasks, task_events, sqlite_sequence: {tables:?}"
+            7,
+            "sessions, status_events, messages, tasks, task_events, resume_marks, sqlite_sequence: {tables:?}"
         );
         drop(first);
 
@@ -1841,8 +2057,8 @@ mod tests {
         let path = dir.path().join("floor.db");
         version_2_database(&path);
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
-        assert_eq!(SCHEMA_VERSION, 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(SCHEMA_VERSION, 4);
         let old = db.all_messages().unwrap();
         assert_eq!(old.len(), 2);
         assert_eq!(
@@ -1860,8 +2076,172 @@ mod tests {
         // A second open changes nothing.
         drop(db);
         let again = Database::open(&path).unwrap();
-        assert_eq!(again.schema_version().unwrap(), 3);
+        assert_eq!(again.schema_version().unwrap(), 4);
         assert_eq!(again.list_tasks(None, None).unwrap().len(), 1);
+    }
+
+    /// A database at version 3 (as the build of M2 slice 2 wrote it) with a task, an event and
+    /// two messages in it.
+    fn version_3_database(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        for step in &MIGRATIONS[..3] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 3").unwrap();
+        conn.execute(
+            "INSERT INTO tasks (title, description, creator, assignee, assigner, status, report, created_at, updated_at)
+             VALUES ('Old task', 'Text', 'pm', 'eng', 'pm', 'in_progress', '.swarm/reports/T-1.md', 5, 6)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_events (task_id, at, author, kind, value, text) VALUES (1, 5, 'pm', 'created', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at, task_id, kind)
+             VALUES ('pm', 'eng', 'Title: Old task', 7, NULL, 1, 'task_assign')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_version_3_database_migrates_to_version_4_and_keeps_its_tasks_and_messages() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("floor.db");
+        version_3_database(&path);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 4);
+        // The old task has no git fields. Nothing else changed.
+        let old = db.get_task(1).unwrap().unwrap();
+        assert_eq!(
+            (old.title.as_str(), old.status),
+            ("Old task", TaskStatus::InProgress)
+        );
+        assert_eq!(old.report.as_deref(), Some(".swarm/reports/T-1.md"));
+        assert_eq!(
+            (old.branch, old.base_branch, old.base_commit, old.worktree),
+            (None, None, None, None)
+        );
+        let messages = db.all_messages().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            (
+                messages[0].kind.as_str(),
+                messages[0].task_id,
+                messages[0].orders.clone()
+            ),
+            (KIND_TASK_ASSIGN, Some(1), None)
+        );
+        assert_eq!(db.task_events(1).unwrap().len(), 1);
+        // The new table works, and an old task can get a worktree.
+        assert_eq!(db.resume_marks().unwrap(), Vec::<String>::new());
+        db.replace_resume_marks(&["ceo".to_owned(), "pm".to_owned()], 9)
+            .unwrap();
+        assert_eq!(db.resume_marks().unwrap(), ["ceo", "pm"]);
+        let worktree = WorktreeRecord {
+            branch: "task/T-1-old-task".into(),
+            base_branch: "main".into(),
+            base_commit: "a".repeat(40),
+            path: ".swarm/worktrees/T-1".into(),
+        };
+        let (task, _) = db
+            .assign_task(1, "eng", "pm", 10, Some(&worktree), |after| {
+                NewTaskMessage {
+                    from_slug: "pm".into(),
+                    to_slug: "eng".into(),
+                    text: after.title.clone(),
+                    kind: KIND_TASK_ASSIGN,
+                    orders: Some("orders".into()),
+                }
+            })
+            .unwrap();
+        assert_eq!(task.branch.as_deref(), Some("task/T-1-old-task"));
+        assert_eq!(task.worktree.as_deref(), Some(".swarm/worktrees/T-1"));
+        assert_eq!(
+            db.all_messages().unwrap()[1].orders.as_deref(),
+            Some("orders")
+        );
+        // A second open changes nothing, also for the version 3 file that was migrated.
+        drop(db);
+        let again = Database::open(&path).unwrap();
+        assert_eq!(again.schema_version().unwrap(), 4);
+        assert_eq!(
+            again.get_task(1).unwrap().unwrap().branch.as_deref(),
+            Some("task/T-1-old-task")
+        );
+    }
+
+    #[test]
+    fn finish_task_sets_the_status_and_the_git_fields_and_writes_one_event() {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("floor.db")).unwrap();
+        db.create_task("Work", "", None, "pm", 1).unwrap();
+        let worktree = WorktreeRecord {
+            branch: "task/T-1-work".into(),
+            base_branch: "main".into(),
+            base_commit: "b".repeat(40),
+            path: ".swarm/worktrees/T-1".into(),
+        };
+        db.assign_task(1, "eng", "pm", 2, Some(&worktree), |after| NewTaskMessage {
+            from_slug: "pm".into(),
+            to_slug: "eng".into(),
+            text: after.title.clone(),
+            kind: KIND_TASK_ASSIGN,
+            orders: None,
+        })
+        .unwrap();
+        // A merge: the worktree is gone, the branch stays as a record.
+        let (before, after) = db
+            .finish_task(
+                1,
+                "pm",
+                TaskStatus::Done,
+                "merged",
+                GitAfter::WorktreeGone,
+                3,
+            )
+            .unwrap();
+        assert_eq!(before.worktree.as_deref(), Some(".swarm/worktrees/T-1"));
+        assert_eq!(
+            (after.status, after.worktree.clone()),
+            (TaskStatus::Done, None)
+        );
+        assert_eq!(after.branch.as_deref(), Some("task/T-1-work"));
+        // The same status with a note is a comment. A discard clears all git fields.
+        let (_, again) = db
+            .finish_task(
+                1,
+                "operator",
+                TaskStatus::Done,
+                "note",
+                GitAfter::AllGone,
+                4,
+            )
+            .unwrap();
+        assert_eq!(
+            (again.branch, again.base_branch, again.base_commit),
+            (None, None, None)
+        );
+        let kinds: Vec<(String, Option<String>)> = db
+            .task_events(1)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.kind, e.value))
+            .collect();
+        assert_eq!(
+            kinds[kinds.len() - 2..],
+            [
+                ("status".to_owned(), Some("done".to_owned())),
+                ("comment".to_owned(), None)
+            ]
+        );
+        assert!(matches!(
+            db.finish_task(9, "pm", TaskStatus::Done, "x", GitAfter::Keep, 5),
+            Err(StoreError::UnknownTask(9))
+        ));
     }
 
     #[test]
@@ -1878,11 +2258,12 @@ mod tests {
             Err(StoreError::UnknownTask(99))
         ));
         let (assigned, message) = db
-            .assign_task(1, "eng", "ceo", 4, |after| NewTaskMessage {
+            .assign_task(1, "eng", "ceo", 4, None, |after| NewTaskMessage {
                 from_slug: "ceo".into(),
                 to_slug: "eng".into(),
                 text: after.title.clone(),
                 kind: KIND_TASK_ASSIGN,
+                orders: None,
             })
             .unwrap();
         assert_eq!(assigned.assignee.as_deref(), Some("eng"));

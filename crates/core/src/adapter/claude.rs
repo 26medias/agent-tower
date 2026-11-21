@@ -4,20 +4,30 @@
 //! text of the hook program, the same for all sessions and events. The event name is inside the
 //! payload as `hook_event_name`.
 //!
-//! The permission mapping is deliberately simple for M1 (spec item N12 is open):
+//! # The permission mapping (item N12, closed in M3 on 2026-11-21)
 //!
-//! | Policy | `--permission-mode` |
-//! |---|---|
-//! | `read-only` | `manual` |
-//! | `ask-always` | `manual` |
-//! | `edit-in-worktree` | `acceptEdits` |
+//! | Policy | `--permission-mode` | Extra allow rules (the settings JSON) |
+//! |---|---|---|
+//! | `read-only` | `manual` | edits under `.swarm/reports/` |
+//! | `ask-always` | `manual` | none |
+//! | `edit-in-worktree`, floor is a git repository | `manual` | edits under `.swarm/worktrees/` and `.swarm/reports/` |
+//! | `edit-in-worktree`, no repository | `acceptEdits` (as in M1) | none |
+//!
+//! Each employee also gets the rule `mcp__tower` and the rules of `[permissions] allow` of the
+//! floor (not for `ask-always`). The deny rules for the files that the app reads stay for all.
+//!
+//! PROBED with `claude -p --model haiku` (Claude 2.1.330, evidence in
+//! `/tmp/agent-tower-review/m3/probe/`): in `manual` mode, the rule `Edit(//abs/.swarm/worktrees/**)`
+//! and the rule `Edit(./.swarm/worktrees/**)` each let the tools Write and Edit change a file
+//! under that folder with no question. A file in the main checkout is not allowed (it asks). With
+//! no allow rule, every edit is refused. A rule for `.swarm/worktrees/**` does not open
+//! `.swarm/employees/` of the main floor. The deny rule for `.swarm/employees/**` still holds.
 //!
 //! `plan` is not used for `read-only`. In `plan` mode the agent writes a plan and then asks the
-//! operator to leave the mode, so each CEO or Project Manager turn would end in a prompt. Also,
-//! whether `plan` mode allows the MCP tools of the app is NOT TRACED. So `read-only` is only
-//! as strong as the operator who answers each prompt in `manual` mode. `acceptEdits` accepts
-//! file edits in any folder that the session can reach, not only in its worktree; other
-//! actions still prompt.
+//! operator to leave the mode, so each CEO or Project Manager turn would end in a prompt. So
+//! `read-only` is only as strong as the operator who answers each prompt in `manual` mode.
+//! `acceptEdits` accepts file edits in any folder that the session can reach, not only in a
+//! worktree; other actions still prompt.
 
 use super::{
     AdapterError, CliAdapter, MCP_SERVER_NAME, MCP_TOKEN_ENV, McpAccess, Result, SpawnPlan,
@@ -43,10 +53,12 @@ const HOOK_EVENTS: [(&str, bool); 8] = [
 
 pub struct ClaudeAdapter;
 
-/// The `--permission-mode` value of a policy. See the module text for the limits.
-pub fn permission_mode(policy: PermissionPolicy) -> &'static str {
+/// The `--permission-mode` value of a policy. `worktrees` is true when the floor is a git
+/// repository (`StartContext::worktrees`). See the module text for the limits.
+pub fn permission_mode(policy: PermissionPolicy, worktrees: bool) -> &'static str {
     match policy {
         PermissionPolicy::ReadOnly | PermissionPolicy::AskAlways => "manual",
+        PermissionPolicy::EditInWorktree if worktrees => "manual",
         PermissionPolicy::EditInWorktree => "acceptEdits",
     }
 }
@@ -96,11 +108,46 @@ fn deny_rules(cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The JSON text for `--settings`: the hooks, and, with an MCP server, the permission to use the
-/// tools of that one server with no prompt (`mcp__tower` is the rule for a whole server) and the
-/// deny rules for the files under `.swarm/` (`deny_rules`). No other tool is allowed. Key order
-/// is fixed, so snapshots are exact.
-fn settings_json(hook_command: &str, with_mcp: bool, cwd: &Path) -> String {
+/// The allow rules for the edits that a policy may do with no question. `folder` is a folder
+/// under `.swarm/` (`worktrees` or `reports`). Each folder has two rules, like the deny rules.
+fn edit_allow_rules(cwd: &Path, folder: &str) -> Vec<String> {
+    let cwd = cwd.to_string_lossy();
+    let root = cwd.trim_start_matches('/').trim_end_matches('/');
+    vec![
+        format!("Edit(//{root}/.swarm/{folder}/**)"),
+        format!("Edit(./.swarm/{folder}/**)"),
+    ]
+}
+
+/// The allow list of a session with the MCP server: the server of the app, the edits of the
+/// policy, and the rules of the floor (see the module text).
+fn allow_rules(ctx: &StartContext) -> Vec<String> {
+    let mut allow = vec![format!("mcp__{MCP_SERVER_NAME}")];
+    match ctx.employee.permission {
+        PermissionPolicy::ReadOnly => allow.extend(edit_allow_rules(&ctx.cwd, "reports")),
+        PermissionPolicy::EditInWorktree if ctx.worktrees => {
+            allow.extend(edit_allow_rules(&ctx.cwd, "worktrees"));
+            allow.extend(edit_allow_rules(&ctx.cwd, "reports"));
+        }
+        PermissionPolicy::EditInWorktree | PermissionPolicy::AskAlways => {}
+    }
+    if ctx.employee.permission != PermissionPolicy::AskAlways {
+        for rule in &ctx.floor_allow {
+            if !allow.contains(rule) {
+                allow.push(rule.clone());
+            }
+        }
+    }
+    allow
+}
+
+/// The JSON text for `--settings`: the hooks, and, with an MCP server, the allow rules
+/// (`allow_rules`: the tools of the server `mcp__tower` with no prompt, the edits of the policy,
+/// the rules of the floor) and the deny rules for the files under `.swarm/` (`deny_rules`). Key
+/// order is fixed, so snapshots are exact.
+fn settings_json(hook_command: &str, ctx: &StartContext) -> String {
+    let with_mcp = ctx.mcp.is_some();
+    let cwd = ctx.cwd.as_path();
     let command = serde_json::Value::String(hook_command.to_owned()).to_string();
     let entries: Vec<String> = HOOK_EVENTS
         .iter()
@@ -112,8 +159,9 @@ fn settings_json(hook_command: &str, with_mcp: bool, cwd: &Path) -> String {
         })
         .collect();
     let permissions = if with_mcp {
+        let allow = serde_json::Value::from(allow_rules(ctx)).to_string();
         let deny = serde_json::Value::from(deny_rules(cwd)).to_string();
-        format!(r#","permissions":{{"allow":["mcp__{MCP_SERVER_NAME}"],"deny":{deny}}}"#)
+        format!(r#","permissions":{{"allow":{allow},"deny":{deny}}}"#)
     } else {
         String::new()
     };
@@ -160,9 +208,9 @@ fn build_args(ctx: &StartContext, session_args: &[&str]) -> Result<Vec<OsString>
         args.push(mcp_config_json(mcp).into());
     }
     args.push("--settings".into());
-    args.push(settings_json(&hook_command, ctx.mcp.is_some(), &ctx.cwd).into());
+    args.push(settings_json(&hook_command, ctx).into());
     args.push("--permission-mode".into());
-    args.push(permission_mode(ctx.employee.permission).into());
+    args.push(permission_mode(ctx.employee.permission, ctx.worktrees).into());
     if let Some(model) = non_empty(&ctx.employee.model) {
         check_no_nul("the model", model)?;
         args.push("--model".into());

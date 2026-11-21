@@ -530,14 +530,24 @@ fn a_message_that_starts_with_a_dash_follows_a_double_dash() {
 
 #[test]
 fn claude_permission_mapping() {
-    assert_eq!(claude_permission_mode(PermissionPolicy::ReadOnly), "manual");
+    // N12 (closed in M3): the mode of each policy, with and without a git repository.
+    for worktrees in [false, true] {
+        assert_eq!(
+            claude_permission_mode(PermissionPolicy::ReadOnly, worktrees),
+            "manual"
+        );
+        assert_eq!(
+            claude_permission_mode(PermissionPolicy::AskAlways, worktrees),
+            "manual"
+        );
+    }
     assert_eq!(
-        claude_permission_mode(PermissionPolicy::AskAlways),
-        "manual"
+        claude_permission_mode(PermissionPolicy::EditInWorktree, false),
+        "acceptEdits"
     );
     assert_eq!(
-        claude_permission_mode(PermissionPolicy::EditInWorktree),
-        "acceptEdits"
+        claude_permission_mode(PermissionPolicy::EditInWorktree, true),
+        "manual"
     );
     // The flag is always explicit, for each policy.
     for policy in [
@@ -545,16 +555,16 @@ fn claude_permission_mapping() {
         PermissionPolicy::EditInWorktree,
         PermissionPolicy::AskAlways,
     ] {
-        let args = text(
-            &ClaudeAdapter
-                .start_with_id(&claude_ctx(policy), UUID_A)
-                .expect("plan"),
-        );
-        let at = args
-            .iter()
-            .position(|arg| arg == "--permission-mode")
-            .expect("flag");
-        assert_eq!(args[at + 1], claude_permission_mode(policy));
+        for worktrees in [false, true] {
+            let mut ctx = claude_ctx(policy);
+            ctx.worktrees = worktrees;
+            let args = text(&ClaudeAdapter.start_with_id(&ctx, UUID_A).expect("plan"));
+            let at = args
+                .iter()
+                .position(|arg| arg == "--permission-mode")
+                .expect("flag");
+            assert_eq!(args[at + 1], claude_permission_mode(policy, worktrees));
+        }
     }
 }
 
@@ -754,8 +764,15 @@ fn claude_with_the_app_server_has_the_config_the_allow_rule_and_no_token_in_the_
         ]
     })
     .collect();
+    // `read-only` may write the report files with no question (N12, M3).
+    let allow = [
+        "mcp__tower",
+        "Edit(//work/floor/wt1/.swarm/reports/**)",
+        "Edit(./.swarm/reports/**)",
+    ];
     allowed_settings.push_str(&format!(
-        r#","permissions":{{"allow":["mcp__tower"],"deny":{}}}}}"#,
+        r#","permissions":{{"allow":{},"deny":{}}}}}"#,
+        serde_json::to_string(&allow).unwrap(),
         serde_json::to_string(&deny).unwrap()
     ));
     let config = format!(
@@ -786,10 +803,7 @@ fn claude_with_the_app_server_has_the_config_the_allow_rule_and_no_token_in_the_
     assert!(args[at + 2].starts_with("--"), "{args:?}");
     // The two JSON texts are valid, and the allow rule names only the server of the app.
     let settings: Value = serde_json::from_str(&allowed_settings).unwrap();
-    assert_eq!(
-        settings["permissions"]["allow"],
-        serde_json::json!(["mcp__tower"])
-    );
+    assert_eq!(settings["permissions"]["allow"], serde_json::json!(allow));
     // R6: the file tools cannot change what the app reads under `.swarm/` of the floor. The
     // folders for reports and worktrees stay open for the employees.
     let deny: Vec<&str> = settings["permissions"]["deny"]
@@ -871,4 +885,124 @@ fn the_debug_text_of_the_access_hides_the_token() {
     let shown = format!("{:?}", ctx.mcp);
     assert!(!shown.contains(MCP_TOKEN), "{shown}");
     assert!(!format!("{ctx:?}").contains(MCP_TOKEN));
+}
+
+// ---- N12: the permission rules of each policy (closed in M3) ----
+
+/// The `permissions` object of the settings JSON of a Claude plan, and the `--permission-mode`.
+fn permissions_of(ctx: &StartContext) -> (Value, String) {
+    let args = text(&ClaudeAdapter.start_with_id(ctx, UUID_A).expect("plan"));
+    let at = args.iter().position(|a| a == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
+    let mode = args[args.iter().position(|a| a == "--permission-mode").unwrap() + 1].clone();
+    (settings["permissions"].clone(), mode)
+}
+
+fn strings_of(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_allow_rules_and_the_mode_of_each_policy_are_exact() {
+    const REPORTS: [&str; 2] = [
+        "Edit(//work/floor/wt1/.swarm/reports/**)",
+        "Edit(./.swarm/reports/**)",
+    ];
+    const WORKTREES: [&str; 2] = [
+        "Edit(//work/floor/wt1/.swarm/worktrees/**)",
+        "Edit(./.swarm/worktrees/**)",
+    ];
+    let floor_rules = vec!["Bash(cargo test:*)".to_owned(), "Read".to_owned()];
+    let make = |policy, worktrees, rules: &[String]| {
+        let mut ctx = with_mcp(claude_ctx(policy));
+        ctx.worktrees = worktrees;
+        ctx.floor_allow = rules.to_vec();
+        ctx
+    };
+    let mcp = "mcp__tower".to_owned();
+    let with = |base: &[&str], rules: &[String]| -> Vec<String> {
+        let mut all = vec![mcp.clone()];
+        all.extend(base.iter().map(|r| (*r).to_owned()));
+        all.extend(rules.iter().cloned());
+        all
+    };
+
+    // read-only: a report file needs no question. Nothing else.
+    for worktrees in [false, true] {
+        let (permissions, mode) = permissions_of(&make(PermissionPolicy::ReadOnly, worktrees, &[]));
+        assert_eq!(mode, "manual");
+        assert_eq!(strings_of(&permissions["allow"]), with(&REPORTS, &[]));
+    }
+    let (permissions, _) = permissions_of(&make(PermissionPolicy::ReadOnly, false, &floor_rules));
+    assert_eq!(
+        strings_of(&permissions["allow"]),
+        with(&REPORTS, &floor_rules)
+    );
+
+    // edit-in-worktree in a git repository: `manual`, the worktrees and the reports are open.
+    let (permissions, mode) =
+        permissions_of(&make(PermissionPolicy::EditInWorktree, true, &floor_rules));
+    assert_eq!(mode, "manual");
+    let mut folders = WORKTREES.to_vec();
+    folders.extend(REPORTS);
+    assert_eq!(
+        strings_of(&permissions["allow"]),
+        with(&folders, &floor_rules)
+    );
+    // ... and with no repository: `acceptEdits`, as in M1, and no edit rule.
+    let (permissions, mode) =
+        permissions_of(&make(PermissionPolicy::EditInWorktree, false, &floor_rules));
+    assert_eq!(mode, "acceptEdits");
+    assert_eq!(strings_of(&permissions["allow"]), with(&[], &floor_rules));
+
+    // ask-always: no rule except the server, also when the floor lists rules.
+    for worktrees in [false, true] {
+        let (permissions, mode) =
+            permissions_of(&make(PermissionPolicy::AskAlways, worktrees, &floor_rules));
+        assert_eq!(mode, "manual");
+        assert_eq!(
+            strings_of(&permissions["allow"]),
+            std::slice::from_ref(&mcp)
+        );
+    }
+
+    // The deny rules are the same for each policy, and no allow rule reaches them.
+    let denies: Vec<Vec<String>> = [
+        (PermissionPolicy::ReadOnly, false),
+        (PermissionPolicy::EditInWorktree, true),
+        (PermissionPolicy::EditInWorktree, false),
+        (PermissionPolicy::AskAlways, true),
+    ]
+    .iter()
+    .map(|(policy, worktrees)| {
+        strings_of(&permissions_of(&make(*policy, *worktrees, &floor_rules)).0["deny"])
+    })
+    .collect();
+    assert!(denies.iter().all(|d| *d == denies[0]));
+    assert_eq!(denies[0].len(), 10);
+    assert!(denies[0].contains(&"Edit(//work/floor/wt1/.swarm/employees/**)".to_owned()));
+    // A rule is never in the list twice.
+    let twice = vec!["Edit(./.swarm/reports/**)".to_owned()];
+    let (permissions, _) = permissions_of(&make(PermissionPolicy::ReadOnly, false, &twice));
+    let all = strings_of(&permissions["allow"]);
+    assert_eq!(
+        all.iter()
+            .filter(|r| *r == "Edit(./.swarm/reports/**)")
+            .count(),
+        1
+    );
+    // The Codex adapter does not know the rules, and has no `permissions` text.
+    let mut codex = with_mcp(codex_ctx(PermissionPolicy::EditInWorktree));
+    codex.floor_allow = floor_rules.clone();
+    codex.worktrees = true;
+    let args = text(&CodexAdapter.start(&codex).expect("plan"));
+    assert!(
+        args.iter().all(|a| !a.contains("Bash(cargo test")),
+        "{args:?}"
+    );
 }

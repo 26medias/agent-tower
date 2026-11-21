@@ -203,7 +203,8 @@ Tool group "tasks" (a light Jira):
 | `task_create(title, description, parent?)` | Create a task on the floor board |
 | `task_assign(task, employee)` | Assign. Only to employees below the caller in the hierarchy |
 | `task_update(task, status, note?, report?)` | Status: `todo`, `in_progress`, `blocked`, `review`, `done`. `report` is the path of the report file (see 4.10) |
-| `task_merge(task)` | Project Manager only. The app merges the task branch into the main branch (see 4.8) |
+| `task_merge(task)` | `pm`, `ceo` (and the operator in the UI). The app merges the task branch into the main branch (see 4.8). Changed in M3 (2026-11-21): the `ceo` may merge too |
+| `task_diff(task)` | Any employee of the floor. The diffstat and the patch of the task branch, cut at 60000 bytes (added in M3, 2026-11-21) |
 | `task_get(task)` / `task_list(filter)` | Read the board |
 | `task_comment(task, text)` | Add a note or a result summary |
 
@@ -234,7 +235,7 @@ Repairs after the M2a review:
 - `inbox` marks messages delivered after it wrote the answer. The HTTP endpoint checks the token before it reads the body, gives each request one deadline of 30 s, and allows 256 open connections (HTTP 503 over that).
 - The start rule ignores the manager chain of an employee that is its own ancestor. Employees can start 12 sessions for each floor in a rolling 10 minutes. The Claude settings of an employee deny the file tools for `floor.toml`, `employees/`, `assets/` and `state/` under `.swarm/`. Codex has no enforced deny (its sandbox is off on this machine).
 
-Not built yet: `employee_stop`, the task tools, the Stop-hook delivery path, and the loop limit per task (M2a counts 30 messages for each pair in a rolling hour).
+Not built yet: `employee_stop`, the Stop-hook delivery path, and the loop limit per task (M2a counts 30 messages for each pair in a rolling hour).
 
 Who can talk to whom: each employee of a floor can message each other employee of that floor.
 The operator can message all. Messages between floors are never possible (isolation rule, 4.0).
@@ -294,16 +295,35 @@ Each role has a policy. The adapter maps the policy to the settings of the CLI a
 
 | Policy | Meaning | Default for |
 |---|---|---|
-| `read_only` | Can read and use the MCP tools. No file edits. | CEO, Project Manager |
-| `edit_in_worktree` | Edits and safe commands inside its worktree without a prompt. Other actions prompt. | Engineer, other workers |
+| `read_only` | Can read and use the MCP tools. No file edits, except the report files in `.swarm/reports/`. | CEO, Project Manager |
+| `edit_in_worktree` | Edits inside its task worktree and the report files without a prompt. An edit of a file of the main checkout prompts. Other actions prompt, unless a rule of `[permissions]` allows them. | Engineer, other workers |
 | `ask_always` | Each action prompts. | Operator choice. Claude only |
 
 A prompt sets the status to `question`. The operator answers it in the terminal tab. Version 1 has no approval by a manager agent.
 
-**Claude mapping.** The modes of `--permission-mode` are `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan` (PROBED list).
-The exact mode and tool rules for each policy are NOT TRACED (item N12).
+**Claude mapping (item N12, closed in M3, 2026-11-21).** The modes of `--permission-mode` are `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan` (PROBED list).
+Changed in M3 (2026-11-21): the app uses `manual` for each policy, and `acceptEdits` only for `edit_in_worktree` in a floor that is not a git repository (no worktree exists there, so the old rule stays). The allow rules go in the `--settings` JSON, with the rule `mcp__tower`:
 
-**Codex mapping: decision O7 (see section 9).** The Codex sandbox does not work on this machine (PROBED): `bwrap` fails because Ubuntu
+| Policy | `--permission-mode` | Allow rules besides `mcp__tower` and the rules of `[permissions]` |
+|---|---|---|
+| `read_only` | `manual` | `Edit(//<floor>/.swarm/reports/**)` and `Edit(./.swarm/reports/**)` |
+| `edit_in_worktree`, floor is a git repository | `manual` | the same two rules for `.swarm/worktrees/**` and for `.swarm/reports/**` |
+| `edit_in_worktree`, no git repository | `acceptEdits` | none |
+| `ask_always` | `manual` | none (also not the rules of `[permissions]`) |
+
+The deny rules for `.swarm/floor.toml`, `.gitignore`, `employees/**`, `assets/**` and `state/**` stay for all policies. The setup session has no app server and no rule, and it keeps `acceptEdits`.
+
+PROBED with `claude -p --model haiku` (2.1.330, six calls; evidence in `/tmp/agent-tower-review/m3/probe/`):
+1. `manual` with `Edit(//<floor>/.swarm/worktrees/**)` and `Edit(//<floor>/.swarm/reports/**)`: the tools Write and Edit change a file under those folders with no question (also the new files). A Write in the main checkout, and an Edit of `notes.txt` in the main checkout, are not allowed (they would ask). A Write to `.swarm/employees/c.md` of the main floor is refused by the deny rule.
+2. The same with the relative rules `Edit(./.swarm/worktrees/**)` and `Edit(./.swarm/reports/**)`: the same result. The app writes both forms.
+3. Control, no allow rule: each edit and each write is refused. So the allow rule is what opens the folders.
+4. `read_only` shape (only the `reports` rules): a report file is written, the worktree files and the main checkout files are not.
+5. A rule for `.swarm/worktrees/**` does not open `.swarm/employees/` of the main floor (a different path). It opens `.swarm/worktrees/<task>/.swarm/employees/d.md`: that is a file of the task branch (a copy of the tracked file), and its merge is a decision of the `pm` and of the operator.
+6. `Bash(touch:*)` in `allow`: `touch p5a.txt` runs, `mkdir p5b` is refused. So a rule of `[permissions]` of the form `Bash(command:*)` works. (A first try with `git status` was muddied by the RTK hook of the operator, which rewrites the command to `rtk git status`: a rule must match the command after the hooks.)
+
+**Commands with no question (changed in M3, 2026-11-21).** `floor.toml` has an optional table `[permissions]` with `allow = [...]`: Claude permission rules, for example `Bash(cargo test:*)`. The app adds them to the allow list of each Claude employee of the floor, except an `ask_always` employee. Each rule is checked: 1 to 200 characters, no control character, one of `Bash`, `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch` with a pattern in brackets (or `Read`, `Glob`, `Grep` alone). `Bash` with no pattern, `Bash(*)`, `Bash(:*)` and any `Bash` pattern with only `*` and `:` are refused. The operator sets the table in the settings panel (section "Commands with no question"); the commands are `floor_permissions_get` and `floor_permissions_set`. The setup agent must not write it, and the deny rule for `floor.toml` blocks the employees. A rule applies at the next start of a session.
+
+**Codex mapping: decision O7 (see section 9).** M3 changes nothing here: option B stays, and option A (the AppArmor profile for `bwrap`, one `sudo` step) was NOT tested. Only the instructions limit a Codex employee, and they carry the worktree rules too. The Codex sandbox does not work on this machine (PROBED): `bwrap` fails because Ubuntu
 blocks unprivileged user namespaces (`apparmor_restrict_unprivileged_userns` = 1). With the sandbox on, each shell command fails and then asks for approval.
 Codex has only two approval modes, `on-request` and `never`, so `ask_always` does not exist for Codex.
 
@@ -314,16 +334,19 @@ Codex has only two approval modes, `on-request` and `never`, so `ask_always` doe
 
 ### 4.8 Worktrees (D4)
 
-- When a task is assigned to an employee with an edit policy, the app creates a worktree and a branch
-  `task/<id>-<slug>` from the main branch of the floor. The session runs in that worktree.
-- When the task goes to `review`, the Project Manager can read the diff and the report file.
-- The Project Manager decides the merge. It calls `task_merge(task)`. The app runs the git merge, so
-  the Project Manager keeps its `read_only` policy.
-- If the main checkout has changes to tracked files outside `.swarm/` that are not committed (`git status --untracked-files=no`), the app does not merge. It sets the task to `blocked` and tells the Project Manager and the operator.
-- If the merge has a conflict, the app stops the merge, sets the task to `blocked` and tells the
-  Project Manager. The Project Manager assigns the conflict to an engineer.
-- After a good merge, the app sets the task to `done` and removes the worktree.
-- Read-only employees run in the main checkout.
+Changed in M3 (2026-11-21). The first draft let the session of an employee run in its worktree. A session cannot change its folder, and one employee has one session. So the session stays in the main checkout, and the worktree is inside the floor folder, where the session can reach it.
+
+- When a task is assigned to an employee with the policy `edit_in_worktree`, and the floor folder is the top of a git repository that has a commit, and the main checkout is on a branch, the app creates a worktree and a branch `task/<id>-<slug>` at `task_assign`, before it sends the task message. The folder is `{CWD}/.swarm/worktrees/<task-id>/`. The base is the branch that the main checkout has at that moment. The app stores the branch, the base branch, the base commit and the worktree folder in the task. The slug uses `[a-z0-9-]` only (at most 40 characters). A task that is given again keeps its worktree.
+- The task message tells the employee: the absolute worktree path, the branch, "make all your changes inside this folder, never in the main checkout", "do not commit, the app commits for you", and the absolute path of the report file in the reports folder of the MAIN checkout.
+- A floor that is not a git repository, that has no commit, that is a subfolder of a repository, or that has a detached HEAD gets no worktree. The task works as in M2: the message says that the employee edits the project folder directly, and `task_merge` says that there is nothing to merge and sets `done`. An employee with `read_only` or `ask_always` gets no worktree.
+- When the task goes to `review`, the app commits the worktree (`git add -A`, `git commit`, message `<task-id>: <title>` and a line `By: <Name> (<Role>)`). If the repository has no user, the commit gets the name and an e-mail of the employee; else it keeps the identity of the operator. No change: no commit, and the note of the status event says so. The same snapshot runs before a merge. The Project Manager can read the diff with `task_diff` and the report file.
+- The `pm`, the `ceo` and the operator decide the merge. `task_merge(task)` needs the status `review` or `blocked`. The app runs git, so the Project Manager keeps its `read_only` policy. Steps: (a) commit the worktree; (b) the main checkout must be on the base branch of the task, else the task is `blocked` with the reason; (c) `git status --porcelain --untracked-files=no` must show no change outside `.swarm/`, else `blocked` with the reason; (d) `git merge --no-ff --no-edit`, and on a conflict `git merge --abort`, status `blocked`, and the answer lists the files; (e) on success, status `done`, `git worktree remove`, `git branch -d`. The app never uses `--force`, `reset`, `checkout` in the main checkout, or `push`.
+- The result goes to the caller (the tool answer), to the assignee and the assigner (a task message that waits when the receiver has no live session), and to the UI (`tasks-changed`, and a toast for `blocked`). The Project Manager assigns a conflict to an engineer.
+- `task_diff(task)`: any employee of the floor. It returns `git diff --stat` and the patch of `<base commit>...<branch>`, cut at 60000 bytes with a note. For a task with no worktree it says so.
+- The operator command `task_discard` removes the worktree (`git worktree remove --force`, on the task worktree only) and the branch (`git branch -D`, on the task branch only) of a task that is not `done`, and sets the status `blocked` with the note "discarded by the operator". The UI asks for a confirmation.
+- Each git command of the app runs in an explicit folder, with `-c core.hooksPath=/dev/null` where a hook of the repository could run (a hook of the operator does not run for an app action), with a time limit, and with a fixed list of arguments. No task title becomes an argument that starts with `-`.
+- The worktree has its own copy of each tracked file, `.swarm/employees/` too when the project tracks it. A change of that copy is a change of the task branch. Its merge is the decision of the `pm` and of the operator (see the probe in 4.7).
+- All sessions run in the main checkout, read-only employees too.
 
 ### 4.9 Persistence
 
@@ -356,6 +379,7 @@ Each floor keeps its data in its own folder. The app keeps only the list of floo
   Sessions in a worktree get the absolute path of the main `.swarm/reports/`.
 
 After an app restart, all employees and tasks are there. Sessions show as `stopped` and can be continued.
+Changed in M3 (2026-11-21): before it kills the sessions at the close, the app stores the employees that had a live session (table `resume_marks` of `floor.db`). A manual stop of a session takes its employee out of the list. The office header shows the button "Resume the last team (N)" when the list is not empty. A click resumes each employee in order, managers first, with a pause of 2 s between two starts, in the background; the button shows the progress, and a start that fails shows as a toast and does not stop the others. Nothing resumes at the start of the app, because each start costs tokens. The contract is in `docs/ipc-m3.md`.
 
 Transcript: the app records the PTY output of each session. It also stores the path of the CLI
 transcript file (`~/.claude/projects/...jsonl` VERIFIED location, internal format; `~/.codex/sessions/...` VERIFIED location).
@@ -472,10 +496,10 @@ Placeholder art is used in M1 to M3. The visual work (M4) can move earlier if th
 | N9 | Long blocking `wait` | WORKS up to about 60 s in Claude. `wait` is limited to 50 s (4.4) |
 | N10 | Codex access to the reports folder outside a worktree | NOT TRACED. Depends on O7. Close at the start of M2 |
 | N11 | How `question` ends when the operator denies a prompt, both CLIs. Claude Ctrl-C and the 2 s quiet rule | PROBED at step 0 (4.3). Evidence in `probes/step0/` |
-| N12 | Claude permission mode and tool rules for `read_only` and `edit_in_worktree` | NOT TRACED. Close at the start of M3 |
+| N12 | Claude permission mode and tool rules for `read_only` and `edit_in_worktree` | CLOSED in M3 (2026-11-21), PROBED with six `claude -p --model haiku` calls (4.7) |
 | N13 | First message as the `[PROMPT]` argument when a startup dialog shows. Codex `check_for_update_on_startup=false` | WORKS, PROBED at step 0 (4.2). Not traced: Codex without `--no-daemon`, and the Codex option "Continue without trusting" hooks |
 | N14 | A Codex agent acts on a message that the Stop hook delivers, when the role instructions explain it | NOT TRACED. Close at the start of M2 |
-| N15 | Nested worktrees: parent `CLAUDE.md` loading, test runners that collect `.swarm/worktrees/` | NOT TRACED. Close at the start of M3 |
+| N15 | Nested worktrees: parent `CLAUDE.md` loading, test runners that collect `.swarm/worktrees/` | Changed in M3 (2026-11-21): the session stays in the main checkout, so Claude loads the `CLAUDE.md` of the main checkout as before. A worktree copy of `CLAUDE.md` loading when an employee reads files in the worktree, and test runners that collect `.swarm/worktrees/`: NOT TRACED |
 
 ## 9. Points closed by the operator (2026-11-19)
 
@@ -488,7 +512,7 @@ Placeholder art is used in M1 to M3. The visual work (M4) can move earlier if th
 | O5 | Platforms | Ubuntu first. Windows and macOS are possible later, not a requirement |
 | O6 | Does a manager see the full transcript of a report? | No. The employee writes a report file and refers to it (4.10) |
 
-| O7 | Codex sandbox on this machine (4.7) | Option B for M1 and M2. Option A (AppArmor profile for `bwrap`) is tested before M3; if it works, it becomes the rule |
+| O7 | Codex sandbox on this machine (4.7) | Option B for M1 and M2. Option A (AppArmor profile for `bwrap`) was to be tested before M3; if it worked, it would become the rule. Decision for M3 (2026-11-21): option B stays. Option A was NOT tested (it needs `sudo`) |
 | O8 | Tasks in git | Not now. Tasks stay in `state/floor.db` only. The `task_events` table keeps the full history, so a text log (`.swarm/tasks/events.jsonl`, merged by git, SQLite built from it) can be added later. To keep that possible, task IDs are time-based and random (ULID), not a counter |
 
 ## 10. Risks

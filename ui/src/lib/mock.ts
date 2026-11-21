@@ -1,9 +1,10 @@
 // In-memory mock of the Rust side, for `pnpm dev` in a normal browser and for the e2e check.
-// It follows docs/ipc-m1.md, docs/ipc-visuals-init.md and docs/ipc-m2.md: same command names, same
-// argument names, same error texts.
+// It follows docs/ipc-m1.md, docs/ipc-visuals-init.md, docs/ipc-m2.md and docs/ipc-m3.md: same
+// command names, same argument names, same error texts.
 import { base64ToBytes, bytesToBase64, concatBytes } from "./codec";
 import type { Backend, Unlisten } from "./ipc";
 import { STANDARD_EFFORTS, isValidEffort, isValidModelName } from "./models";
+import { ALLOW_RULES_MAX, checkAllowRule } from "./permissions";
 import type {
     AttachResult,
     Employee,
@@ -16,11 +17,14 @@ import type {
     OutputMessage,
     ProgramName,
     Programs,
+    ResumeProgress,
     SessionView,
     Settings,
     Status,
     TaskDetail,
+    TaskDiff,
     TaskEvent,
+    TaskMerge,
     TaskStatus,
     TaskView,
 } from "./types";
@@ -40,6 +44,13 @@ interface MockFloor {
     logoError: string | null;
     defaults: FloorDefaults;
     tasks: MockTask[];
+    /** `[permissions] allow` of `floor.toml`. */
+    permissions: string[];
+    /** `FloorView.resumable`: the employees of the last team that can resume. */
+    resumable: string[];
+    resumeProgress: ResumeProgress | null;
+    /** When set, `task_merge` is blocked with this reason (a conflict, another branch). */
+    mergeBlock: string | null;
 }
 
 interface MockTask {
@@ -69,6 +80,8 @@ export interface MockConfig {
     startingMs?: number;
     /** How long `session_start`, `session_resume` and `setup_start` take before they return, in ms. Default 0. */
     startCallMs?: number;
+    /** The pause between two starts of `team_resume`, in ms. Default 400 (the real app waits 2 s). */
+    resumePauseMs?: number;
     /** Text that the CLI has already printed when a session is made (it shows in the scrollback of the attach). */
     startingText?: string;
 }
@@ -97,6 +110,14 @@ export interface MockControl {
             | { id: number; assign: string }
             | { id: number; status: TaskStatus; note?: string; report?: string },
     ): number;
+    /** Give a task a git branch and a worktree, as `task_assign` does for an employee that edits files. */
+    taskWorktree(path: string, id: number): void;
+    /** The next `task_merge` calls of this floor are blocked with this reason. `null` removes the block. */
+    blockMerge(path: string, reason: string | null): void;
+    /** The employees of the last team (`FloorView.resumable`). A floor event follows. */
+    setResumable(path: string, slugs: string[]): void;
+    /** The next `team_resume` start of this employee fails (a notice follows). */
+    failResume(slug: string): void;
 }
 
 const config = (): MockConfig => ((globalThis as Record<string, unknown>).__towerMockConfig ?? {}) as MockConfig;
@@ -212,6 +233,8 @@ export function createMockBackend(): Backend {
     let counter = 0;
     // Errors that the mock gives one time, to show what the UI does when a start fails.
     const failOnce = new Set(["start:eng-sam", "resume:pm"]);
+    // Employees whose start in `team_resume` fails one time (`MockControl.failResume`).
+    const failResume = new Set<string>();
 
     const settings: Settings = { openaiKeySet: false, openaiKeySource: null, imageModel: "gpt-image-2.6-sunburst" };
     // The custom models of the app config (`[models]`).
@@ -261,6 +284,10 @@ export function createMockBackend(): Backend {
             logoError: null,
             defaults: noDefaults(),
             tasks: [],
+            permissions: [],
+            resumable: [],
+            resumeProgress: null,
+            mergeBlock: null,
         };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
@@ -297,6 +324,10 @@ export function createMockBackend(): Backend {
                 report: extra.report ?? null,
                 createdAt: at,
                 updatedAt: at + 2000,
+                branch: null,
+                baseBranch: null,
+                baseCommit: null,
+                worktree: null,
             },
             events,
             reportText: extra.reportText ?? null,
@@ -324,6 +355,9 @@ export function createMockBackend(): Backend {
         report: ".swarm/reports/T-3.md",
         reportText: "# T-3 report\n\nThe build passes.\n",
     });
+    // T-2 and T-3 have a branch and a worktree, like a task of an employee that edits files.
+    giveWorktree(tower.tasks[1], tower.tasks[1].view.updatedAt);
+    giveWorktree(tower.tasks[2], tower.tasks[2].view.updatedAt);
     seedTask(tower, 4, "Pick the colours", "Wait for the logo.", "blocked", "ceo", "pm", "ceo");
     seedTask(tower, 5, "Plan the release", "List the steps.", "todo", "operator", null, null);
     // Lin has a stopped session from "an earlier run" that can resume.
@@ -401,6 +435,10 @@ export function createMockBackend(): Backend {
                 report: null,
                 createdAt: now,
                 updatedAt: now,
+                branch: null,
+                baseBranch: null,
+                baseCommit: null,
+                worktree: null,
             },
             events: [],
             reportText: null,
@@ -408,6 +446,31 @@ export function createMockBackend(): Backend {
         floor.tasks.push(t);
         addEvent(t, creator, "created", null, null);
         return t;
+    }
+
+    /** The branch name of the real app: `task/T-12-add-login` (see `branch_slug` in gitwork.rs). */
+    function branchName(t: MockTask): string {
+        const slug = t.view.title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 40)
+            .replace(/-+$/, "");
+        return `task/T-${t.view.id}-${slug === "" ? "task" : slug}`;
+    }
+
+    /** A task gets its branch and worktree when it is given to an employee that edits files. */
+    function giveWorktree(t: MockTask, at?: number): void {
+        t.view.branch = branchName(t);
+        t.view.baseBranch = "main";
+        t.view.baseCommit = "0123456789abcdef0123456789abcdef01234567";
+        t.view.worktree = `.swarm/worktrees/T-${t.view.id}`;
+        const note = `Branch ${t.view.branch} from main at 0123456789ab.`;
+        if (at === undefined) {
+            addEvent(t, t.view.assigner ?? "operator", "worktree", t.view.branch, note);
+        } else {
+            t.events.push({ id: t.events.length + 1, at, author: t.view.assigner ?? "operator", kind: "worktree", value: t.view.branch, text: note });
+        }
     }
 
     function assignTask(t: MockTask, by: string, slug: string): void {
@@ -456,6 +519,8 @@ export function createMockBackend(): Backend {
             logoError: floor.logoError,
             setupSessionId: setup ? setup.sessionId : null,
             defaults: { ...floor.defaults },
+            resumable: floor.resumeProgress ? [] : [...floor.resumable],
+            resumeProgress: floor.resumeProgress ? { ...floor.resumeProgress } : null,
         };
     }
 
@@ -987,6 +1052,116 @@ export function createMockBackend(): Backend {
                 emit("tasks-changed", { path: a.path });
                 return { ...t.view };
             }
+            case "task_merge": {
+                const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
+                const floor = floorOf(a.path);
+                const t = taskOf(floor, a.id);
+                if (t.view.status !== "review" && t.view.status !== "blocked") {
+                    throw `Task T-${a.id} has the status ${t.view.status}. Only a task in review or blocked can be merged.`;
+                }
+                if (t.view.branch === null) {
+                    const note = "There is nothing to merge: the task has no worktree and no branch. The work is in the project folder.";
+                    updateTask(t, "operator", "done", note, null);
+                    emit("tasks-changed", { path: a.path });
+                    return { merged: true, message: `Task T-${a.id}: ${note} The status is done.`, task: { ...t.view } } satisfies TaskMerge;
+                }
+                if (floor.mergeBlock !== null) {
+                    updateTask(t, "operator", "blocked", floor.mergeBlock, null);
+                    emit("tasks-changed", { path: a.path });
+                    emit("notice", { path: a.path, kind: "task_blocked", text: `Task T-${a.id} is blocked: ${floor.mergeBlock}` });
+                    return {
+                        merged: false,
+                        message: `Task T-${a.id} is blocked and not merged. ${floor.mergeBlock} The status is blocked.`,
+                        task: { ...t.view },
+                    } satisfies TaskMerge;
+                }
+                const branch = t.view.branch;
+                const note = `Merged ${branch} into main (commit 89abcdef0123). The worktree is removed. The branch is removed.`;
+                updateTask(t, "operator", "done", note, null);
+                t.view.worktree = null;
+                emit("tasks-changed", { path: a.path });
+                return { merged: true, message: `Task T-${a.id}: ${note} The status is done.`, task: { ...t.view } } satisfies TaskMerge;
+            }
+            case "task_diff": {
+                const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
+                const t = taskOf(floorOf(a.path), a.id);
+                if (t.view.branch === null) {
+                    return {
+                        branch: null,
+                        baseBranch: null,
+                        stat: "",
+                        patch: "",
+                        truncated: false,
+                        note: "This task has no git branch: no worktree was made for it. The employee edits the project folder directly, so there is no diff to show.",
+                    } satisfies TaskDiff;
+                }
+                return {
+                    branch: t.view.branch,
+                    baseBranch: t.view.baseBranch,
+                    stat: " a.txt | 1 +\n 1 file changed, 1 insertion(+)\n",
+                    patch:
+                        "diff --git a/a.txt b/a.txt\nnew file mode 100644\nindex 0000000..8c7e5a6\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+A\n",
+                    truncated: false,
+                    note: null,
+                } satisfies TaskDiff;
+            }
+            case "task_discard": {
+                const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
+                const t = taskOf(floorOf(a.path), a.id);
+                if (t.view.status === "done") throw `Task T-${a.id} is done. The app does not discard a done task.`;
+                updateTask(t, "operator", "blocked", "discarded by the operator", null);
+                t.view.branch = null;
+                t.view.baseBranch = null;
+                t.view.baseCommit = null;
+                t.view.worktree = null;
+                emit("tasks-changed", { path: a.path });
+                return { ...t.view };
+            }
+            case "floor_permissions_get": {
+                const a = args<{ path: string }>(raw, ["path"]);
+                return [...floorOf(a.path).permissions];
+            }
+            case "floor_permissions_set": {
+                const a = args<{ path: string; allow: string[] }>(raw, ["path", "allow"]);
+                const floor = floorOf(a.path);
+                const clean: string[] = [];
+                for (const raw of a.allow) {
+                    const rule = raw.trim();
+                    const bad = checkAllowRule(rule);
+                    if (bad !== null) throw `the rule "${rule}" is refused: ${bad}`;
+                    if (!clean.includes(rule)) clean.push(rule);
+                }
+                if (clean.length > ALLOW_RULES_MAX) throw `there are ${clean.length} rules, and the limit is ${ALLOW_RULES_MAX}`;
+                floor.permissions = clean;
+                emit("floor-changed", { path: a.path });
+                return [...clean];
+            }
+            case "team_resume": {
+                const a = args<{ path: string }>(raw, ["path"]);
+                const floor = floorOf(a.path);
+                if (floor.resumeProgress !== null) throw "the last team is resuming now";
+                const list = [...floor.resumable];
+                if (list.length === 0) throw "there is no session of the last team to resume";
+                floor.resumeProgress = { done: 0, total: list.length };
+                emit("floor-changed", { path: a.path });
+                void (async () => {
+                    for (const [index, slug] of list.entries()) {
+                        if (index > 0) await sleep(config().resumePauseMs ?? 400);
+                        try {
+                            if (failResume.delete(slug)) throw "forced test failure";
+                            startSession(a.path, slug);
+                            floor.resumable = floor.resumable.filter((s) => s !== slug);
+                        } catch (e) {
+                            emit("notice", { path: a.path, kind: "resume_failed", text: `Could not resume ${slug}: ${String(e)}` });
+                        }
+                        floor.resumeProgress = { done: index + 1, total: list.length };
+                        emit("floor-changed", { path: a.path });
+                    }
+                    floor.resumeProgress = null;
+                    emit("floor-changed", { path: a.path });
+                })();
+                return { done: 0, total: list.length } satisfies ResumeProgress;
+            }
             case "task_report": {
                 const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
                 const t = taskOf(floorOf(a.path), a.id);
@@ -1038,6 +1213,20 @@ export function createMockBackend(): Backend {
             }
             emit("tasks-changed", { path });
             return id;
+        },
+        taskWorktree(path, id) {
+            giveWorktree(taskOf(floorOf(path), id));
+            emit("tasks-changed", { path });
+        },
+        blockMerge(path, reason) {
+            floorOf(path).mergeBlock = reason;
+        },
+        setResumable(path, slugs) {
+            floorOf(path).resumable = [...slugs];
+            emit("floor-changed", { path });
+        },
+        failResume(slug) {
+            failResume.add(slug);
         },
     } satisfies MockControl;
 

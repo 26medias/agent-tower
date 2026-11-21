@@ -37,7 +37,9 @@ mod bus;
 mod live;
 mod logo_run;
 mod mcp;
+mod merge;
 mod models;
+mod resume;
 mod settings;
 mod setup;
 mod tasks;
@@ -47,10 +49,14 @@ use crate::adapter::{
     ClaudeAdapter, CliAdapter, CodexAdapter, McpAccess, Programs as AdapterPrograms, StartContext,
 };
 use crate::env::{EnvMap, current_env};
+use crate::gitwork;
 use crate::hookrx::HookReceiver;
 use crate::login_env::{LoginEnvSource, SessionEnv};
 use crate::logo::{DEFAULT_API_BASE, REQUEST_TIMEOUT};
-use crate::model::{CliKind, Employee, FloorDefaults, PermissionPolicy, SessionRecord};
+use crate::model::{
+    CliKind, Employee, FloorDefaults, FloorPermissions, PermissionPolicy, SessionRecord,
+    valid_allow_rules,
+};
 use crate::programs::Resolver;
 use crate::pty::LogConfig;
 use crate::session::{HookRouter, PasteRefused, Session};
@@ -73,10 +79,12 @@ use uuid::Uuid;
 pub use bus::{START_LIMIT, START_WINDOW, TestHooks};
 pub use live::SCROLLBACK_LIMIT;
 pub use mcp::{FIRST_BYTE_TIMEOUT, MAX_CONNECTIONS, McpLimits, REQUEST_DEADLINE};
+pub use merge::{MergeReport, TaskDiffView};
 pub use models::{
     CodexSource, ModelCatalog, ModelKind, ModelOption, STANDARD_EFFORTS, is_valid_effort,
     is_valid_model_name,
 };
+pub use resume::ResumeProgress;
 pub use settings::{KeySource, SettingsView};
 pub use tools::{FAILURE_TTL, hook_candidates, locate_hook_program, workspace_root};
 
@@ -202,6 +210,11 @@ pub struct FloorView {
     pub setup_session_id: Option<String>,
     /// `[defaults]` of `floor.toml`.
     pub defaults: FloorDefaults,
+    /// The employees that had a live session at the last close of the app, that have no live
+    /// session now, and that can resume (M3). The order is the order of the resume: managers first.
+    pub resumable: Vec<String>,
+    /// The background resume of the last team runs now (M3).
+    pub resume_progress: Option<ResumeProgress>,
 }
 
 /// `FloorEntry` of the contract.
@@ -237,6 +250,10 @@ pub trait Observer: Send + Sync {
     /// A task was made or changed, or an event was added (by a tool of an employee or by a
     /// command of the operator). `path` is the key of the floor. The default does nothing.
     fn tasks_changed(&self, _path: &Path) {}
+    /// Something that the operator must see, and that is not a state of a session or a task: a
+    /// merge that was blocked, or a session that the resume of the team could not start. `kind`
+    /// is `task_blocked` or `resume_failed`. `text` is the message. The default does nothing.
+    fn notice(&self, _path: &Path, _kind: &str, _text: &str) {}
 }
 
 /// Receives the output of the attached session, in order (see `live.rs`).
@@ -303,6 +320,9 @@ pub struct TowerConfig {
     pub mcp_limits: McpLimits,
     /// Test only. See [`TestHooks`].
     pub test_hooks: Arc<TestHooks>,
+    /// The pause between two starts of the resume of the last team (spec 4.2, M3). Tests give a
+    /// short one.
+    pub resume_pause: Duration,
 }
 
 impl TowerConfig {
@@ -322,6 +342,7 @@ impl TowerConfig {
             attach_pause: None,
             mcp_limits: McpLimits::default(),
             test_hooks: Arc::new(TestHooks::default()),
+            resume_pause: resume::RESUME_PAUSE,
         }
     }
 }
@@ -336,9 +357,24 @@ struct FloorHandle {
     store: Mutex<FloorStore>,
     /// The state of the logo generations of this floor (memory only).
     logo: Mutex<LogoState>,
+    /// One git action at a time for the main checkout of this floor (a worktree that is made or
+    /// removed, a commit, a merge). Taken before the store lock, never while a session starts.
+    git: Mutex<()>,
+    /// The resume of the last team that runs now (memory only).
+    resume: Mutex<Option<ResumeProgress>>,
 }
 
 impl FloorHandle {
+    fn new(path: PathBuf, store: FloorStore) -> FloorHandle {
+        FloorHandle {
+            path,
+            store: Mutex::new(store),
+            logo: Mutex::default(),
+            git: Mutex::new(()),
+            resume: Mutex::new(None),
+        }
+    }
+
     fn swarm(&self) -> PathBuf {
         self.path.join(".swarm")
     }
@@ -356,6 +392,10 @@ struct Registry {
     live: HashMap<String, Arc<Live>>,
     /// Employees whose start is in progress.
     reserved: HashSet<(PathBuf, String)>,
+    /// The IDs of the sessions that the operator stopped by hand. A process needs some time to
+    /// end, and the app can close in that time: such a session must not go in the list of the
+    /// team to resume (`resume.rs`).
+    manual_stops: HashSet<String>,
 }
 
 impl Registry {
@@ -432,6 +472,7 @@ pub struct TowerCore {
     codex_home: Option<PathBuf>,
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
     closed: Arc<AtomicBool>,
+    resume_pause: Duration,
     /// The token of each live session that has the MCP server (see `mcp.rs`).
     tokens: Arc<Mutex<HashMap<String, bus::Identity>>>,
     /// The URL of the MCP endpoint, for example `http://127.0.0.1:41234/mcp`.
@@ -521,6 +562,7 @@ impl Tower {
             codex_home,
             attach_pause: config.attach_pause,
             closed: Arc::new(AtomicBool::new(false)),
+            resume_pause: config.resume_pause,
             tokens: Arc::new(Mutex::new(HashMap::new())),
             mcp_url: format!("http://127.0.0.1:{mcp_port}/mcp"),
             mcp_port,
@@ -598,11 +640,7 @@ impl TowerCore {
         for employee in default_employees() {
             store.write_employee(&employee)?;
         }
-        let handle = Arc::new(FloorHandle {
-            path: key.clone(),
-            store: Mutex::new(store),
-            logo: Mutex::default(),
-        });
+        let handle = Arc::new(FloorHandle::new(key.clone(), store));
         locked(&self.floors).insert(key.clone(), Arc::clone(&handle));
         self.floor_list.add(&key)?;
         self.floor_view(&handle)
@@ -676,6 +714,43 @@ impl TowerCore {
         self.floor_view(&floor)
     }
 
+    /// The rules of `[permissions] allow` of `floor.toml`, as stored (M3). A rule that is not
+    /// valid can be in the list after a hand edit. The app does not use it for a session.
+    pub fn floor_permissions_get(&self, path: &Path) -> Result<Vec<String>> {
+        let floor = self.floor_handle(path)?;
+        reload(&floor)?;
+        let allow = locked(&floor.store).floor().permissions.allow.clone();
+        Ok(allow)
+    }
+
+    /// Write `[permissions] allow` of `floor.toml`. Each rule is checked (`check_allow_rule`), and
+    /// nothing is written when one is bad. A duplicate is dropped. The new rules apply at the next
+    /// start of a session. The observer gets `floor_changed`. Returns the stored list.
+    pub fn floor_permissions_set(&self, path: &Path, allow: Vec<String>) -> Result<Vec<String>> {
+        let mut clean: Vec<String> = Vec::new();
+        for rule in allow {
+            let rule = rule.trim().to_owned();
+            crate::model::check_allow_rule(&rule)
+                .map_err(|reason| other(format!("the rule \"{rule}\" is refused: {reason}")))?;
+            if !clean.contains(&rule) {
+                clean.push(rule);
+            }
+        }
+        if clean.len() > crate::model::ALLOW_RULES_MAX {
+            return Err(other(format!(
+                "there are {} rules, and the limit is {}",
+                clean.len(),
+                crate::model::ALLOW_RULES_MAX
+            )));
+        }
+        let floor = self.floor_handle(path)?;
+        locked(&floor.store).set_permissions(FloorPermissions {
+            allow: clean.clone(),
+        })?;
+        self.notifier.floor_changed(&floor.path);
+        Ok(clean)
+    }
+
     /// The open handle of a floor. It opens the floor if it is not open.
     fn floor_handle(&self, path: &Path) -> Result<Arc<FloorHandle>> {
         let key = normalize(path);
@@ -684,18 +759,14 @@ impl TowerCore {
         }
         let store = FloorStore::open(&key)?;
         repair_orphans(&store);
-        let handle = Arc::new(FloorHandle {
-            path: key.clone(),
-            store: Mutex::new(store),
-            logo: Mutex::default(),
-        });
+        let handle = Arc::new(FloorHandle::new(key.clone(), store));
         let mut floors = locked(&self.floors);
         // Another thread can have opened it while we did. Then its handle wins.
         Ok(Arc::clone(floors.entry(key).or_insert(handle)))
     }
 
     fn floor_view(&self, floor: &FloorHandle) -> Result<FloorView> {
-        let (name, brand, defaults, loaded, records, setup_record) = {
+        let (name, brand, defaults, loaded, records, setup_record, marks) = {
             let store = locked(&floor.store);
             let mut loaded = store.read_employees()?;
             // The slug `setup` is reserved. A file with that slug is an error, not an employee.
@@ -726,6 +797,7 @@ impl TowerCore {
                 records.push(record);
             }
             let setup_record = store.db().last_session(SETUP_SLUG)?;
+            let marks = store.db().resume_marks()?;
             (
                 store.floor().name.clone(),
                 store.floor().brand.clone(),
@@ -733,6 +805,7 @@ impl TowerCore {
                 loaded,
                 records,
                 setup_record,
+                marks,
             )
         };
         let mut sessions = Vec::new();
@@ -794,6 +867,13 @@ impl TowerCore {
             let state = locked(&floor.logo);
             (state.busy, state.error.clone())
         };
+        let resume_progress = locked(&floor.resume).clone();
+        let resumable = if resume_progress.is_some() {
+            // The resume runs now. The button shows its progress, not a second list.
+            Vec::new()
+        } else {
+            resume::resumable_slugs(&marks, &loaded.employees, &sessions)
+        };
         Ok(FloorView {
             path: floor.path.clone(),
             name,
@@ -807,6 +887,8 @@ impl TowerCore {
             logo_error,
             setup_session_id,
             defaults,
+            resumable,
+            resume_progress,
         })
     }
 
@@ -989,7 +1071,7 @@ impl TowerCore {
         // The defaults are read from the current file, not from the file at app start.
         reload(&floor)?;
 
-        let (employee, previous, team) = {
+        let (employee, previous, team, floor_allow) = {
             let store = locked(&floor.store);
             // The team goes into the instructions. The setup session has none.
             let team = if setup_cli.is_some() {
@@ -1049,8 +1131,23 @@ impl TowerCore {
             } else {
                 None
             };
-            (employee, previous, team)
+            // The rules of `[permissions] allow`. A rule that does not pass the check (a hand
+            // edit of `floor.toml`) is dropped here and never reaches the CLI.
+            let floor_allow = if setup_cli.is_some() {
+                Vec::new()
+            } else {
+                valid_allow_rules(&store.floor().permissions.allow)
+            };
+            (employee, previous, team, floor_allow)
         };
+        // Worktrees: only a floor that is the top of a git repository with a commit, on a
+        // branch, gets them. The setup session never does (it writes `.swarm/` files).
+        let worktrees = setup_cli.is_none()
+            && employee.cli == CliKind::Claude
+            && matches!(
+                gitwork::repo_state(&floor.path),
+                gitwork::RepoState::Ready { .. }
+            );
         if resume && previous.is_none() && employee.cli == CliKind::Claude {
             return Err(other(format!(
                 "{} has no stored Claude session to resume. Start a fresh session.",
@@ -1095,6 +1192,8 @@ impl TowerCore {
                 url: self.mcp_url.clone(),
                 token,
             }),
+            worktrees,
+            floor_allow,
             instructions: Some(if setup_cli.is_some() {
                 instructions(&employee, None, &floor.path)
             } else {
@@ -1247,6 +1346,9 @@ impl TowerCore {
         if live.exited() {
             return Ok(());
         }
+        // The operator stops this session by hand: it is not part of the team to resume (M3).
+        self.clear_resume_mark(&live.path, &live.slug);
+        locked(&self.registry).manual_stops.insert(live.id.clone());
         live.kill();
         thread::Builder::new()
             .name("app-stop-watch".into())
@@ -1407,11 +1509,13 @@ impl TowerCore {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        let lives: Vec<Arc<Live>> = locked(&self.registry).live.values().cloned().collect();
+        // M3: remember who is live, BEFORE the sessions are killed.
+        self.mark_live_for_resume(&lives);
         // End each `wait` call and the accept thread of the MCP endpoint.
         self.bus.notify_all();
         mcp::wake_accept(self.mcp_port);
         locked(&self.tokens).clear();
-        let lives: Vec<Arc<Live>> = locked(&self.registry).live.values().cloned().collect();
         for live in &lives {
             live.kill();
         }

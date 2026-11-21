@@ -55,7 +55,7 @@ use super::{
 use crate::model::Employee;
 use crate::session::PasteRefused;
 use crate::status::Status;
-use crate::store::{KIND_TASK_ASSIGN, MessageRecord, StoreError};
+use crate::store::{KIND_TASK_ASSIGN, MessageRecord, StoreError, TaskRecord};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -462,13 +462,16 @@ pub fn format_message(from_slug: &str, sender: Option<(&str, &str)>, text: &str)
 /// The text of one delivered message that the app wrote for a task (spec 4.4). The header is
 /// `[task T-12 from <Name> (<Role>)]`, or `[task T-12 from the operator]`. The body is the text
 /// with `> ` before each line, as for an employee message. The lines after the body are written
-/// by the app. A `task_assign` message ends with the three orders for the assignee.
+/// by the app. A `task_assign` message ends with the three orders for the assignee. `orders` is
+/// the text that the app stored with the message (M3: the worktree rules, the merge steps). With
+/// `None`, the default orders are used.
 pub fn format_task_message(
     kind: &str,
     task_id: i64,
     from_slug: &str,
     sender: Option<(&str, &str)>,
     text: &str,
+    orders: Option<&str>,
 ) -> String {
     let id = format!("T-{task_id}");
     let from_operator = from_slug == OPERATOR;
@@ -483,15 +486,10 @@ pub fn format_task_message(
     };
     let body: Vec<String> = text.lines().map(|line| format!("> {line}")).collect();
     let report = format!("{REPORTS_DIR}/{id}.md");
-    let trailer = if kind == KIND_TASK_ASSIGN {
-        let answer = if from_operator {
-            "3. The operator gave you this task. The operator reads the board and the report file. Put a short result in the note of the last task_update.".to_owned()
-        } else {
-            let slug = one_line(from_slug);
-            format!(
-                "3. Answer the person who gave you this task with the tool send(to=\"{slug}\", ...). Write a short message that names the report file. Do not copy the report into the message."
-            )
-        };
+    let trailer = if let Some(orders) = orders {
+        orders.to_owned()
+    } else if kind == KIND_TASK_ASSIGN {
+        let answer = format!("3. {}", answer_order(from_slug));
         format!(
             "Orders of the app for this task:\n\
 1. When you start the work, set the status with the tool task_update(task=\"{id}\", status=\"in_progress\").\n\
@@ -504,6 +502,119 @@ pub fn format_task_message(
         )
     };
     format!("{header}\n{}\n{trailer}", body.join("\n"))
+}
+
+/// The order about the answer to the person who gave the task (the last order of an assignment).
+fn answer_order(from_slug: &str) -> String {
+    if from_slug == OPERATOR {
+        "The operator gave you this task. The operator reads the board and the report file. Put a short result in the note of the last task_update.".to_owned()
+    } else {
+        let slug = one_line(from_slug);
+        format!(
+            "Answer the person who gave you this task with the tool send(to=\"{slug}\", ...). Write a short message that names the report file. Do not copy the report into the message."
+        )
+    }
+}
+
+/// Where the assignee of a task works (M3, spec 4.8).
+pub(super) enum Workplace<'a> {
+    /// The task has a git worktree and a branch.
+    Worktree(&'a TaskRecord),
+    /// No worktree was made for an employee that edits. `why` says the reason.
+    Direct { why: &'static str },
+    /// The assignee does not edit files (policy `read-only` or `ask-always`): the default orders.
+    NoEdit,
+}
+
+/// The orders after the body of an assignment message. `None` means the default orders.
+pub(super) fn assign_orders(
+    floor: &Path,
+    task_id: i64,
+    from_slug: &str,
+    workplace: &Workplace<'_>,
+) -> Option<String> {
+    let id = format!("T-{task_id}");
+    let reports = floor.join(REPORTS_DIR);
+    let report = format!("{}/{id}.md", reports.display());
+    let answer = answer_order(from_slug);
+    let start = format!(
+        "When you start the work, set the status with the tool task_update(task=\"{id}\", status=\"in_progress\")."
+    );
+    let complete = format!(
+        "When the work is complete, write your report to {report}. Say what you did, what you verified, what you did not do, and your open questions. Then call task_update(task=\"{id}\", status=\"review\", report=\"{report}\")."
+    );
+    match workplace {
+        Workplace::NoEdit => None,
+        Workplace::Direct { why } => Some(format!(
+            "Orders of the app for this task:\n\
+1. The app made no git worktree for this task: {why}. Edit the project folder directly.\n\
+2. {start}\n\
+3. {complete}\n\
+4. {answer}"
+        )),
+        Workplace::Worktree(task) => {
+            let (Some(relative), Some(branch), Some(base)) =
+                (&task.worktree, &task.branch, &task.base_branch)
+            else {
+                return None;
+            };
+            let worktree = floor.join(relative);
+            let commit = task
+                .base_commit
+                .as_deref()
+                .map_or("", |c| &c[..c.len().min(12)]);
+            Some(format!(
+                "Orders of the app for this task:\n\
+1. This task has its own git worktree. Make ALL your changes inside this folder. Never change a file in the main checkout.\n\
+   Worktree: {wt}\n\
+   Branch: {branch} (it starts from the branch {base}, at commit {commit})\n\
+   Use a path that starts with {wt} for each file that you write or edit. Your terminal starts in the main checkout, so go to the worktree folder before a command that changes files (for example the tests or the build).\n\
+2. Do not commit. Do not run git add, git checkout, git merge, git reset or git push. The app commits your changes when you set the status review.\n\
+3. {start}\n\
+4. {complete} The report goes in the reports folder of the main checkout, not in the worktree.\n\
+5. {answer}",
+                wt = worktree.display()
+            ))
+        }
+    }
+}
+
+/// The orders of a status message that tells the person who gave a task that it is in `review`
+/// and has a branch. A `pm`, a `ceo` or a manager that may merge gets the merge steps.
+pub(super) fn review_orders(floor: &Path, task: &TaskRecord, recipient_may_merge: bool) -> String {
+    let id = format!("T-{}", task.id);
+    let report = task
+        .report
+        .as_deref()
+        .map(|r| floor.join(r).display().to_string())
+        .unwrap_or_else(|| format!("{}/{id}.md", floor.join(REPORTS_DIR).display()));
+    let branch = task.branch.as_deref().unwrap_or("");
+    let base = task.base_branch.as_deref().unwrap_or("");
+    if recipient_may_merge {
+        format!(
+            "This is a status message of the app. The work of task {id} is on the branch {branch}. It is not in {base} yet. The app has committed the changes of the worktree.\n\
+1. Read the report file {report}.\n\
+2. Use the tool task_diff(task=\"{id}\") to read the changes.\n\
+3. If the work is good, call task_merge(task=\"{id}\"). The app merges the branch into {base}, removes the worktree and the branch, and sets the status done.\n\
+4. If the work is not good, call task_update(task=\"{id}\", status=\"in_progress\", note=\"what to change\"). The assignee works on the same branch.\n\
+5. If task_merge says that the task is blocked, read the reason. A conflict goes to an engineer: give a new task that says to merge {base} into the work, or send the task back to the same assignee with task_update. A main checkout on another branch, or with uncommitted changes, is for the operator: tell the operator."
+        )
+    } else {
+        format!(
+            "This is a status message of the app. Task {id} is in review on the branch {branch}. Only the pm, the ceo and the operator may merge it. Tell the pm that the task is ready. Read the report file {report} if you need it."
+        )
+    }
+}
+
+/// The orders of a status message about the end of a merge action of the app.
+pub(super) fn merge_result_orders(merged: bool, is_discard: bool) -> &'static str {
+    if merged {
+        "This is a status message of the app. The task is merged and done. You need to do nothing for it."
+    } else if is_discard {
+        "This is a status message of the app. The operator discarded this task: the worktree and the branch are removed. Do not work on it. Wait for a new task."
+    } else {
+        "This is a status message of the app. The merge of this task is blocked. Read the note for the reason. The branch and the worktree stay. The pm decides what happens next. Do not change the main checkout."
+    }
 }
 
 /// The part of the instructions that is about the team (spec 4.6).
@@ -581,7 +692,7 @@ fn task_instructions(employee: &Employee, team: &[Employee], floor: &Path) -> St
     let reports = floor.join(REPORTS_DIR);
     let mut text = String::from("\n## Tasks and reports\n\n");
     text.push_str(
-        "The floor has a task board. Use these tools of the MCP server `tower`: `task_create`, `task_assign`, `task_update`, `task_get`, `task_list` and `task_comment`. The task ID looks like `T-12`.\n",
+        "The floor has a task board. Use these tools of the MCP server `tower`: `task_create`, `task_assign`, `task_update`, `task_get`, `task_list`, `task_comment`, `task_diff` and `task_merge`. The task ID looks like `T-12`.\n",
     );
     if manager {
         text.push_str(
@@ -589,8 +700,9 @@ fn task_instructions(employee: &Employee, team: &[Employee], floor: &Path) -> St
 1. Break it into small tasks. Make each one with `task_create` (a title and a full description).\n\
 2. Give each task to the right employee with `task_assign`. Give it to one of your direct reports, and do not skip a direct report that has a team of its own: that direct report breaks the task down further. Give a task to a lower employee yourself only when no direct report can do the work. The app sends the employee the task and starts its session if it has none.\n\
 3. Follow the tasks with `task_list`. After you give the tasks, end your turn. The app sends you a message when an employee changes the status of a task.\n\
-4. When a task is in `review`, read its report file (the path is in the message and in `task_get`). Read the file. Do not read the terminal of the employee. If the work is good, set the status `done` with `task_update`. If it is not good, set `in_progress` and write what to change in the note, or send the employee a message.\n\
-5. When all the tasks of a request are done, tell the person who gave you the request. Use `send`, with a short result and the path of the report files.\n",
+4. When a task is in `review`, read its report file (the path is in the message and in `task_get`). Read the file. Do not read the terminal of the employee. If the task has a branch, use `task_diff` to read its changes. If the work is good, set the task to `done`: for a task with a branch call `task_merge` (only the `pm`, the `ceo` and the operator may merge; another manager tells the `pm`), and for a task with no branch call `task_update` with the status `done`. If the work is not good, set `in_progress` with `task_update` and write what to change in the note, or send the employee a message. The assignee works on the same branch.\n\
+5. If `task_merge` says that the merge is blocked, read the reason. A conflict goes to an engineer: give a new task that says to bring the work up to date with the base branch and to solve the conflict, or send the task back to its assignee. A main checkout that is on another branch, or that has uncommitted changes outside `.swarm/`, is for the operator: tell the operator. Never try to change the main checkout yourself.\n\
+6. When all the tasks of a request are done, tell the person who gave you the request. Use `send`, with a short result and the path of the report files.\n",
         );
     } else {
         text.push_str(
@@ -599,9 +711,12 @@ fn task_instructions(employee: &Employee, team: &[Employee], floor: &Path) -> St
 2. Do the work.\n\
 3. When the work is complete, write your report file (see below), and set the status `review` with `task_update` and the path of the report in `report`. If you cannot go on, set `blocked` and write the reason in the note.\n\
 4. Send the manager one short message with `send`. The message names the report file. Do not copy the report into the message.\n\
-5. End your turn. The manager sets `done` after it reads the report.\n",
+5. End your turn. The manager sets `done` after it reads the report. If the manager sends the task back (`in_progress` and a note), do the work again.\n",
         );
     }
+    text.push_str(
+        "\nWorktrees. When the floor is a git repository, the app makes one git worktree and one branch for each task that it gives to an employee that edits files. The task message gives the worktree path and the branch. If you get such a task: make ALL your changes inside the worktree folder, and never in the main checkout (your terminal starts in the main checkout, so use paths that start with the worktree path, and go to the worktree folder before a command that changes files). Do not commit, and do not use `git add`, `checkout`, `merge`, `reset` or `push`: the app commits your changes when you set the status `review`. Write the report in the reports folder of the MAIN checkout (see below), not in the worktree. If the task message says that no worktree was made, edit the project folder directly. Any employee can read the changes of a task with `task_diff`.\n",
+    );
     text.push_str(&format!(
         "\nReport files. The reports folder is `{dir}`. When you complete a task, write the report to `{REPORTS_DIR}/<task-id>.md`, for example `{REPORTS_DIR}/T-12.md` (the full path is `{dir}/T-12.md`). The report says: what you did, what you verified, what you did not do, and your open questions. The file must exist before you set `review` or `done` with a `report` path. The app refuses a path outside the reports folder. These files are the only files under `.swarm/` that you may write.\n",
         dir = reports.display()
@@ -732,6 +847,28 @@ pub(crate) fn tool_definitions() -> Value {
                 },
                 "required": ["task", "text"]
             }
+        },
+        {
+            "name": "task_diff",
+            "description": "Show the changes of a task that has a git branch: the diffstat and the patch of the branch against the commit where it started, cut at 60000 bytes. Only committed changes show: the app commits the worktree when the task goes to review. Any employee of the floor may use it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "The task ID, for example T-12."}
+                },
+                "required": ["task"]
+            }
+        },
+        {
+            "name": "task_merge",
+            "description": "Merge the branch of a task into the branch of the main checkout. Only the pm, the ceo and the operator may do it. The task must be in review or blocked. The app commits the worktree, checks that the main checkout is on the base branch and has no uncommitted change outside .swarm/, and merges with git merge --no-ff. On success it removes the worktree and the branch and sets the status done. If it cannot merge (another branch, uncommitted changes, a conflict) it sets the status blocked and tells you why. The app never forces a merge. A task with no worktree has nothing to merge: the call sets it done.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "The task ID, for example T-12."}
+                },
+                "required": ["task"]
+            }
         }
     ])
 }
@@ -814,6 +951,8 @@ impl TowerCore {
             "task_get" => self.tool_task_get(who, args),
             "task_list" => self.tool_task_list(who, args),
             "task_comment" => self.tool_task_comment(who, args),
+            "task_diff" => self.tool_task_diff(who, args),
+            "task_merge" => self.tool_task_merge(who, args),
             other => Err(format!("There is no tool \"{other}\".")),
         }
     }
@@ -1354,9 +1493,14 @@ fn format_waiting(messages: &[MessageRecord], team: &[Employee]) -> String {
                 .find(|e| e.slug == m.from_slug)
                 .map(|e| (e.name.as_str(), e.role.as_str()));
             match m.task_id {
-                Some(task_id) => {
-                    format_task_message(&m.kind, task_id, &m.from_slug, sender, &m.text)
-                }
+                Some(task_id) => format_task_message(
+                    &m.kind,
+                    task_id,
+                    &m.from_slug,
+                    sender,
+                    &m.text,
+                    m.orders.as_deref(),
+                ),
                 None => format_message(&m.from_slug, sender, &m.text),
             }
         })
@@ -1596,7 +1740,22 @@ mod tests {
         assert!(text.contains("Give each task to the right employee with `task_assign`"));
         assert!(text.contains("do not skip a direct report that has a team of its own"));
         assert!(text.contains("Follow the tasks with `task_list`"));
-        assert!(text.contains("set the status `done` with `task_update`"));
+        assert!(
+            text.contains("for a task with a branch call `task_merge`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("call `task_update` with the status `done`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("use `task_diff` to read its changes"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Worktrees. When the floor is a git repository"),
+            "{text}"
+        );
         // `eng` has no report: it sets `in_progress` and `review`.
         let eng = t.iter().find(|e| e.slug == "eng").unwrap();
         let text = team_instructions(eng, &t, Path::new("/floor"));
@@ -1643,6 +1802,7 @@ mod tests {
             delivered_at: None,
             task_id: None,
             kind: "message".to_owned(),
+            orders: None,
         }
     }
 

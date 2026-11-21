@@ -24,6 +24,46 @@ export const TASK_COLOR: Record<TaskStatus, string> = {
     done: "#6fd08c",
 };
 
+/** The task has a git branch (the app made a worktree for it). Docs/ipc-m3.md. */
+export function hasBranch(task: TaskView): boolean {
+    return task.branch !== null;
+}
+
+/** `a1b2c3d4e5f6` for a commit ID: the first 12 characters. */
+export function shortCommit(commit: string | null): string {
+    return commit === null ? "" : commit.slice(0, 12);
+}
+
+/** The merge button: a task with a branch, in review or blocked. The app refuses any other status. */
+export function canMerge(task: TaskView): boolean {
+    return hasBranch(task) && (task.status === "review" || task.status === "blocked");
+}
+
+/** The discard button: a task that is not done and has a branch or a worktree to remove. */
+export function canDiscard(task: TaskView): boolean {
+    return task.status !== "done" && (task.branch !== null || task.worktree !== null);
+}
+
+/** The absolute worktree folder of a task, or null when there is none now. */
+export function worktreePath(floorPath: string, task: TaskView): string | null {
+    if (task.worktree === null) return null;
+    return `${floorPath.replace(/\/+$/, "")}/${task.worktree}`;
+}
+
+/** What the diff box shows when the task has no branch, or the branch is gone, or there is no change. */
+export function diffPlaceholder(diff: { branch: string | null; stat: string; patch: string; note: string | null }): string | null {
+    if (diff.note !== null && diff.patch === "" && diff.stat === "") return diff.note;
+    if (diff.stat.trim() === "" && diff.patch.trim() === "") return "There is no change on the branch yet.";
+    return null;
+}
+
+/** The text of the diff box: the diffstat, a blank line, the patch, and the note. */
+export function diffText(diff: { stat: string; patch: string; note: string | null }): string {
+    const parts = [diff.stat.trimEnd(), diff.patch.trimEnd()].filter((p) => p !== "");
+    if (diff.note !== null) parts.push(`[${diff.note}]`);
+    return parts.join("\n\n");
+}
+
 export function statusLabel(status: string): string {
     return (LABELS as Record<string, string>)[status] ?? status;
 }
@@ -85,6 +125,8 @@ export function eventText(event: TaskEvent, names: Record<string, string>): { li
             return { line: `${who} set the status to ${statusLabel(event.value ?? "")}`, note: event.text };
         case "report":
             return { line: `${who} set the report ${event.value ?? ""}`, note: null };
+        case "worktree":
+            return { line: `The app made the branch ${event.value ?? ""}`, note: event.text };
         case "comment":
             return { line: `${who} wrote a note`, note: event.text };
         default:

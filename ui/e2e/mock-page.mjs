@@ -776,9 +776,9 @@ try {
     check("the Settings button opens the settings panel", opened);
     if (!opened) throw new Error("the settings panel did not open");
     check(
-        "the settings panel has the 5 sections",
+        "the settings panel has the 6 sections",
         JSON.stringify(await page.$$eval('[role="dialog"] section', (s) => s.map((x) => x.dataset.section))) ===
-            JSON.stringify(["keys", "image", "models", "defaults", "programs"]),
+            JSON.stringify(["keys", "image", "models", "defaults", "permissions", "programs"]),
     );
     await page.keyboard.press("Escape");
     check("Escape closes the settings panel", await gone());
@@ -1688,9 +1688,10 @@ try {
         check("the detail shows the description", (await detail.locator(".text").innerText()) === "Run the build and report.");
         const eventLines = await detail.locator(".events li").allInnerTexts();
         check("the events have a time, an author and the action",
-            eventLines.length === 3 && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n/.test(eventLines[0]) &&
+            eventLines.length === 4 && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n/.test(eventLines[0]) &&
             eventLines[0].includes("Maya made the task") &&
-            eventLines[1].includes("Maya gave the task to Sam") && eventLines[2].includes("Sam set the status to Review"),
+            eventLines[1].includes("Maya gave the task to Sam") && eventLines[2].includes("Sam set the status to Review") &&
+            eventLines[3].includes("The app made the branch task/T-3-check-the-build-on-linux"),
             JSON.stringify(eventLines));
         check("the report text shows in a scroll box as plain text",
             (await detail.locator("pre.report").innerText()).startsWith("# T-3 report") &&
@@ -1709,7 +1710,7 @@ try {
         const assignCall = (await calls("task_assign")).pop();
         check("assign calls task_assign with path, id and slug", JSON.stringify(assignCall.args) === JSON.stringify({ path: FLOOR, id: 3, slug: "eng-lin" }), JSON.stringify(assignCall.args));
         check("the detail shows the new assignee and an assigned event",
-            (await detail.locator(".events li").count()) === 4 && (await detail.locator(".events li").last().innerText()).includes("Operator gave the task to Lin"));
+            (await detail.locator(".events li").count()) === 5 && (await detail.locator(".events li").last().innerText()).includes("Operator gave the task to Lin"));
         await detail.locator('select[aria-label="Status"]').selectOption("done");
         await detail.locator('textarea[aria-label="Note"]').fill("Looks good");
         await detail.getByRole("button", { name: "Set the status" }).click();
@@ -1722,7 +1723,7 @@ try {
         // A note alone keeps the status.
         await detail.locator('textarea[aria-label="Note"]').fill("One more thing");
         await detail.getByRole("button", { name: "Add the note" }).click();
-        await page.waitForFunction(() => document.querySelectorAll(".board .events li").length === 6);
+        await page.waitForFunction(() => document.querySelectorAll(".board .events li").length === 7);
         const noteCall = (await calls("task_update")).pop();
         check("a note alone is task_update with the same status",
             noteCall.args.status === "done" && noteCall.args.note === "One more thing", JSON.stringify(noteCall.args));
@@ -1838,6 +1839,216 @@ try {
         await page.waitForSelector(".storey.on");
         await page.waitForSelector(".board .card");
         check("at 1280 x 800 again the board is open by default", (await boardW()) === 260);
+    }
+
+    // ================= 20. Worktrees, merge, permissions, restore (M3, docs/ipc-m3.md) =================
+    {
+        const FLOOR = "/home/demo/tower";
+        const m3Shots = process.env.E2E_M3_SHOTS ?? "/tmp/agent-tower-review/m3/shots";
+        mkdirSync(m3Shots, { recursive: true });
+        await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+        await page.setViewportSize({ width: 1280, height: 800 });
+        await page.reload();
+        await page.waitForSelector(".storey.on");
+        await page.waitForSelector(".board .card");
+        const detail = page.locator('.board [aria-label="Task detail"]');
+        const mark = (id) => page.locator(`.board .card[data-task="${id}"] [data-testid="branch-mark"]`);
+        const openCard = async (id) => {
+            await page.locator(`.board .card[data-task="${id}"]`).click();
+            await page.waitForSelector('.board [aria-label="Task detail"] .title');
+        };
+        const back = async () => {
+            await detail.getByRole("button", { name: /Back/ }).click();
+            await page.waitForSelector(".board .group");
+        };
+        // A task with a branch, in a state, made by an employee through the mock control.
+        const newTask = (title, status, worktree = true) =>
+            page.evaluate(
+                ([p, t, st, wt]) => {
+                    const id = window.__towerMock.taskByEmployee(p, "pm", { create: t });
+                    window.__towerMock.taskByEmployee(p, "pm", { id, assign: "eng-lin" });
+                    if (wt) window.__towerMock.taskWorktree(p, id);
+                    if (st !== "todo") window.__towerMock.taskByEmployee(p, "eng-lin", { id, status: st });
+                    return id;
+                },
+                [FLOOR, title, status, worktree],
+            );
+
+        // 20a. The mark on the board card.
+        check("a task with a branch has the mark on its card", (await mark(2).count()) === 1 && (await mark(3).count()) === 1);
+        check("a task with no branch has no mark", (await mark(4).count()) === 0 && (await mark(5).count()) === 0);
+        check("the mark names the branch in its title", (await mark(2).getAttribute("title")) === "Git branch task/T-2-write-the-login-form", String(await mark(2).getAttribute("title")));
+        await page.evaluate((p) => window.__towerMock.taskWorktree(p, 5), FLOOR);
+        await mark(5).waitFor();
+        check("the mark shows when an event gives a task a branch", (await mark(5).count()) === 1);
+        await page.screenshot({ path: join(m3Shots, "1-board-marks.png") });
+
+        // 20b. The detail: branch, worktree, diff box.
+        await openCard(2);
+        check("the detail shows the branch, the base and the absolute worktree path",
+            (await detail.locator('[data-testid="detail-branch"]').innerText()) === "task/T-2-write-the-login-form" &&
+            (await detail.locator('[data-testid="branch-info"]').innerText()).includes("main at 0123456789ab") &&
+            (await detail.locator('[data-testid="detail-worktree"]').innerText()) === "/home/demo/tower/.swarm/worktrees/T-2");
+        check("a task in progress has Show diff and Discard, and no Merge button",
+            (await detail.locator('[data-testid="show-diff"]').count()) === 1 && (await detail.locator('[data-testid="merge"]').count()) === 0 &&
+            (await detail.getByRole("button", { name: "Discard" }).count()) === 1);
+        check("the diff box is closed at the start", (await detail.locator('[data-testid="diff-box"]').count()) === 0);
+        await detail.locator('[data-testid="show-diff"]').click();
+        await detail.locator('[data-testid="diff-box"]').waitFor();
+        const diffCall = (await calls("task_diff")).pop();
+        check("Show diff calls task_diff with path and id", JSON.stringify(diffCall.args) === JSON.stringify({ path: FLOOR, id: 2 }), JSON.stringify(diffCall.args));
+        const diffInfo = await detail.locator('[data-testid="diff-box"]').evaluate((e) => ({
+            text: e.textContent,
+            tag: e.tagName,
+            overflow: getComputedStyle(e).overflow,
+            font: getComputedStyle(e).fontFamily,
+            ws: getComputedStyle(e).whiteSpace,
+        }));
+        check("the diff box is plain text with the stat and the patch", diffInfo.tag === "PRE" && diffInfo.text.includes("a.txt | 1 +") && diffInfo.text.includes("+++ b/a.txt") && diffInfo.text.includes("+A"), JSON.stringify(diffInfo.text));
+        check("the diff box is monospace, with a scroll and no wrap", /mono|Mono|Courier/.test(diffInfo.font) && diffInfo.overflow === "auto" && diffInfo.ws === "pre", JSON.stringify(diffInfo));
+        await page.screenshot({ path: join(m3Shots, "2-detail-diff.png") });
+        await detail.locator('[data-testid="show-diff"]').click();
+        await page.waitForFunction(() => !document.querySelector('[data-testid="diff-box"]'));
+        check("Hide diff closes the box", (await detail.locator('[data-testid="show-diff"]').innerText()) === "Show diff");
+        await back();
+
+        // 20c. A task with no branch has no git section.
+        await openCard(4);
+        check("a task with no branch has no git section", (await detail.locator('[data-testid="branch-info"]').count()) === 0 && (await detail.locator('[data-testid="show-diff"]').count()) === 0);
+        await back();
+
+        // 20d. Merge from review.
+        const mergeId = await newTask("Merge me", "review");
+        await page.waitForSelector(`.board .card[data-task="${mergeId}"][data-status="review"]`);
+        await openCard(mergeId);
+        check("a task in review has the Merge button", (await detail.locator('[data-testid="merge"]').count()) === 1);
+        const mergesBefore = (await calls("task_merge")).length;
+        await detail.locator('[data-testid="merge"]').click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="detail-status"]')?.textContent === "Done");
+        const mergeCall = (await calls("task_merge")).pop();
+        check("Merge calls task_merge with path and id", (await calls("task_merge")).length === mergesBefore + 1 && JSON.stringify(mergeCall.args) === JSON.stringify({ path: FLOOR, id: mergeId }), JSON.stringify(mergeCall.args));
+        check("a merge that worked shows its text and sets the task to Done",
+            (await detail.locator('[data-testid="merge-result"]').getAttribute("data-merged")) === "true" &&
+            (await detail.locator('[data-testid="merge-result"]').innerText()).includes(`Merged task/T-${mergeId}-merge-me into main`));
+        check("after the merge the worktree is removed and Merge and Discard are gone",
+            (await detail.locator('[data-testid="detail-worktree"]').innerText()) === "removed" && (await detail.locator('[data-testid="merge"]').count()) === 0 &&
+            (await detail.getByRole("button", { name: "Discard" }).count()) === 0);
+        check("a toast says that the merge worked", (await page.locator('.toast[data-kind="info"]').filter({ hasText: "Merged" }).count()) >= 1);
+        await page.screenshot({ path: join(m3Shots, "3-merged.png") });
+        await back();
+
+        // 20e. A merge that is blocked: a notice (toast), the status Blocked, the reason, and a new try works.
+        const blockId = await newTask("Blocked merge", "review");
+        await page.evaluate((p) => window.__towerMock.blockMerge(p, "The main checkout is on the branch other, and the task needs main."), FLOOR);
+        await page.waitForSelector(`.board .card[data-task="${blockId}"][data-status="review"]`);
+        await openCard(blockId);
+        await detail.locator('[data-testid="merge"]').click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="detail-status"]')?.textContent === "Blocked");
+        const alert = page.locator('.toast[role="alert"]').filter({ hasText: `Task T-${blockId} is blocked` });
+        await alert.first().waitFor();
+        check("a blocked merge shows a toast with the reason", (await alert.first().innerText()).includes("The main checkout is on the branch other"), await alert.first().innerText());
+        check("a blocked merge shows the reason in the detail, as not merged",
+            (await detail.locator('[data-testid="merge-result"]').getAttribute("data-merged")) === "false" &&
+            (await detail.locator('[data-testid="merge-result"]').innerText()).includes("blocked and not merged"));
+        check("a blocked task keeps its branch, and the operator can merge again", (await detail.locator('[data-testid="merge"]').count()) === 1 && (await detail.locator('[data-testid="detail-branch"]').count()) === 1);
+        await page.screenshot({ path: join(m3Shots, "4-blocked.png") });
+        await page.evaluate((p) => window.__towerMock.blockMerge(p, null), FLOOR);
+        await detail.locator('[data-testid="merge"]').click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="detail-status"]')?.textContent === "Done");
+        check("the second merge works from Blocked", true);
+        await back();
+
+        // 20f. Discard asks for a confirmation.
+        const discardId = await newTask("Throw away", "in_progress");
+        await page.waitForSelector(`.board .card[data-task="${discardId}"]`);
+        await openCard(discardId);
+        const discards = () => calls("task_discard").then((c) => c.length);
+        const discard = detail.getByRole("button", { name: /^Discard/ });
+        await discard.click();
+        check("the first click on Discard asks and calls nothing", (await discards()) === 0 && (await discard.innerText()) === "Discard? Click again", await discard.innerText());
+        await page.waitForTimeout(3300);
+        check("the confirmation goes away by itself", (await discard.innerText()) === "Discard" && (await discards()) === 0);
+        await discard.click();
+        await discard.click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="detail-status"]')?.textContent === "Blocked");
+        const discardCall = (await calls("task_discard")).pop();
+        check("the second click calls task_discard with path and id", (await discards()) === 1 && JSON.stringify(discardCall.args) === JSON.stringify({ path: FLOOR, id: discardId }), JSON.stringify(discardCall.args));
+        check("a discarded task has no git section and the note says who discarded it",
+            (await detail.locator('[data-testid="branch-info"]').count()) === 0 && (await detail.locator(".events li").last().innerText()).includes("discarded by the operator"));
+        await back();
+        check("the card of a discarded task has no mark", (await mark(discardId).count()) === 0);
+
+        // 20g. The section "Commands with no question" of the settings panel.
+        const dialog = page.locator('[role="dialog"][aria-label="Settings"]');
+        const section = dialog.locator('section[data-section="permissions"]');
+        const sets = () => calls("floor_permissions_set");
+        await page.click("button.settings");
+        await section.waitFor();
+        check("the section is in the settings panel and says that the rules apply at the next start",
+            /commands with no question/i.test(await section.locator("h3").innerText()) &&
+            /only to a session that starts after you save/.test(await section.innerText()));
+        await section.locator('[data-testid="rule-list"] .none').waitFor();
+        check("the list is empty at the start", (await section.locator("li[data-rule]").count()) === 0 && (await calls("floor_permissions_get")).some((c) => c.args.path === FLOOR));
+        const field = section.locator('input[aria-label="New rule"]');
+        const addButton = section.getByRole("button", { name: "add", exact: true });
+        const setsBefore = (await sets()).length;
+        for (const [rule, reason] of [["Bash(*)", /every shell command/], ["Bash", /no pattern/], ["Edit(./x)", /not a tool/], ["Bash()", /empty pattern/]]) {
+            await field.fill(rule);
+            await addButton.click();
+            const text = await section.locator('[data-testid="rule-error"]').innerText();
+            check(`the rule ${rule} is refused with a reason`, reason.test(text), text);
+        }
+        check("a refused rule makes no call to the app", (await sets()).length === setsBefore && (await section.locator("li[data-rule]").count()) === 0);
+        await field.fill("Bash(cargo test:*)");
+        check("typing clears the error", (await section.locator('[data-testid="rule-error"]').count()) === 0);
+        await addButton.click();
+        await section.locator('li[data-rule="Bash(cargo test:*)"]').waitFor();
+        const setCall = (await sets()).pop();
+        check("a good rule calls floor_permissions_set with the whole list", (await sets()).length === setsBefore + 1 && JSON.stringify(setCall.args) === JSON.stringify({ path: FLOOR, allow: ["Bash(cargo test:*)"] }), JSON.stringify(setCall.args));
+        check("the field is empty after an add", (await field.inputValue()) === "");
+        await field.fill("Bash(cargo test:*)");
+        await addButton.click();
+        check("a rule that is in the list already is refused", /already/.test(await section.locator('[data-testid="rule-error"]').innerText()) && (await section.locator("li[data-rule]").count()) === 1);
+        await field.fill("Read");
+        await addButton.click();
+        await section.locator('li[data-rule="Read"]').waitFor();
+        await page.screenshot({ path: join(m3Shots, "5-permissions.png") });
+        await section.getByRole("button", { name: "Remove Bash(cargo test:*)" }).click();
+        await page.waitForFunction(() => !document.querySelector('li[data-rule="Bash(cargo test:*)"]'));
+        const removeCall = (await sets()).pop();
+        check("remove calls floor_permissions_set without that rule", JSON.stringify(removeCall.args) === JSON.stringify({ path: FLOOR, allow: ["Read"] }) && (await section.locator("li[data-rule]").count()) === 1, JSON.stringify(removeCall.args));
+        await page.click('button[aria-label="Close settings"]');
+        await page.click("button.settings");
+        await section.locator('li[data-rule="Read"]').waitFor();
+        check("the list is read again when the panel opens", (await section.locator("li[data-rule]").count()) === 1);
+        await page.click('button[aria-label="Close settings"]');
+
+        // 20h. The button "Resume the last team (N)" and its progress.
+        const resumeBtn = page.locator('[data-testid="resume-team"]');
+        check("with no team to resume there is no button", (await resumeBtn.count()) === 0);
+        await page.evaluate(() => (globalThis.__towerMockConfig = { resumePauseMs: 700 }));
+        await page.evaluate((p) => window.__towerMock.setResumable(p, ["ceo", "pm"]), FLOOR);
+        await resumeBtn.waitFor();
+        check("the button shows how many employees wait", (await resumeBtn.innerText()).trim() === "Resume the last team (2)", await resumeBtn.innerText());
+        await page.screenshot({ path: join(m3Shots, "6-resume-button.png") });
+        await page.evaluate(() => window.__towerMock.failResume("pm"));
+        await resumeBtn.click();
+        await page.waitForFunction(() => /Resuming the team \(\d\/2\)/.test(document.querySelector('[data-testid="resume-team"]')?.textContent ?? ""));
+        const resumeCall = (await calls("team_resume")).pop();
+        check("the click calls team_resume with the path", JSON.stringify(resumeCall.args) === JSON.stringify({ path: FLOOR }), JSON.stringify(resumeCall.args));
+        check("the button shows the progress and is off while the team resumes", (await resumeBtn.isDisabled()) && /Resuming the team \(\d\/2\)/.test(await resumeBtn.innerText()), await resumeBtn.innerText());
+        await page.waitForFunction(() => /Resuming the team \(1\/2\)/.test(document.querySelector('[data-testid="resume-team"]')?.textContent ?? ""));
+        check("the progress goes up after each start", true);
+        await page.screenshot({ path: join(m3Shots, "7-resume-progress.png") });
+        const failToast = page.locator('.toast[role="alert"]').filter({ hasText: "Could not resume pm" });
+        await failToast.first().waitFor();
+        check("a start that fails shows a toast and the others go on", (await failToast.first().innerText()).includes("forced test failure") && (await page.locator('.tab[data-session]').count()) > 0);
+        await page.waitForFunction(() => /^Resume the last team \(1\)$/.test(document.querySelector('[data-testid="resume-team"]')?.textContent?.trim() ?? ""), null, { timeout: 5000 });
+        check("when the resume ends the employee that failed is still in the list, for a new try", (await resumeBtn.isEnabled()) && (await resumeBtn.innerText()).trim() === "Resume the last team (1)", await resumeBtn.innerText());
+        await resumeBtn.click();
+        await page.waitForFunction(() => !document.querySelector('[data-testid="resume-team"]'), null, { timeout: 5000 });
+        check("the button goes away when no employee waits", (await resumeBtn.count()) === 0);
+        check("ceo has a live session after the resume", (await page.locator('.emp[data-slug="ceo"]').getAttribute("data-status")) !== "stopped");
     }
 
     await page.screenshot({ path: shot });

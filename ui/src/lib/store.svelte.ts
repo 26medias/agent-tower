@@ -3,6 +3,7 @@
 // Svelte 5 runes. The pure state changes live in ./reducers.ts.
 import * as ipc from "./ipc";
 import { orderEmployees } from "./order";
+import { taskLabel } from "./tasks";
 import {
     applyFloorView,
     applySessionChanged,
@@ -31,6 +32,8 @@ import {
     type SessionView,
     type Settings,
     type TaskDetail,
+    type TaskDiff,
+    type TaskMerge,
     type TaskStatus,
     type TaskView,
     type TrackedSession,
@@ -94,6 +97,10 @@ class Store {
     taskDetail = $state.raw<{ path: string; detail: TaskDetail; report: string | null | undefined; reportError: string | null } | null>(
         null,
     );
+    /** The diff box of the open task (docs/ipc-m3.md). `diff` is null while it loads. */
+    taskDiff = $state.raw<{ path: string; id: number; diff: TaskDiff | null; error: string | null } | null>(null);
+    /** The rules of `[permissions] allow` of each floor that the settings panel loaded. */
+    permissionsByPath = $state.raw<Record<string, string[]>>({});
     backend = $state<"tauri" | "mock" | "">("");
     ready = $state(false);
     private busy = $state.raw<Record<string, LaunchKind>>({});
@@ -169,6 +176,10 @@ class Store {
                 await ipc.onTasksChanged((payload) => {
                     // The tasks of another floor load when the operator opens that floor.
                     if (payload.path === this.openPath) void this.loadTasks(payload.path);
+                }),
+                // A merge that is blocked, or a start that the team resume could not do.
+                await ipc.onNotice((payload) => {
+                    this.toast(payload.text);
                 }),
                 await ipc.onFloorChanged((payload) => {
                     // The list carries the logo version of every floor.
@@ -412,6 +423,7 @@ class Store {
         if (!path) return;
         this.openTaskByPath = { ...this.openTaskByPath, [path]: id };
         this.taskDetail = null;
+        this.taskDiff = null;
         void this.loadTaskDetail(path, id);
     }
 
@@ -422,6 +434,62 @@ class Store {
         delete next[path];
         this.openTaskByPath = next;
         this.taskDetail = null;
+        this.taskDiff = null;
+    }
+
+    /** Show the diff box of a task. The box is empty ("loading") until the command answers. */
+    async showDiff(id: number): Promise<void> {
+        const path = this.openPath;
+        if (!path) return;
+        this.taskDiff = { path, id, diff: null, error: null };
+        try {
+            const diff = await ipc.taskDiff(path, id);
+            if (this.taskDiff?.path === path && this.taskDiff.id === id) this.taskDiff = { path, id, diff, error: null };
+        } catch (e) {
+            if (this.taskDiff?.path === path && this.taskDiff.id === id) {
+                this.taskDiff = { path, id, diff: null, error: ipc.errorText(e) };
+            }
+        }
+    }
+
+    hideDiff(): void {
+        this.taskDiff = null;
+    }
+
+    /**
+     * The operator merges the branch of a task. A merge that is blocked comes as the `notice`
+     * event (a toast), so this adds a toast only for a merge that worked. Returns the result,
+     * or null when the command was refused (the error shows in a toast).
+     */
+    async mergeTask(id: number): Promise<TaskMerge | null> {
+        const path = this.openPath;
+        if (!path) return null;
+        try {
+            const result = await ipc.taskMerge(path, id);
+            this.taskDiff = null;
+            if (result.merged) this.toast(result.message, "info");
+            await this.loadTasks(path);
+            return result;
+        } catch (e) {
+            this.fail(e);
+            return null;
+        }
+    }
+
+    /** The operator discards a task: its worktree and branch go, and its status is `blocked`. */
+    async discardTask(id: number): Promise<boolean> {
+        const path = this.openPath;
+        if (!path) return false;
+        try {
+            await ipc.taskDiscard(path, id);
+            this.taskDiff = null;
+            this.toast(`${taskLabel(id)} is discarded.`, "info");
+            await this.loadTasks(path);
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
     }
 
     /** The operator makes a task. Returns the new task, or `null` when the command failed. */
@@ -461,6 +529,55 @@ class Store {
         } catch (e) {
             this.fail(e);
             return false;
+        }
+    }
+
+    // ---- the restore of the last team (docs/ipc-m3.md) ----
+
+    /** Resume the employees of the last team, one by one, in the background. */
+    async resumeTeam(): Promise<void> {
+        const path = this.openPath;
+        if (!path) return;
+        try {
+            const progress = await ipc.teamResume(path);
+            // The button shows the progress at once. `floor-changed` follows after each start.
+            if (this.floorView && this.floorView.path === path) {
+                this.floorView = { ...this.floorView, resumable: [], resumeProgress: progress };
+            }
+        } catch (e) {
+            this.fail(e);
+        }
+    }
+
+    // ---- commands with no question (docs/ipc-m3.md) ----
+
+    /** The rules of `[permissions] allow` of the open floor. */
+    permissions = $derived(this.openPath ? (this.permissionsByPath[this.openPath] ?? null) : null);
+
+    async loadPermissions(): Promise<void> {
+        const path = this.openPath;
+        if (!path) return;
+        try {
+            const allow = await ipc.floorPermissionsGet(path);
+            this.permissionsByPath = { ...this.permissionsByPath, [path]: allow };
+        } catch (e) {
+            this.fail(e);
+        }
+    }
+
+    /**
+     * Write the rules of the open floor. Returns null on success, or the refusal text (it is
+     * for the form, not a toast).
+     */
+    async savePermissions(allow: string[]): Promise<string | null> {
+        const path = this.openPath;
+        if (!path) return "No floor is open.";
+        try {
+            const stored = await ipc.floorPermissionsSet(path, allow);
+            this.permissionsByPath = { ...this.permissionsByPath, [path]: stored };
+            return null;
+        } catch (e) {
+            return ipc.errorText(e);
         }
     }
 

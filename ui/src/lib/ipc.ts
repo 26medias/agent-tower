@@ -18,9 +18,13 @@ import type {
     ProgramName,
     Programs,
     SessionChangedPayload,
+    NoticePayload,
+    ResumeProgress,
     SessionView,
     Settings,
     TaskDetail,
+    TaskDiff,
+    TaskMerge,
     TaskStatus,
     TaskView,
     TasksChangedPayload,
@@ -187,6 +191,27 @@ export const taskUpdate = (path: string, id: number, status: TaskStatus, note: s
 /** The text of the report file, or null when the task has no report. Rejects with a text. */
 export const taskReport = (path: string, id: number) => call<string | null>("task_report", { path, id });
 
+// ---- Commands (docs/ipc-m3.md, worktrees, the restore of the team, `[permissions]`) ----
+
+/** Merge the branch of a task. A blocked merge is a result (`merged: false`), not a rejection. */
+export const taskMerge = (path: string, id: number) => call<TaskMerge>("task_merge", { path, id });
+
+/** The diffstat and the patch of the branch of a task (the patch is cut at 60000 bytes). */
+export const taskDiff = (path: string, id: number) => call<TaskDiff>("task_diff", { path, id });
+
+/** Remove the worktree and the branch of a task that is not done, and set the status `blocked`. */
+export const taskDiscard = (path: string, id: number) => call<TaskView>("task_discard", { path, id });
+
+/** The rules of `[permissions] allow` of `floor.toml`. */
+export const floorPermissionsGet = (path: string) => call<string[]>("floor_permissions_get", { path });
+
+/** Writes `[permissions] allow`. A bad rule rejects the whole call. Returns the stored list. */
+export const floorPermissionsSet = (path: string, allow: string[]) =>
+    call<string[]>("floor_permissions_set", { path, allow });
+
+/** Resume the employees of `FloorView.resumable` in the background. Returns the progress at the start. */
+export const teamResume = (path: string) => call<ResumeProgress>("team_resume", { path });
+
 // ---- Events (docs/ipc-m1.md, "Events") ----
 
 export async function onSessionChanged(handler: (payload: SessionChangedPayload) => void): Promise<Unlisten> {
@@ -200,6 +225,11 @@ export async function onFloorChanged(handler: (payload: FloorChangedPayload) => 
 /** An employee started the session of another employee with the tools of the app. */
 export async function onEmployeeStarted(handler: (payload: EmployeeStartedPayload) => void): Promise<Unlisten> {
     return (await backend()).listen<EmployeeStartedPayload>("employee-started", handler);
+}
+
+/** Something the operator must see: a blocked merge, or a start that the team resume could not do. */
+export async function onNotice(handler: (payload: NoticePayload) => void): Promise<Unlisten> {
+    return (await backend()).listen<NoticePayload>("notice", handler);
 }
 
 /** A task of a floor was made or changed (by an employee or by the operator). */

@@ -106,6 +106,12 @@ impl Notifier {
             observer.employee_started(path, event);
         }
     }
+
+    pub fn notice(&self, path: &Path, kind: &str, text: &str) {
+        if let Some(observer) = self.get() {
+            observer.notice(path, kind, text);
+        }
+    }
 }
 
 struct OutBuf {

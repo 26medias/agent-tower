@@ -6,6 +6,7 @@
     import { store } from "$lib/store.svelte";
     import FloorDefaultsForm from "./FloorDefaultsForm.svelte";
     import ModelListEditor from "./ModelListEditor.svelte";
+    import PermissionsForm from "./PermissionsForm.svelte";
     import ProgramsPanel from "./ProgramsPanel.svelte";
 
     let { onclose }: { onclose: () => void } = $props();
@@ -129,6 +130,15 @@
                 <h3>Floor defaults <span class="floor">{store.floorView.name}</span></h3>
                 {#key store.floorView.path}
                     <FloorDefaultsForm />
+                {/key}
+            </section>
+        {/if}
+
+        {#if store.floorView}
+            <section data-section="permissions" aria-label="Commands with no question">
+                <h3>Commands with no question <span class="floor">{store.floorView.name}</span></h3>
+                {#key store.floorView.path}
+                    <PermissionsForm />
                 {/key}
             </section>
         {/if}

@@ -99,9 +99,11 @@ fn every_permission_mode_value_is_accepted_by_claude() {
     assert!(!ok, "claude accepted a bogus mode");
     assert!(stderr.contains("Allowed choices"), "{stderr}");
     for policy in POLICIES {
-        let mode = claude_permission_mode(policy);
-        let (ok, _, stderr) = run(mode);
-        assert!(ok, "claude rejects --permission-mode {mode}: {stderr}");
+        for worktrees in [false, true] {
+            let mode = claude_permission_mode(policy, worktrees);
+            let (ok, _, stderr) = run(mode);
+            assert!(ok, "claude rejects --permission-mode {mode}: {stderr}");
+        }
     }
 }
 

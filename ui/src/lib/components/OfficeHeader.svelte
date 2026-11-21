@@ -1,6 +1,7 @@
 <script lang="ts">
     // The header of the office: logo, name, path, description, and the buttons "Run the setup
     // agent" and "New logo". A failed logo shows its error. `NO_KEY:` shows a field for the key.
+    import { resumeButton } from "$lib/resume";
     import { store } from "$lib/store.svelte";
     import { SETUP_SLUG, type CliKind } from "$lib/types";
     import Spinner from "./Spinner.svelte";
@@ -17,6 +18,17 @@
     // True from the click on "claude" or "codex" until the command returns (see store.launch).
     const setupBusy = $derived(store.isBusy(SETUP_SLUG));
     const needsSetup = $derived(view !== null && !view.description && !setupRunning);
+
+    // The button "Resume the last team (N)" (docs/ipc-m3.md). The app resumes one employee at a time.
+    const resume = $derived(resumeButton(view?.resumable ?? [], view?.resumeProgress ?? null));
+    let resumeBusy = $state(false);
+
+    async function resumeTeam(): Promise<void> {
+        if (resumeBusy || resume.busy) return;
+        resumeBusy = true;
+        await store.resumeTeam();
+        resumeBusy = false;
+    }
 
     let askCli = $state(false);
     let logoForm = $state(false);
@@ -98,6 +110,21 @@
         <button type="button" class="newlogo" aria-expanded={logoForm} disabled={busy} onclick={toggleLogoForm}>
             {busy ? "Making a logo..." : "New logo"}
         </button>
+        {#if resume.visible}
+            <button
+                type="button"
+                class="resume-team"
+                class:primary={!resume.busy}
+                data-testid="resume-team"
+                disabled={resume.busy || resumeBusy}
+                aria-busy={resume.busy}
+                title="Resume the sessions that were live when the app closed, one by one"
+                onclick={resumeTeam}
+            >
+                {#if resume.busy || resumeBusy}<Spinner size={11} />{/if}
+                {resume.text}
+            </button>
+        {/if}
     </div>
 
     {#if needsSetup}

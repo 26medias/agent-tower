@@ -4,13 +4,21 @@
     import { store } from "$lib/store.svelte";
     import {
         STATUS_CHOICES,
+        canDiscard,
+        canMerge,
+        diffPlaceholder,
+        diffText,
         eventText,
         formatTime,
+        hasBranch,
         personName,
+        shortCommit,
         statusLabel,
         taskLabel,
+        worktreePath,
     } from "$lib/tasks";
-    import type { TaskStatus } from "$lib/types";
+    import type { TaskMerge, TaskStatus } from "$lib/types";
+    import ConfirmButton from "./ConfirmButton.svelte";
 
     const current = $derived(
         store.taskDetail && store.taskDetail.path === store.openPath && store.taskDetail.detail.task.id === store.openTaskId
@@ -27,6 +35,39 @@
     let note = $state("");
     let busy = $state(false);
     let seen = $state<string>("");
+    // The git actions (docs/ipc-m3.md). `lastMerge` is the answer of the last merge of this task.
+    let gitBusy = $state(false);
+    let lastMerge = $state<{ id: number; result: TaskMerge } | null>(null);
+
+    const diffOpen = $derived(
+        task !== null && store.taskDiff !== null && store.taskDiff.path === store.openPath && store.taskDiff.id === task.id,
+    );
+    const diff = $derived(diffOpen ? (store.taskDiff?.diff ?? null) : null);
+    const diffError = $derived(diffOpen ? (store.taskDiff?.error ?? null) : null);
+    const merged = $derived(task !== null && lastMerge !== null && lastMerge.id === task.id ? lastMerge.result : null);
+
+    async function toggleDiff(): Promise<void> {
+        if (!task) return;
+        if (diffOpen) store.hideDiff();
+        else await store.showDiff(task.id);
+    }
+
+    async function merge(): Promise<void> {
+        if (!task || gitBusy) return;
+        gitBusy = true;
+        const id = task.id;
+        const result = await store.mergeTask(id);
+        gitBusy = false;
+        lastMerge = result ? { id, result } : null;
+    }
+
+    async function discard(): Promise<void> {
+        if (!task || gitBusy) return;
+        gitBusy = true;
+        await store.discardTask(task.id);
+        gitBusy = false;
+        lastMerge = null;
+    }
 
     $effect(() => {
         if (!task) return;
@@ -83,6 +124,64 @@
                 <dt>Changed</dt>
                 <dd>{formatTime(task.updatedAt)}</dd>
             </dl>
+
+            {#if hasBranch(task)}
+                {@const wt = worktreePath(store.openPath ?? "", task)}
+                <h4>Git branch</h4>
+                <dl class="meta" data-testid="branch-info">
+                    <dt>Branch</dt>
+                    <dd class="mono" data-testid="detail-branch">{task.branch}</dd>
+                    <dt>Started from</dt>
+                    <dd class="mono">{task.baseBranch} at {shortCommit(task.baseCommit)}</dd>
+                    <dt>Worktree</dt>
+                    <dd class="mono" data-testid="detail-worktree">{wt ?? "removed"}</dd>
+                </dl>
+                <div class="git-actions">
+                    <button type="button" data-testid="show-diff" aria-expanded={diffOpen} onclick={toggleDiff}>
+                        {diffOpen ? "Hide diff" : "Show diff"}
+                    </button>
+                    {#if canMerge(task)}
+                        <button
+                            type="button"
+                            class="primary"
+                            data-testid="merge"
+                            disabled={gitBusy}
+                            title="Merge the branch into {task.baseBranch}. The app removes the worktree and sets the task to done."
+                            onclick={merge}
+                        >
+                            Merge
+                        </button>
+                    {/if}
+                    {#if canDiscard(task)}
+                        <ConfirmButton
+                            label="Discard"
+                            confirmLabel="Discard? Click again"
+                            class="discard"
+                            title="Remove the worktree and the branch. The work on them is lost."
+                            onconfirm={discard}
+                        />
+                    {/if}
+                </div>
+                {#if merged}
+                    <p class="merge-note" class:blocked={!merged.merged} data-testid="merge-result" data-merged={merged.merged}>
+                        {merged.message}
+                    </p>
+                {/if}
+                {#if diffOpen}
+                    {#if diffError}
+                        <p class="error">{diffError}</p>
+                    {:else if diff === null}
+                        <p class="dim">Loading the diff...</p>
+                    {:else}
+                        {@const placeholder = diffPlaceholder(diff)}
+                        {#if placeholder}
+                            <p class="dim" data-testid="diff-placeholder">{placeholder}</p>
+                        {:else}
+                            <pre class="diff" aria-label="Diff text" data-testid="diff-box">{diffText(diff)}</pre>
+                        {/if}
+                    {/if}
+                {/if}
+            {/if}
 
             <h4>Description</h4>
             {#if task.description.trim() === ""}
@@ -314,6 +413,37 @@
 
     .row select {
         flex: 1;
+    }
+
+    .git-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+    }
+
+    .merge-note {
+        margin: 6px 0 0;
+        color: var(--ok);
+        overflow-wrap: anywhere;
+    }
+
+    .merge-note.blocked {
+        color: var(--danger);
+    }
+
+    /* Plain text, monospace, with a scroll in both directions. */
+    .diff {
+        max-height: 260px;
+        margin: 6px 0 0;
+        padding: 8px;
+        overflow: auto;
+        white-space: pre;
+        font-family: var(--mono);
+        font-size: 11px;
+        background: var(--bg-deep);
+        border: 1px solid var(--line);
+        border-radius: 6px;
     }
 
     .status-form {

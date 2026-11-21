@@ -3,6 +3,7 @@
 pub mod adapter;
 pub mod app;
 pub mod env;
+pub mod gitwork;
 pub mod hookrx;
 pub mod login_env;
 pub mod logo;

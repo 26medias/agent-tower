@@ -4,6 +4,9 @@ This file is the contract for the task board. It adds to `docs/ipc-m1.md`. The c
 file stay: Tauri commands (`invoke`), snake_case command names, JSON with camelCase field names,
 and a failed command returns a string that a person can read.
 
+M3 adds fields to `TaskView` (`branch`, `baseBranch`, `baseCommit`, `worktree`), the event kind
+`worktree`, and the commands `task_merge`, `task_diff` and `task_discard`: see `docs/ipc-m3.md`.
+
 The tools that the employees use (`task_create`, `task_assign`, `task_update`, `task_get`,
 `task_list`, `task_comment`) are MCP tools of the app. They are in `docs/spec.md` (4.4). This file
 is about the commands of the operator, and the event.
