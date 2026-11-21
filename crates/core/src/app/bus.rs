@@ -732,7 +732,7 @@ pub(crate) fn codex_permission_instructions(
                 reports.display()
             )),
             PermissionPolicy::EditInWorktree => text.push_str(&format!(
-                "Your policy is edit-in-worktree. This floor is not a git repository, so you edit the project folder `{}` directly. You can write there and in the temporary folders (`/tmp`).\n",
+                "Your policy is edit-in-worktree. This floor is not a git repository, so you edit the project folder `{}` directly. You can write there and in the temporary folders (`/tmp`). The files of the app (`.swarm/floor.toml`, `.swarm/employees`, `.swarm/assets` and `.swarm/state`) are read-only.\n",
                 floor.display()
             )),
         }

@@ -16,13 +16,18 @@
 //!   | Policy | Sandbox flags |
 //!   |---|---|
 //!   | `read-only` | a permission profile that extends `:read-only`, and `write` only for `.swarm/reports` |
-//!   | `edit-in-worktree`, git floor with worktrees | the same profile, with `write` for `.swarm/worktrees`, `.swarm/reports`, `:slash_tmp` and `:tmpdir` |
-//!   | `edit-in-worktree`, no git repository | `-s workspace-write` (the floor folder is the workspace) |
+//!   | `edit-in-worktree`, git floor with worktrees | the same profile, with `read` for the floor folder, and `write` for `.swarm/worktrees`, `.swarm/reports`, `:slash_tmp` and `:tmpdir` |
+//!   | `edit-in-worktree`, no git repository | a profile that extends `:workspace` (the floor folder is writable), with `read` for `.swarm/floor.toml`, `.swarm/employees`, `.swarm/assets` and `.swarm/state` |
 //!
 //!   The mode `-s workspace-write` always makes the working folder writable, and the session runs
 //!   in the main checkout, so a git floor needs the profile: it is the only way to keep the main
 //!   checkout read-only (PROBED with `codex debug prompt-input`, which renders the sandbox that
-//!   Codex would use and starts no model). The profile is a beta feature of Codex.
+//!   Codex would use and starts no model). The profile is a beta feature of Codex. In a git
+//!   floor the entry `read` for the floor folder is needed: `:slash_tmp` and `:tmpdir` are
+//!   `write`, so a floor folder inside `/tmp` or `$TMPDIR` would be writable without it (the
+//!   more specific entry wins; PROBED live on 2026-11-21 with `codex sandbox`). Without a git
+//!   repository, `-s workspace-write` would leave the protected `.swarm` files writable (PROBED
+//!   in the same way), so that case is a profile too.
 //!
 //! `ask-always` does not exist for Codex in either case: the adapter returns an error. `-a`
 //! has `on-request` and `never` only. `approval_policy = "untrusted"` ends with "no longer
@@ -180,10 +185,13 @@ fn push_permissions(args: &mut Vec<OsString>, ctx: &StartContext, cwd: &str) {
     let reports = format!("{cwd}/.swarm/reports");
     let worktrees = format!("{cwd}/.swarm/worktrees");
     match ctx.employee.permission {
-        PermissionPolicy::ReadOnly => push_profile(args, &[(&reports, "write")]),
+        PermissionPolicy::ReadOnly => push_profile(args, ":read-only", &[(&reports, "write")]),
         PermissionPolicy::EditInWorktree if ctx.worktrees => push_profile(
             args,
+            ":read-only",
             &[
+                // The main checkout stays read-only also when it is inside `/tmp` or `$TMPDIR`.
+                (cwd, "read"),
                 (&reports, "write"),
                 (&worktrees, "write"),
                 (":slash_tmp", "write"),
@@ -191,25 +199,43 @@ fn push_permissions(args: &mut Vec<OsString>, ctx: &StartContext, cwd: &str) {
             ],
         ),
         PermissionPolicy::EditInWorktree => {
-            args.push("-s".into());
-            args.push("workspace-write".into());
+            // No git repository: the floor folder is the workspace. The files that the app
+            // owns stay read-only, as the Claude settings deny them (a folder that does not
+            // exist is no problem for the CLI).
+            let protected: Vec<String> = PROTECTED_SWARM_PATHS
+                .iter()
+                .map(|each| format!("{cwd}/.swarm/{each}"))
+                .collect();
+            let entries: Vec<(&str, &str)> = protected
+                .iter()
+                .map(|each| (each.as_str(), "read"))
+                .collect();
+            push_profile(args, ":workspace", &entries);
         }
         // `build_args` refuses `ask-always` before it gets here.
         PermissionPolicy::AskAlways => {}
     }
 }
 
-/// A permission profile that starts from `:read-only` (the filesystem is readable) and gives
-/// `write` to the listed paths. A path or a special token is a key of the `filesystem` table.
-/// Without `extends`, Codex does not read the project files through the sandbox.
-fn push_profile(args: &mut Vec<OsString>, writes: &[(&str, &str)]) {
+/// The files and folders under `.swarm/` that the app owns. A Codex employee must not write
+/// them (the Claude settings deny the file tools for the same names).
+const PROTECTED_SWARM_PATHS: [&str; 4] = ["floor.toml", "employees", "assets", "state"];
+
+/// A permission profile that starts from `extends` (`:read-only`: the file system is readable;
+/// `:workspace`: the working folder is writable too) and sets the access of the listed paths. A
+/// path or a special token is a key of the `filesystem` table. Without `extends`, Codex does not
+/// read the project files through the sandbox.
+fn push_profile(args: &mut Vec<OsString>, extends: &str, writes: &[(&str, &str)]) {
     push_config(
         args,
         format!("default_permissions={}", toml_string(PROFILE_NAME)),
     );
     push_config(
         args,
-        format!("permissions.{PROFILE_NAME}.extends=\":read-only\""),
+        format!(
+            "permissions.{PROFILE_NAME}.extends={}",
+            toml_string(extends)
+        ),
     );
     let entries: Vec<String> = writes
         .iter()

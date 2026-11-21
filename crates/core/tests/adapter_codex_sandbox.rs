@@ -89,10 +89,12 @@ fn edit_in_worktree_in_a_git_floor_gets_the_worktrees_reports_and_temp_folders()
             "-c",
             EXTENDS,
             "-c",
-            r#"permissions.agent_tower.filesystem={"/work/floor/wt1/.swarm/reports"="write","/work/floor/wt1/.swarm/worktrees"="write",":slash_tmp"="write",":tmpdir"="write"}"#,
+            r#"permissions.agent_tower.filesystem={"/work/floor/wt1"="read","/work/floor/wt1/.swarm/reports"="write","/work/floor/wt1/.swarm/worktrees"="write",":slash_tmp"="write",":tmpdir"="write"}"#,
         ])
     );
-    // The main checkout (the working folder) has no write entry.
+    // The main checkout (the working folder) is `read`, and it has no write entry. The `read`
+    // entry is needed: `:slash_tmp` and `:tmpdir` are `write`, so a floor inside `/tmp` would
+    // be writable without it (`the_real_codex_blocks_a_write_in_the_floor_that_is_inside_tmp`).
     assert!(
         !args
             .iter()
@@ -101,12 +103,22 @@ fn edit_in_worktree_in_a_git_floor_gets_the_worktrees_reports_and_temp_folders()
 }
 
 #[test]
-fn edit_in_worktree_without_a_repository_gets_the_workspace_write_mode() {
+fn edit_in_worktree_without_a_repository_gets_a_workspace_profile_with_the_app_files_read_only() {
     let args = args_of(&ctx(PermissionPolicy::EditInWorktree, false, true));
     assert_eq!(
         permission_part(&args),
-        strings(&["-a", "on-request", "-s", "workspace-write"])
+        strings(&[
+            "-a",
+            "on-request",
+            "-c",
+            PROFILE,
+            "-c",
+            "permissions.agent_tower.extends=\":workspace\"",
+            "-c",
+            r#"permissions.agent_tower.filesystem={"/work/floor/wt1/.swarm/floor.toml"="read","/work/floor/wt1/.swarm/employees"="read","/work/floor/wt1/.swarm/assets"="read","/work/floor/wt1/.swarm/state"="read"}"#,
+        ])
     );
+    assert!(!args.iter().any(|a| a == "-s" || a == "workspace-write"));
 }
 
 #[test]
@@ -176,7 +188,8 @@ fn a_folder_with_special_characters_stays_one_toml_key() {
         filesystem["/work/a \"b\" \\c/floor/.swarm/worktrees"].as_str(),
         Some("write")
     );
-    assert_eq!(filesystem.len(), 4);
+    assert_eq!(filesystem.len(), 5);
+    assert_eq!(filesystem["/work/a \"b\" \\c/floor"].as_str(), Some("read"));
 }
 
 // ---- the real codex, no model ----
@@ -284,4 +297,107 @@ fn the_real_codex_renders_the_sandbox_that_each_case_asks_for() {
         "{plain:?}"
     );
     assert!(has_root_read(&plain), "{plain:?}");
+}
+
+// ---- the real codex and the real sandbox, no model ----
+
+/// Run `script` (a shell script, with the floor folder as `$1`) in the sandbox that the plan
+/// asks for, with `codex sandbox` (it starts no model). `None` when `codex` is not installed or
+/// the Codex sandbox does not work on this machine (the same probe as the app).
+fn run_in_sandbox(codex_ctx: &StartContext, script: &str) -> Option<String> {
+    let bwrap_works = std::process::Command::new("bwrap")
+        .args(["--unshare-user", "--ro-bind", "/", "/", "true"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !bwrap_works {
+        eprintln!("skipped: the Codex sandbox does not work on this machine");
+        return None;
+    }
+    let home = TempDir::new().expect("a Codex home");
+    let plan = CodexAdapter.start(codex_ctx).expect("plan");
+    let all = plan.spec.args.clone();
+    // The flags of the permissions only: from `-a on-request` to the message.
+    let from = all.iter().position(|a| a == "-a").expect("an -a flag");
+    let mut args: Vec<OsString> = all[from + 2..all.len() - 1].to_vec();
+    args.extend(["sandbox", "--", "sh", "-c", script, "sh"].map(OsString::from));
+    args.push(codex_ctx.cwd.as_os_str().to_owned());
+    let mut env = plan.spec.env.clone();
+    env.insert(os("CODEX_HOME"), home.path().as_os_str().to_owned());
+    let (ok, stdout, stderr) = run_plan_command(&plan.spec.program, &args, &env, &codex_ctx.cwd);
+    assert!(ok, "codex sandbox failed: {stderr}");
+    Some(stdout)
+}
+
+const WRITE_SCRIPT: &str = r#"
+try() { if (echo X > "$2") 2>/dev/null; then echo "$1=ok"; else echo "$1=blocked"; fi; }
+mkdir -p "$1/.swarm/reports" "$1/.swarm/worktrees" "$1/.swarm/employees" 2>/dev/null
+try main "$1/main.txt"
+try reports "$1/.swarm/reports/r.md"
+try worktree "$1/.swarm/worktrees/w.txt"
+try floor_toml "$1/.swarm/floor.toml"
+try employees "$1/.swarm/employees/e.toml"
+"#;
+
+#[test]
+fn the_real_codex_blocks_a_write_in_the_floor_that_is_inside_tmp() {
+    let Some(programs) = real_programs() else {
+        return;
+    };
+    // `TempDir` is inside `/tmp` (or `$TMPDIR`): the floor is under `:slash_tmp`.
+    let floor = TempDir::new().expect("a floor");
+    let root = floor.path().canonicalize().expect("real path");
+    std::fs::create_dir_all(root.join(".swarm/reports")).unwrap();
+    std::fs::create_dir_all(root.join(".swarm/worktrees")).unwrap();
+    std::fs::create_dir_all(root.join(".swarm/employees")).unwrap();
+    std::fs::write(root.join(".swarm/floor.toml"), "[floor]\n").unwrap();
+    let with = |policy, worktrees| {
+        let mut c = ctx(policy, worktrees, true);
+        c.programs = programs.clone();
+        c.parent_env = current_env();
+        c.cwd = root.clone();
+        c.hook_program = hook_bin();
+        c.first_message = Some("x".into());
+        c.instructions = None;
+        c
+    };
+    // git floor, edit-in-worktree: the main checkout and the app files are read-only; the
+    // reports and the worktrees are writable.
+    let Some(out) = run_in_sandbox(&with(PermissionPolicy::EditInWorktree, true), WRITE_SCRIPT)
+    else {
+        return;
+    };
+    for line in [
+        "main=blocked",
+        "floor_toml=blocked",
+        "employees=blocked",
+        "reports=ok",
+        "worktree=ok",
+    ] {
+        assert!(
+            out.lines().any(|l| l == line),
+            "{line} is missing in: {out}"
+        );
+    }
+    // read-only: only the reports folder is writable.
+    let out = run_in_sandbox(&with(PermissionPolicy::ReadOnly, true), WRITE_SCRIPT).unwrap();
+    for line in ["main=blocked", "worktree=blocked", "reports=ok"] {
+        assert!(
+            out.lines().any(|l| l == line),
+            "{line} is missing in: {out}"
+        );
+    }
+    // no git repository: the floor folder is writable, the app files are not.
+    let out = run_in_sandbox(&with(PermissionPolicy::EditInWorktree, false), WRITE_SCRIPT).unwrap();
+    for line in [
+        "main=ok",
+        "reports=ok",
+        "floor_toml=blocked",
+        "employees=blocked",
+    ] {
+        assert!(
+            out.lines().any(|l| l == line),
+            "{line} is missing in: {out}"
+        );
+    }
 }
