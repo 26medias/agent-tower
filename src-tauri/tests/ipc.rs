@@ -113,12 +113,18 @@ struct App {
 }
 
 fn app() -> App {
+    app_with(None)
+}
+
+/// An app whose Tower checks the floor folders every `watch` (`None`: no watcher).
+fn app_with(watch: Option<Duration>) -> App {
     let dir = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(dir.path()).unwrap();
     let cwd = base.join("project");
     std::fs::create_dir(&cwd).unwrap();
     let mut config = TowerConfig::new(base.join("config"));
     config.socket_path = Some(base.join("hook.sock"));
+    config.floor_watch = watch;
     config.hook_program = Some(bin("tower-hook"));
     config.resolver = Resolver {
         shell: None,
@@ -158,6 +164,7 @@ fn app() -> App {
         "floor-changed",
         "employee-started",
         "tasks-changed",
+        "notice",
     ] {
         let events = Arc::clone(&events);
         app.listen(name, move |event| {
@@ -216,6 +223,29 @@ impl App {
             .filter(|(name, _)| name == "session-changed")
             .map(|(_, payload)| payload.clone())
             .collect()
+    }
+
+    /// The payloads of the events with this name, oldest first.
+    fn events_named(&self, name: &str) -> Vec<Value> {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(event, _)| event == name)
+            .map(|(_, payload)| payload.clone())
+            .collect()
+    }
+
+    fn wait_named(&self, name: &str, what: &str, test: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !self.events_named(name).iter().any(&test) {
+            assert!(
+                Instant::now() < deadline,
+                "timeout: {what}. Events: {:?}",
+                self.events_named(name)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn wait_event(&self, what: &str, test: impl Fn(&Value) -> bool) {
@@ -902,4 +932,116 @@ fn the_task_commands_work_through_the_ipc_and_each_change_sends_tasks_changed() 
     )
     .unwrap_err();
     let _ = &app.dir;
+}
+
+#[test]
+fn a_path_that_cannot_be_a_floor_gives_a_plain_error_text_with_a_stable_prefix() {
+    let app = app();
+    let open = |path: &str| app.call("floor_open", json!({ "path": path })).unwrap_err();
+    assert_eq!(
+        open("relative/folder"),
+        "NOT_ABSOLUTE: Type the full path of the folder, for example /home/you/project."
+    );
+    let missing = app.cwd.join("missing");
+    assert_eq!(
+        open(missing.to_str().unwrap()),
+        format!(
+            "NOT_FOUND: The folder {} does not exist.",
+            missing.display()
+        )
+    );
+    let file = app.cwd.join("a-file");
+    std::fs::write(&file, "x").unwrap();
+    assert_eq!(
+        open(file.to_str().unwrap()),
+        format!("NOT_A_FOLDER: {} is a file, not a folder.", file.display())
+    );
+    let error = app
+        .call(
+            "floor_create",
+            json!({ "path": "relative/folder", "name": "X" }),
+        )
+        .unwrap_err();
+    assert!(error.starts_with("NOT_ABSOLUTE:"), "{error}");
+    // `~` is the home folder of the environment of the Tower (`/tmp` in this test).
+    assert_eq!(
+        open("~/agent-tower-no-such-folder"),
+        "NOT_FOUND: The folder /tmp/agent-tower-no-such-folder does not exist."
+    );
+    // A good folder with no `.swarm/` keeps the old signal.
+    let error = open(app.cwd.to_str().unwrap());
+    assert!(error.starts_with("NO_FLOOR:"), "{error}");
+}
+
+#[test]
+fn a_floor_whose_folder_is_gone_has_the_flag_the_events_and_the_error_text() {
+    let app = app_with(Some(Duration::from_millis(25)));
+    let path = app.path();
+    let floor = app
+        .call("floor_create", json!({ "path": path, "name": "Acme" }))
+        .unwrap();
+    assert_eq!(floor["gone"], json!(false));
+    assert_eq!(
+        app.call("floor_open", json!({ "path": path })).unwrap()["gone"],
+        json!(false)
+    );
+
+    let moved = app.dir.path().join("moved");
+    std::fs::rename(&app.cwd, &moved).unwrap();
+    app.wait_named("notice", "the notice floor_gone", |n| {
+        n["kind"] == "floor_gone"
+    });
+    let notice = app.events_named("notice").remove(0);
+    assert_eq!(notice["path"], json!(path));
+    assert_eq!(
+        notice["text"],
+        json!(format!("The folder of the floor Acme is gone: {path}."))
+    );
+    assert!(
+        app.events_named("floor-changed")
+            .contains(&json!({ "path": path }))
+    );
+
+    // The view of the gone floor is the last one, with `gone: true`.
+    let view = app.call("floor_open", json!({ "path": path })).unwrap();
+    assert_eq!(view["gone"], json!(true));
+    assert_eq!(view["name"], json!("Acme"));
+    assert_eq!(view["employees"].as_array().unwrap().len(), 2);
+    let list = app.call("floor_list", json!({})).unwrap();
+    assert_eq!(list[0]["missing"], json!(true));
+    let error = app
+        .call(
+            "task_create",
+            json!({ "path": path, "title": "t", "description": "d" }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        format!("FLOOR_GONE: The folder of this floor is gone: {path}.")
+    );
+
+    // The folder comes back.
+    std::fs::rename(&moved, &app.cwd).unwrap();
+    app.wait_named("notice", "the notice floor_back", |n| {
+        n["kind"] == "floor_back"
+    });
+    let back: Vec<Value> = app
+        .events_named("notice")
+        .into_iter()
+        .filter(|n| n["kind"] == "floor_back")
+        .collect();
+    assert_eq!(back.len(), 1);
+    assert_eq!(
+        back[0]["text"],
+        json!(format!("The folder of the floor Acme is back: {path}."))
+    );
+    assert_eq!(
+        app.call("floor_open", json!({ "path": path })).unwrap()["gone"],
+        json!(false)
+    );
+    app.call(
+        "task_create",
+        json!({ "path": path, "title": "t", "description": "d" }),
+    )
+    .unwrap();
 }

@@ -76,15 +76,10 @@ fn spawn_writer(tower: Shared, session_id: String) -> Sender<Vec<u8>> {
     sender
 }
 
-/// `~` and `~/x` mean the home folder (the UI has a text field for the path).
+/// The path as typed, with no spaces at the ends. The Tower expands `~` and `~/x` to the home
+/// folder in `floor_open` and `floor_create` (`docs/ipc-final.md`), and it checks the path there.
 fn path_of(text: &str) -> PathBuf {
-    let text = text.trim();
-    if let Some(rest) = text.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(text)
+    PathBuf::from(text.trim())
 }
 
 fn error_text(error: TowerError) -> String {
@@ -529,12 +524,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tilde_means_home() {
-        // SAFETY of the test: it reads `HOME` only.
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        if let Some(home) = home {
-            assert_eq!(path_of("~/x/y"), home.join("x/y"));
-        }
+    fn the_path_is_trimmed_and_the_tilde_is_left_to_the_tower() {
+        // The Tower expands `~` (it knows the home folder of its environment), so a test can
+        // set a fake home. See `floor_open` in `crates/core/src/app/mod.rs`.
+        assert_eq!(path_of("~/x/y"), PathBuf::from("~/x/y"));
         assert_eq!(path_of("  /a/b "), PathBuf::from("/a/b"));
         assert_eq!(path_of("rel"), PathBuf::from("rel"));
     }

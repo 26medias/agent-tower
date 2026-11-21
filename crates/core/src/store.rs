@@ -1266,6 +1266,20 @@ fn require_one(changed: usize, app_session_id: &str) -> Result<(), StoreError> {
 // The floor handle
 // ---------------------------------------------------------------------------------------------
 
+/// The one rule for "the floor is gone": the folder, its `.swarm/` folder or `.swarm/floor.toml`
+/// does not exist at this path. Checking the file covers the two folders, because a path that
+/// has a file also has the folders above it. A check that fails for another reason (for example,
+/// no permission) is not "gone": the app cannot tell, so it does not say that the floor is gone.
+pub fn floor_is_gone(cwd: &Path) -> bool {
+    match fs::metadata(cwd.join(SWARM_DIR).join(FLOOR_FILE)) {
+        Ok(_) => false,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
 /// One open floor: the `.swarm/` folder of one CWD, and its database.
 /// (The data of `floor.toml` is `model::Floor`; this is the handle to the files.)
 #[derive(Debug)]
@@ -1497,7 +1511,7 @@ struct FloorsFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloorEntry {
     pub path: PathBuf,
-    /// The folder does not exist now. The entry stays in the list.
+    /// The floor is gone now (see [`floor_is_gone`]). The entry stays in the list.
     pub missing: bool,
 }
 
@@ -1565,15 +1579,15 @@ impl FloorList {
         Ok(true)
     }
 
-    /// The floors in the order they were added. A path whose folder does not exist is
-    /// marked `missing` and is not removed.
+    /// The floors in the order they were added. A path whose floor is gone (see [`floor_is_gone`])
+    /// is marked `missing` and is not removed. The mark is computed at each call.
     pub fn list(&self) -> Result<Vec<FloorEntry>, StoreError> {
         Ok(self
             .load()?
             .floors
             .into_iter()
             .map(|path| FloorEntry {
-                missing: !path.is_dir(),
+                missing: floor_is_gone(&path),
                 path,
             })
             .collect())
@@ -2434,17 +2448,26 @@ mod tests {
 
         let here = floors.path().join("here");
         let gone = floors.path().join("gone");
-        fs::create_dir(&here).unwrap();
-        fs::create_dir(&gone).unwrap();
+        for folder in [&here, &gone] {
+            fs::create_dir_all(folder.join(SWARM_DIR)).unwrap();
+            fs::write(folder.join(SWARM_DIR).join(FLOOR_FILE), "name = \"x\"\n").unwrap();
+        }
         assert!(list.add(&here).unwrap());
         assert!(list.add(&gone).unwrap());
         assert!(!list.add(&here).unwrap(), "no duplicate");
-        fs::remove_dir(&gone).unwrap();
+        fs::remove_dir_all(&gone).unwrap();
 
         let entries = list.list().unwrap();
         assert_eq!(entries.len(), 2);
         assert!(!entries[0].missing);
         assert!(entries[1].missing, "a missing folder is reported");
+
+        // The folder is there but `.swarm/floor.toml` is not: the floor is gone too. It is
+        // computed at each call, so a restored file clears the mark at once.
+        fs::remove_file(here.join(SWARM_DIR).join(FLOOR_FILE)).unwrap();
+        assert!(list.list().unwrap()[0].missing);
+        fs::write(here.join(SWARM_DIR).join(FLOOR_FILE), "name = \"x\"\n").unwrap();
+        assert!(!list.list().unwrap()[0].missing);
         assert!(
             entries[1].path.ends_with("gone"),
             "and it stays in the list"

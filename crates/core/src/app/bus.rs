@@ -927,6 +927,8 @@ impl TowerCore {
         args: &Value,
         claims: &mut Vec<Claim>,
     ) -> Result<String, String> {
+        // A floor that is gone: every tool answers `FLOOR_GONE:` first, and writes nothing.
+        self.floor_handle(&who.path).map_err(|e| e.to_string())?;
         let text_arg = |key: &str| -> Result<String, String> {
             args.get(key)
                 .and_then(Value::as_str)

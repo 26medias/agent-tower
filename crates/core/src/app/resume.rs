@@ -101,9 +101,12 @@ impl Drop for ProgressGuard {
 }
 
 impl TowerCore {
-    /// The floor handle if the floor is open. It never opens a floor.
+    /// The floor handle if the floor is open and its folder is there. It never opens a floor. A
+    /// floor that is gone gives `None`: the app writes nothing to its database handle.
     fn open_floor(&self, path: &Path) -> Option<Arc<FloorHandle>> {
-        locked(&self.floors).get(path).cloned()
+        let floor = locked(&self.floors).get(path).cloned()?;
+        self.check_alive(&floor).ok()?;
+        Some(floor)
     }
 
     /// Store the employees that are live now, for each floor. It runs at the start of `shutdown`,

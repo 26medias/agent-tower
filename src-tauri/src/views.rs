@@ -191,6 +191,10 @@ pub struct FloorView {
     pub resumable: Vec<String>,
     /// The background resume of the last team. `null` when none runs.
     pub resume_progress: Option<ResumeProgress>,
+    /// The folder of the floor is gone (`docs/ipc-final.md`). Then the other fields are the last
+    /// known ones. `false` in normal use.
+    #[serde(default)]
+    pub gone: bool,
 }
 
 /// How far the resume of the last team is (`docs/ipc-m3.md`).
@@ -314,6 +318,7 @@ impl From<app::FloorView> for FloorView {
             defaults: view.defaults.into(),
             resumable: view.resumable,
             resume_progress: view.resume_progress.map(ResumeProgress::from),
+            gone: view.gone,
         }
     }
 }
@@ -699,6 +704,7 @@ mod tests {
             },
             resumable: vec!["pm".into(), "eng".into()],
             resume_progress: Some(ResumeProgress { done: 1, total: 2 }),
+            gone: true,
         };
         assert_eq!(
             to_json(&floor),
@@ -712,7 +718,8 @@ mod tests {
                     "cli": "codex", "model": "gpt-6-luna", "effort": null, "policy": "ask_always"
                 },
                 "resumable": ["pm", "eng"],
-                "resumeProgress": {"done": 1, "total": 2}
+                "resumeProgress": {"done": 1, "total": 2},
+                "gone": true
             })
         );
         let entry = FloorEntry {

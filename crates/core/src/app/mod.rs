@@ -34,6 +34,8 @@
 //! from the output thread of the session, with no lock held.
 
 mod bus;
+mod floors_watch;
+mod folder;
 mod live;
 mod logo_run;
 mod mcp;
@@ -61,7 +63,7 @@ use crate::programs::Resolver;
 use crate::pty::LogConfig;
 use crate::session::{HookRouter, PasteRefused, Session};
 use crate::status::Status;
-use crate::store::{Database, FloorList, FloorStore, StoreError};
+use crate::store::{Database, FloorList, FloorStore, StoreError, floor_is_gone};
 use live::{Live, LiveParts, Notifier, locked, now_ms, read_log_tail, spawn_pumps};
 use logo_run::{LogoEnv, LogoState};
 use std::collections::{HashMap, HashSet};
@@ -107,6 +109,9 @@ pub const FLOOR_INIT: &str = include_str!("floor_init.md");
 /// The first message of the setup session.
 pub const SETUP_FIRST_MESSAGE: &str = "Start the floor setup.";
 
+/// The default pause of the watcher of the floor folders.
+pub const FLOOR_WATCH_PAUSE: Duration = Duration::from_secs(3);
+
 /// How long `shutdown` waits for the processes to end before it uses `SIGKILL`.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
@@ -119,13 +124,23 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// Every error of the Tower. `Display` is the text that the operator reads. The text of
 /// `NoFloor` starts with `NO_FLOOR:` and the text of `Refused` starts with `REFUSED:`, as the
-/// contract says.
+/// contract says. The path errors and `FloorGone` have the prefixes of `docs/ipc-final.md`.
 #[derive(Debug, thiserror::Error)]
 pub enum TowerError {
     #[error("NO_FLOOR: there is no floor at {}. The folder has no .swarm/ folder.", .0.display())]
     NoFloor(PathBuf),
     #[error("REFUSED: {0}")]
     Refused(String),
+    #[error("NOT_ABSOLUTE: Type the full path of the folder, for example /home/you/project.")]
+    NotAbsolute,
+    #[error("NOT_FOUND: The folder {} does not exist.", .0.display())]
+    NotFound(PathBuf),
+    #[error("NOT_A_FOLDER: {} is a file, not a folder.", .0.display())]
+    NotAFolder(PathBuf),
+    #[error("NO_WRITE: You cannot write in the folder {}.", .0.display())]
+    NoWrite(PathBuf),
+    #[error("FLOOR_GONE: The folder of this floor is gone: {}.", .0.display())]
+    FloorGone(PathBuf),
     #[error("{slug} already has a live session. Stop it first.")]
     AlreadyLive { slug: String },
     #[error("{slug} has a live session. Stop it first.")]
@@ -215,6 +230,9 @@ pub struct FloorView {
     pub resumable: Vec<String>,
     /// The background resume of the last team runs now (M3).
     pub resume_progress: Option<ResumeProgress>,
+    /// The folder of the floor is gone (see `store::floor_is_gone`). Then the other fields are
+    /// the last known ones. `false` in normal use.
+    pub gone: bool,
 }
 
 /// `FloorEntry` of the contract.
@@ -323,6 +341,10 @@ pub struct TowerConfig {
     /// The pause between two starts of the resume of the last team (spec 4.2, M3). Tests give a
     /// short one.
     pub resume_pause: Duration,
+    /// The pause between two checks of the open floors for a folder that is gone or back. `None`
+    /// turns the watcher off. `TowerConfig::new` gives 3 seconds. Tests give a short pause, or
+    /// `None`.
+    pub floor_watch: Option<Duration>,
 }
 
 impl TowerConfig {
@@ -343,6 +365,7 @@ impl TowerConfig {
             mcp_limits: McpLimits::default(),
             test_hooks: Arc::new(TestHooks::default()),
             resume_pause: resume::RESUME_PAUSE,
+            floor_watch: Some(FLOOR_WATCH_PAUSE),
         }
     }
 }
@@ -366,6 +389,15 @@ struct FloorHandle {
     /// setup hook puts it back when the setup agent changes the table (memory only). Lock order:
     /// `store`, then this one.
     setup_permissions: Mutex<Option<FloorPermissions>>,
+    /// The watcher told the observer that the folder is gone, and did not tell yet that it is
+    /// back (see `floor_watch`).
+    announced_gone: AtomicBool,
+    /// A check saw the floor gone. The database handle in `store` can point at a file that was
+    /// deleted or moved, so the next use opens it again from the path (`check_alive`).
+    stale: AtomicBool,
+    /// The last view that `floor_view` made. `floor_open` gives it, with `gone: true`, when the
+    /// folder is gone.
+    last_view: Mutex<Option<FloorView>>,
 }
 
 impl FloorHandle {
@@ -377,6 +409,9 @@ impl FloorHandle {
             git: Mutex::new(()),
             resume: Mutex::new(None),
             setup_permissions: Mutex::new(None),
+            announced_gone: AtomicBool::new(false),
+            stale: AtomicBool::new(false),
+            last_view: Mutex::new(None),
         }
     }
 
@@ -478,6 +513,10 @@ pub struct TowerCore {
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
     closed: Arc<AtomicBool>,
     resume_pause: Duration,
+    /// The home folder, for `~` in a typed path. From `HOME` of the parent environment.
+    home: Option<PathBuf>,
+    /// The thread that watches the floor folders (`floor_watch`). `shutdown` joins it.
+    watcher: Mutex<Option<thread::JoinHandle<()>>>,
     /// The token of each live session that has the MCP server (see `mcp.rs`).
     tokens: Arc<Mutex<HashMap<String, bus::Identity>>>,
     /// The URL of the MCP endpoint, for example `http://127.0.0.1:41234/mcp`.
@@ -571,6 +610,12 @@ impl Tower {
         let codex_home = config
             .codex_home
             .or_else(|| default_codex_home(&config.parent_env));
+        let home = config
+            .parent_env
+            .get(std::ffi::OsStr::new("HOME"))
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from);
+        let floor_watch = config.floor_watch;
         let (mcp_listener, mcp_addr) =
             mcp::bind().map_err(|e| io_message("cannot bind the MCP endpoint", e))?;
         let mcp_port = mcp_addr.port();
@@ -594,6 +639,8 @@ impl Tower {
             attach_pause: config.attach_pause,
             closed: Arc::new(AtomicBool::new(false)),
             resume_pause: config.resume_pause,
+            home,
+            watcher: Mutex::new(None),
             tokens: Arc::new(Mutex::new(HashMap::new())),
             mcp_url: format!("http://127.0.0.1:{mcp_port}/mcp"),
             mcp_port,
@@ -603,6 +650,11 @@ impl Tower {
         });
         mcp::serve(mcp_listener, Arc::downgrade(&core), config.mcp_limits)
             .map_err(|e| io_message("cannot start the MCP endpoint", e))?;
+        if let Some(pause) = floor_watch {
+            let handle = floors_watch::spawn(Arc::downgrade(&core), pause)
+                .map_err(|e| io_message("cannot start the floor watcher", e))?;
+            *locked(&core.watcher) = Some(handle);
+        }
         Ok(Tower { core })
     }
 }
@@ -646,27 +698,40 @@ impl TowerCore {
             .collect())
     }
 
-    /// Import `{path}/.swarm/`. `TowerError::NoFloor` when there is none.
+    /// Import `{path}/.swarm/`. The path is checked first (`docs/ipc-final.md`): `~` is expanded
+    /// to the home folder, then the errors are `NotAbsolute`, `NotFound`, `NotAFolder` and
+    /// `NoWrite`. `TowerError::NoFloor` when a good folder has no `.swarm/`: the UI offers to
+    /// create the floor then. A floor that this Tower holds, and whose folder is gone, gives its
+    /// last known view with `gone: true`.
     pub fn floor_open(&self, path: &Path) -> Result<FloorView> {
-        let floor = self.floor_handle(path)?;
+        let path = folder::expand_home(path, self.home.as_deref());
+        folder::check_absolute(&path)?;
+        match self.held_floor(&path) {
+            Some(floor) if floor_is_gone(&floor.path) => {
+                floor.stale.store(true, Ordering::SeqCst);
+                return self.gone_view(&floor);
+            }
+            // The Tower opened this floor before and the folder is there now: no new check.
+            Some(_) => {}
+            None => folder::check_folder(&path)?,
+        }
+        let floor = self.floor_handle(&path)?;
         reload(&floor)?;
         self.floor_list.add(&floor.path)?;
         self.floor_view(&floor)
     }
 
-    /// Write a new `.swarm/` with the two default employees `ceo` and `pm`.
+    /// Write a new `.swarm/` with the two default employees `ceo` and `pm`. The path is checked
+    /// like the path of `floor_open`.
     pub fn floor_create(&self, path: &Path, name: &str) -> Result<FloorView> {
+        let path = folder::expand_home(path, self.home.as_deref());
+        folder::check_absolute(&path)?;
+        folder::check_folder(&path)?;
         let name = name.trim();
         if name.is_empty() {
             return Err(other("the floor name is empty"));
         }
-        let key = normalize(path);
-        if !key.is_dir() {
-            return Err(other(format!(
-                "the folder {} does not exist or is not a folder",
-                key.display()
-            )));
-        }
+        let key = normalize(&path);
         let store = FloorStore::create(&key, name)?;
         for employee in default_employees() {
             store.write_employee(&employee)?;
@@ -790,11 +855,70 @@ impl TowerCore {
         Ok(clean)
     }
 
-    /// The open handle of a floor. It opens the floor if it is not open.
+    /// The handle of a floor that this Tower holds. It never opens a floor.
+    fn held_floor(&self, path: &Path) -> Option<Arc<FloorHandle>> {
+        locked(&self.floors).get(&normalize(path)).cloned()
+    }
+
+    /// The gate of every command that reads or writes a floor. `FloorGone` when the folder, its
+    /// `.swarm/` or `floor.toml` is not there (`floor_is_gone`). When the floor was seen gone and
+    /// is there again, it opens the database again from the path: the old handle can point at a
+    /// file that was deleted or moved.
+    fn check_alive(&self, floor: &FloorHandle) -> Result<()> {
+        if floor_is_gone(&floor.path) {
+            floor.stale.store(true, Ordering::SeqCst);
+            return Err(TowerError::FloorGone(floor.path.clone()));
+        }
+        if floor.stale.load(Ordering::SeqCst) {
+            reload(floor)?;
+            floor.stale.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// The last known view of a floor whose folder is gone, with `gone: true`. The sessions that
+    /// still run show their live state, also those that started after the last view was made. A
+    /// session that is not live shows as stopped.
+    fn gone_view(&self, floor: &FloorHandle) -> Result<FloorView> {
+        let Some(mut view) = locked(&floor.last_view).clone() else {
+            return Err(TowerError::FloorGone(floor.path.clone()));
+        };
+        view.gone = true;
+        let registry = locked(&self.registry);
+        for session in &mut view.sessions {
+            let live = registry
+                .live
+                .values()
+                .find(|l| l.path == floor.path && l.slug == session.slug && !l.exited());
+            match live {
+                Some(live) => *session = live.view(),
+                None => {
+                    session.status = Status::Stopped;
+                    session.draft = false;
+                    session.message_waiting = false;
+                }
+            }
+        }
+        // A session that started after the last view was made.
+        for live in registry.live.values() {
+            if live.path == floor.path
+                && !live.exited()
+                && !view.sessions.iter().any(|s| s.slug == live.slug)
+            {
+                view.sessions.push(live.view());
+            }
+        }
+        Ok(view)
+    }
+
+    /// The open handle of a floor. It opens the floor if it is not open. `FloorGone` when the
+    /// floor is open and its folder is gone (see `check_alive`).
     fn floor_handle(&self, path: &Path) -> Result<Arc<FloorHandle>> {
         let key = normalize(path);
-        if let Some(handle) = locked(&self.floors).get(&key) {
-            return Ok(Arc::clone(handle));
+        let held = locked(&self.floors).get(&key).cloned();
+        if let Some(handle) = held {
+            self.check_alive(&handle)?;
+            return Ok(handle);
         }
         let store = FloorStore::open(&key)?;
         repair_orphans(&store);
@@ -913,7 +1037,7 @@ impl TowerCore {
         } else {
             resume::resumable_slugs(&marks, &loaded.employees, &sessions)
         };
-        Ok(FloorView {
+        let view = FloorView {
             path: floor.path.clone(),
             name,
             employees: loaded.employees,
@@ -928,7 +1052,10 @@ impl TowerCore {
             defaults,
             resumable,
             resume_progress,
-        })
+            gone: false,
+        };
+        *locked(&floor.last_view) = Some(view.clone());
+        Ok(view)
     }
 
     // ---- logo and settings ----
@@ -1567,6 +1694,13 @@ impl TowerCore {
     pub fn shutdown(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
+        }
+        // The floor watcher sees `closed` and ends. It is not joined from its own thread.
+        let watcher = locked(&self.watcher).take();
+        if let Some(watcher) = watcher
+            && watcher.thread().id() != thread::current().id()
+        {
+            let _ = watcher.join();
         }
         let lives: Vec<Arc<Live>> = locked(&self.registry).live.values().cloned().collect();
         // M3: remember who is live, BEFORE the sessions are killed.

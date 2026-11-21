@@ -421,6 +421,8 @@ impl Rig {
         });
         // The Codex home is a folder of the test, never the real one. It has no file at first.
         cfg.codex_home = config.parent().map(|base| base.join("codex-home"));
+        // The floor watcher is off by default in tests. A test of the watcher turns it on.
+        cfg.floor_watch = None;
         tweak(&mut cfg);
         let tower = Tower::new(cfg).expect("make the tower");
         for name in ["claude", "codex"] {
