@@ -1125,7 +1125,7 @@ impl TowerCore {
         self.bus.notify();
         if self.live_of(&floor.path, to).is_some() {
             let delivery = self.deliver_pending(&floor.path, to);
-            return delivery_report(target_name, &delivery);
+            return delivery_report(target_name, &delivery, sent.answer_tail);
         }
         if !may {
             return format!(
@@ -1190,7 +1190,7 @@ impl TowerCore {
         };
         let chosen = select_first_messages(&pending, team);
         if chosen.is_empty() {
-            return delivery_report(target_name, &Delivery::Nothing);
+            return delivery_report(target_name, &Delivery::Nothing, sent.answer_tail);
         }
         let ids: Vec<i64> = chosen.iter().map(|m| m.id).collect();
         let in_first = ids.contains(&new_id);
@@ -1246,7 +1246,7 @@ impl TowerCore {
                     // Another thread started the employee first. The message waits in the queue.
                     TowerError::AlreadyLive { .. } => {
                         let delivery = self.deliver_pending(&floor.path, to);
-                        delivery_report(target_name, &delivery)
+                        delivery_report(target_name, &delivery, sent.answer_tail)
                     }
                     other => format!(
                         "The app could not start {target_name}: {other}. Your message is saved and waits. Do not send it again."
@@ -1448,6 +1448,7 @@ impl TowerCore {
                 Status::Stopped => {
                     forget_token(&core.tokens, &token);
                     core.settle_first_message(live, false);
+                    core.forget_mark_after_exit(live);
                 }
                 // The first turn started, so the first message was delivered.
                 Status::Working => core.settle_first_message(live, true),
@@ -1508,13 +1509,22 @@ fn format_waiting(messages: &[MessageRecord], team: &[Employee]) -> String {
         .join("\n\n")
 }
 
-/// The one-line result of a delivery attempt, for the agent that sent the message.
-fn delivery_report(name: &str, delivery: &Delivery) -> String {
+/// The one-line result of a delivery attempt, for the agent that sent the message. `answer_tail`
+/// is true for a message of `send`: the receiver answers with `send`. A task message has other
+/// orders (`task_update`), so the text tells the receiver to follow them.
+fn delivery_report(name: &str, delivery: &Delivery, answer_tail: bool) -> String {
     match delivery {
         Delivery::Delivered(_) => format!("Delivered to {name} now."),
-        Delivery::Waiting(reason) => format!(
-            "The message waits: {reason}. The app delivers it when {name} is idle. {name} answers with the tool send."
-        ),
+        Delivery::Waiting(reason) => {
+            let tail = if answer_tail {
+                format!("{name} answers with the tool send.")
+            } else {
+                format!(
+                    "{name}: follow the orders at the end of the task message, and set the status with the tool task_update."
+                )
+            };
+            format!("The message waits: {reason}. The app delivers it when {name} is idle. {tail}")
+        }
         Delivery::Nothing => format!("The message to {name} was delivered already."),
         Delivery::NotLive => format!("{name} has no live session. The message waits."),
     }

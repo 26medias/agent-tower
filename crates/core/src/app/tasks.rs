@@ -19,6 +19,8 @@
 //! `[task T-12 from <Name> (<Role>)]` (see `bus::format_task_message`). It goes through the same
 //! delivery paths as a message of `send`, so the app starts a stopped assignee by the rules of
 //! `employee_start`. These messages do not count for the loop limit (`kind` is not `message`).
+//! They have a limit of their own: `store::TASK_MESSAGE_LIMIT` for one ordered pair in a rolling
+//! hour (the operator is free). Over it, the tool call is an error and nothing changes.
 //! A start that an assignment causes counts for the start limit, unless the operator assigns.
 //! A status change tells the person who assigned the task, or the creator if nobody assigned it.
 //! It tells nobody when that person is the caller (or the operator).
@@ -31,7 +33,10 @@
 //! keeps the branch, the base branch, the base commit and the worktree folder. The assignment
 //! message tells the assignee the rules (`bus::assign_orders`). When the status goes to `review`,
 //! the app commits the worktree (`gitwork::snapshot`). The merge, the diff and the discard are in
-//! `merge.rs`.
+//! `merge.rs`. If the snapshot finds a file that must not be committed (a secret, build output, a
+//! big file, a nested repository), the task becomes `blocked` and the caller gets the list.
+//! Only `task_merge` sets `done` for a task that has a branch: an employee that asks for it gets
+//! an error (the operator may set any status).
 //!
 //! # Reports
 //!
@@ -63,6 +68,14 @@ pub const TITLE_MAX_CHARS: usize = 200;
 
 /// The longest description, note and comment, in characters.
 pub const TASK_TEXT_MAX_CHARS: usize = 20_000;
+
+/// What the snapshot for a review gave.
+enum ForReview {
+    /// A line for the note of the status event.
+    Line(String),
+    /// The snapshot did not commit: the text of the refusal.
+    Blocked(String),
+}
 
 /// The most bytes of a report file that `task_report` returns.
 pub const REPORT_READ_MAX_BYTES: usize = 256 * 1024;
@@ -197,6 +210,19 @@ fn check_report(
         if !real.starts_with(&real_reports) {
             return Err(format!(
                 "The report path leads outside the reports folder (a link?). {}",
+                wanted()
+            ));
+        }
+    }
+    // A link that leads nowhere (yet) is refused for every status: a file that someone makes at
+    // its target later would be a report file outside the folder.
+    let mut walked = reports.clone();
+    for part in relative.components() {
+        walked.push(part.as_os_str());
+        let is_link = fs::symlink_metadata(&walked).is_ok_and(|m| m.file_type().is_symlink());
+        if is_link && fs::canonicalize(&walked).is_err() {
+            return Err(format!(
+                "The report path has a link that leads nowhere. {}",
                 wanted()
             ));
         }
@@ -565,7 +591,7 @@ impl TowerCore {
                         branch: made.branch,
                         base_branch: branch,
                         base_commit: head,
-                        path: gitwork::worktree_relative(task.id),
+                        path: made.relative,
                     }),
                     None,
                 ))
@@ -585,15 +611,16 @@ impl TowerCore {
     }
 
     /// The task goes to `review`: commit what the worktree has. Returns the line for the note of
-    /// the status event. `Err` is the text for the caller. Nothing changes then.
+    /// the status event, or the refusal of the snapshot (a file that must not be committed).
+    /// `Err` is the text for the caller. Nothing changes then.
     fn snapshot_for_review(
         &self,
         floor: &Arc<FloorHandle>,
         team: &[Employee],
         task: &TaskRecord,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<ForReview, String> {
         let Some(relative) = &task.worktree else {
-            return Ok(String::new());
+            return Ok(ForReview::Line(String::new()));
         };
         let assignee = task
             .assignee
@@ -606,19 +633,24 @@ impl TowerCore {
         };
         let path = gitwork::worktree_path(&floor.path, task.id, relative)?;
         let _git = locked(&floor.git);
-        let result = gitwork::snapshot(&path, task.id, &task.title, &author).map_err(|e| {
-            format!(
-                "The app could not commit the changes of the worktree of task T-{}: {e}. The status is not changed.",
-                task.id
-            )
-        })?;
+        let result = gitwork::snapshot(&floor.path, &path, task.id, &task.title, &author).map_err(
+            |e| {
+                format!(
+                    "The app could not commit the changes of the worktree of task T-{}: {e}. The status is not changed.",
+                    task.id
+                )
+            },
+        )?;
         Ok(match result {
-            Snapshot::NoChanges => "[app] No changes in the worktree: no commit.".to_owned(),
-            Snapshot::Committed { commit } => format!(
+            Snapshot::NoChanges => {
+                ForReview::Line("[app] No changes in the worktree: no commit.".to_owned())
+            }
+            Snapshot::Committed { commit } => ForReview::Line(format!(
                 "[app] The app committed the worktree on {} ({}).",
                 task.branch.as_deref().unwrap_or("the task branch"),
                 &commit[..commit.len().min(12)]
-            ),
+            )),
+            Snapshot::Blocked { reason, .. } => ForReview::Blocked(reason),
         })
     }
 
@@ -656,7 +688,25 @@ impl TowerCore {
                 if !Self::may_change_status(actor, &task) {
                     return Err("Only the assignee, the creator, the ceo and the pm may change the status of this task.".to_owned());
                 }
-                let line = self.snapshot_for_review(floor, team, &task)?;
+                let line = match self.snapshot_for_review(floor, team, &task)? {
+                    ForReview::Line(line) => line,
+                    ForReview::Blocked(reason) => {
+                        // The worktree has a file that must not be committed. The task becomes
+                        // `blocked`, with the list of files, and the caller gets an error.
+                        self.update_task_as(
+                            floor,
+                            team,
+                            actor,
+                            id,
+                            TaskStatus::Blocked,
+                            Some(&reason),
+                            None,
+                        )?;
+                        return Err(format!(
+                            "Task T-{id} is not in review. The status is blocked. {reason}"
+                        ));
+                    }
+                };
                 note = Some(match note.as_deref().filter(|n| !n.trim().is_empty()) {
                     Some(text) => format!("{text}\n{line}"),
                     None => line,
@@ -677,11 +727,20 @@ impl TowerCore {
                 &change,
                 now_ms(),
                 |before| {
-                    if Self::may_change_status(actor, before) {
-                        Ok(())
-                    } else {
-                        Err("Only the assignee, the creator, the ceo and the pm may change the status of this task.".to_owned())
+                    if !Self::may_change_status(actor, before) {
+                        return Err("Only the assignee, the creator, the ceo and the pm may change the status of this task.".to_owned());
                     }
+                    // Only a merge makes a task with a branch `done`: the app sets it in
+                    // `task_merge`. An employee cannot skip the merge.
+                    if !actor.operator && change.status == TaskStatus::Done && before.branch.is_some()
+                    {
+                        return Err(if before.assignee.as_deref() == Some(actor.slug.as_str()) {
+                            format!("Task T-{id} has a branch, so you cannot set it to done. Set it to review. The pm merges it with task_merge, and then the app sets it to done.")
+                        } else {
+                            format!("Task T-{id} has a branch: use task_merge. Only task_merge sets the status done for a task with a branch.")
+                        });
+                    }
+                    Ok(())
                 },
                 |before, after| {
                     if before.status == after.status {
@@ -711,6 +770,18 @@ impl TowerCore {
             )
             .map_err(task_error)?;
         self.notifier.tasks_changed(&floor.path);
+        // The operator can set any status. For a task with a branch, `done` skips the merge: say it.
+        if actor.operator
+            && status == TaskStatus::Done
+            && outcome.before.status != TaskStatus::Done
+            && let Some(branch) = &outcome.after.branch
+        {
+            self.notifier.notice(
+                &floor.path,
+                "task_done_unmerged",
+                &format!("Task T-{id} is set to done, but its branch {branch} is not merged. The app did not merge it. Use the merge on the board to merge it."),
+            );
+        }
         if let Some(message_id) = outcome.message_id {
             let to = outcome
                 .after

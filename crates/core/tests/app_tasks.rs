@@ -475,6 +475,111 @@ fn the_messages_of_a_task_do_not_count_for_the_loop_limit() {
     assert_eq!(messages_of_kind(&rig, KIND_TASK_STATUS), 5);
 }
 
+/// The text for the caller of `task_assign` when the assignee is working. It said "ENG answers
+/// with the tool send", which is wrong for a task: the assignee follows the orders of the task
+/// message. A plain `send` keeps its text.
+#[test]
+fn the_text_for_a_waiting_task_message_orders_the_receiver_and_does_not_name_send() {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("pm"));
+    rig.start("pm");
+    rig.live_idle("pm");
+    app_support::lock(&rig.shared.extra_args).extend(["--work-ms".into(), "2500".into()]);
+    let eng = rig.start("eng").session_id;
+    rig.events
+        .wait_status(&eng, tower_core::status::Status::Working);
+    make(&rig, "pm", "Work", "Do it");
+    let result = rig.tool(
+        "pm",
+        "task_assign",
+        json!({"task": "T-1", "employee": "eng"}),
+    );
+    let text = ok(&result);
+    assert!(
+        text.contains("The message waits: ENG is working."),
+        "{text}"
+    );
+    assert!(!text.contains("answers with the tool send"), "{text}");
+    assert!(
+        text.contains("ENG: follow the orders at the end of the task message"),
+        "{text}"
+    );
+    let plain = rig.tool("pm", "send", json!({"to": "eng", "text": "hello"}));
+    assert!(
+        ok(&plain).contains("ENG answers with the tool send."),
+        "{plain:?}"
+    );
+}
+
+/// Probe P12 (finding M4): two agents that assign and answer each other had no limit, because the
+/// task messages do not count for the loop limit of `send`. They have a limit of their own now:
+/// `TASK_MESSAGE_LIMIT` for the ordered pair in a rolling hour.
+#[test]
+fn the_task_messages_of_one_pair_have_a_limit_of_their_own() {
+    let rig = rig_with_team();
+    make(&rig, "pm", "Ping", "Again and again");
+    let limit = tower_core::store::TASK_MESSAGE_LIMIT;
+    assert_eq!(limit, 60);
+    for round in 0..limit {
+        let status = if round % 2 == 0 {
+            "in_progress"
+        } else {
+            "blocked"
+        };
+        ok(&rig.tool(
+            "pm",
+            "task_assign",
+            json!({"task": "T-1", "employee": "eng"}),
+        ));
+        ok(&rig.tool(
+            "eng",
+            "task_update",
+            json!({"task": "T-1", "status": status, "note": "again"}),
+        ));
+    }
+    assert_eq!(messages_of_kind(&rig, KIND_TASK_ASSIGN), 60);
+    assert_eq!(messages_of_kind(&rig, KIND_TASK_STATUS), 60);
+    let status_before = task(&rig, 1).status;
+    let events_before = rig.db().task_events(1).unwrap().len();
+
+    // The next assignment and the next status change are refused. The text tells the agent to stop.
+    let assign = rig.tool(
+        "pm",
+        "task_assign",
+        json!({"task": "T-1", "employee": "eng"}),
+    );
+    let text = refused(&assign);
+    assert!(
+        text.contains("Stop now") && text.contains("Wait for the operator"),
+        "{text}"
+    );
+    assert!(text.contains("60"), "{text}");
+    let update = rig.tool(
+        "eng",
+        "task_update",
+        json!({"task": "T-1", "status": "review"}),
+    );
+    let text = refused(&update);
+    assert!(
+        text.contains("Stop now") && text.contains("Wait for the operator"),
+        "{text}"
+    );
+    // A refusal changes nothing.
+    assert_eq!(task(&rig, 1).status, status_before);
+    assert_eq!(rig.db().task_events(1).unwrap().len(), events_before);
+    assert_eq!(messages_of_kind(&rig, KIND_TASK_ASSIGN), 60);
+    assert_eq!(messages_of_kind(&rig, KIND_TASK_STATUS), 60);
+    // Another pair has its own count, a plain message still goes, and the operator is free.
+    ok(&rig.tool(
+        "ceo",
+        "task_assign",
+        json!({"task": "T-1", "employee": "eng"}),
+    ));
+    ok(&rig.tool("pm", "send", json!({"to": "eng", "text": "plain"})));
+    rig.tower.task_assign(&rig.cwd, 1, "eng").unwrap();
+}
+
 // ---------------------------------------------------------------------------------------------
 // task_update
 // ---------------------------------------------------------------------------------------------
@@ -689,6 +794,8 @@ fn the_report_path_must_be_a_real_file_inside_the_reports_folder() {
         "../outside.md",
         ".swarm/reports/../floor.toml",
         ".swarm/reports/link.md",
+        // A link that leads nowhere: someone can make its target later (finding, probe P10).
+        ".swarm/reports/dangling.md",
     ] {
         let result = rig.tool(
             "eng",

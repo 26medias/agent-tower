@@ -575,6 +575,18 @@ pub const KIND_TASK_ASSIGN: &str = "task_assign";
 /// The message that the app sends to the assigner of a task when its status changes.
 pub const KIND_TASK_STATUS: &str = "task_status";
 
+/// The most task messages (`task_assign` and `task_status`) that one employee can store for one
+/// other employee in `TASK_MESSAGE_WINDOW_MS`. These messages do not count for the loop limit of
+/// `send`, so two agents that assign and answer each other need a limit of their own. The messages
+/// of the operator do not count.
+pub const TASK_MESSAGE_LIMIT: i64 = 60;
+
+/// The window of `TASK_MESSAGE_LIMIT`: a rolling hour, in milliseconds.
+pub const TASK_MESSAGE_WINDOW_MS: i64 = 60 * 60 * 1000;
+
+/// The name that the app uses for the operator in the `from_slug` of a message.
+const OPERATOR_SLUG: &str = "operator";
+
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
     Ok(MessageRecord {
         id: row.get(0)?,
@@ -907,6 +919,25 @@ fn message_in(
     task_id: i64,
     at: i64,
 ) -> Result<i64, StoreError> {
+    if message.from_slug != OPERATOR_SLUG {
+        let sent: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE from_slug = ?1 AND to_slug = ?2 AND created_at >= ?3
+               AND kind IN ('task_assign', 'task_status')",
+            params![
+                message.from_slug,
+                message.to_slug,
+                at - TASK_MESSAGE_WINDOW_MS
+            ],
+            |row| row.get(0),
+        )?;
+        if sent >= TASK_MESSAGE_LIMIT {
+            return Err(StoreError::Rule(format!(
+                "Task message limit: you sent {sent} task messages (assignments and status changes) to {} in the last hour, and the limit is {TASK_MESSAGE_LIMIT}. Stop now. Do not assign a task to {} or change a task status for {} again. Wait for the operator.",
+                message.to_slug, message.to_slug, message.to_slug
+            )));
+        }
+    }
     tx.execute(
         "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at, task_id, kind, orders)
          VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
@@ -1195,7 +1226,18 @@ impl Database {
         Ok(())
     }
 
-    /// Take one employee out of the list (the operator stopped its session by hand).
+    /// Put one employee in the list (its session started). A second call for the same slug
+    /// keeps one row.
+    pub fn add_resume_mark(&self, slug: &str, at: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO resume_marks (slug, marked_at) VALUES (?1, ?2)",
+            params![slug, at],
+        )?;
+        Ok(())
+    }
+
+    /// Take one employee out of the list (the operator stopped its session by hand, or the
+    /// session ended by itself).
     pub fn clear_resume_mark(&self, slug: &str) -> Result<(), StoreError> {
         self.conn
             .execute("DELETE FROM resume_marks WHERE slug = ?1", params![slug])?;
@@ -1344,6 +1386,17 @@ impl FloorStore {
         for rule in &permissions.allow {
             check_allow_rule(rule).map_err(StoreError::Rule)?;
         }
+        self.write_permissions(permissions)
+    }
+
+    /// Write the `[permissions]` table with NO check of the rules. The app uses it for one
+    /// thing: to put back the value that the setup agent changed. That value can hold a rule
+    /// that a hand edit wrote, and that the check refuses now. The app does not drop it here.
+    pub fn restore_permissions(&mut self, permissions: FloorPermissions) -> Result<(), StoreError> {
+        self.write_permissions(permissions)
+    }
+
+    fn write_permissions(&mut self, permissions: FloorPermissions) -> Result<(), StoreError> {
         let path = self.swarm_dir().join(FLOOR_FILE);
         let text = read_text(&path)?;
         let mut table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;

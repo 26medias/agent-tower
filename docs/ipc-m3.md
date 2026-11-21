@@ -42,39 +42,75 @@ A task has a branch only when the app made a worktree for it (see "Worktrees" be
 merge, `worktree` is `null` and the other three fields stay, as a record. After a discard, all four
 are `null`.
 
+Repair of 2026-11-21 (review findings): no field and no command is new or renamed. These values
+change:
+
+- `TaskView.worktree` can be `.swarm/worktrees/T-12-2` (`-3`, and so on, up to `-50`) when the
+  folder `T-12` exists and git does not know it as a worktree of this repository (a leftover).
+- `task_update` (the operator, `status: "done"`) on a task that has a branch: the command works,
+  and the app also sends a `notice` of the kind `task_done_unmerged` (see "Events").
+- `task_discard` also accepts a `done` task when its worktree still exists.
+
 ## Commands
 
 | Command | Arguments | Result | Notes |
 |---|---|---|---|
 | `task_merge` | `path`, `id` | `TaskMerge` | The operator merges the branch of a task. The task must be in `review` or `blocked`, else the command is an error. A merge that the app could not do (another branch in the main checkout, uncommitted changes, a conflict) is a result with `merged: false`: the task is `blocked` and `message` says why. A task with no branch gets the status `done` with the message "There is nothing to merge" |
 | `task_diff` | `path`, `id` | `TaskDiff` | Only committed changes show. The app commits the worktree when the task goes to `review` |
-| `task_discard` | `path`, `id` | `TaskView` | For a task that is not `done`. The app removes the worktree (`git worktree remove --force`) and the branch (`git branch -D`) of that one task, and sets the status `blocked` with the note "discarded by the operator". The UI asks for a confirmation first |
+| `task_discard` | `path`, `id` | `TaskView` | For a task that is not `done` (or that is `done`, and its worktree still exists). The app removes the worktree (`git worktree remove --force`) and the branch (`git branch -D`) of that one task, and sets the status `blocked` with the note "discarded by the operator". The UI asks for a confirmation first |
 | `floor_permissions_get` | `path` | `string[]` | The rules of `[permissions] allow` of `floor.toml`, as stored |
 | `floor_permissions_set` | `path`, `allow` | `string[]` | Checks each rule (below). One bad rule refuses the whole call and writes nothing. The text is trimmed and a duplicate is dropped. At most 100 rules. Returns the stored list. The new rules apply at the next start of a session |
 | `team_resume` | `path` | `ResumeProgress` | Resumes the employees of `FloorView.resumable` in a background thread, one by one, with a pause of 2 s between two starts. Returns at once with `{ done: 0, total: N }`. Errors: nothing to resume, or a resume runs already |
 
 Errors that the commands give: `Task T-12 has the status todo. Only a task in review or blocked can
-be merged.`, `Task T-12 is done. The app does not discard a done task.`, `the rule "Bash(*)" is
+be merged.`, `Task T-12 is done and has no worktree. The app does not discard a done task.`,
+`Task T-12 was discarded by the operator: discarded, nothing to merge. The status stays blocked.`, `the rule "Bash(*)" is
 refused: ...`, `there is no session of the last team to resume`, `the last team is resuming now`.
 
 ### The check of a rule
 
-A rule is 1 to 200 characters with no control character, and it is one of:
+Changed on 2026-11-21 (finding H1). A rule is 1 to 200 characters. Each character is printable
+ASCII (0x20 to 0x7E). The whole entry is one of:
 
-- `Read`, `Glob` or `Grep` alone;
-- `Tool(pattern)` with `Tool` one of `Bash`, `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`.
+- `WebSearch` alone (`WebSearch(...)` with a pattern is refused);
+- `Tool(pattern)` with `Tool` one of `Bash`, `Read`, `Glob`, `Grep`, `WebFetch`. The pattern has no
+  `(` and no `)`, so one entry is one rule (`Bash(ls) Bash(rm:*)` and `Bash(ls:*))` are refused).
 
-The pattern must not be empty. `Bash` alone, `WebFetch` alone and `WebSearch` alone are refused. A
-`Bash` pattern that has only `*` and `:` is refused (`Bash(*)`, `Bash(:*)`, `Bash(**)`): it would
-allow every shell command. The UI repeats this check (`ui/src/lib/permissions.ts`) and the Rust
+The pattern must not be empty, and it depends on the tool:
+
+- `Bash`: the pattern does not start with a space. The first word (up to the first space or `:`)
+  is not empty and has only `[A-Za-z0-9._/+-]`, so `Bash(*)`, `Bash(* *)`, `Bash(?*)`, `Bash(*.sh)`
+  and `Bash(:*)` are refused. The first word is not a program that runs other commands or
+  destroys data or sends data out: `sh`, `bash`, `zsh`, `dash`, `fish`, `env`, `xargs`, `eval`,
+  `exec`, `sudo`, `su`, `doas`, `nohup`, `time`, `timeout`, `nice`, `python`, `python3` (and
+  `python3.12` and so on), `node`, `perl`, `ruby`, `php`, `rm`, `dd`, `mkfs`, `chmod`, `chown`,
+  `curl`, `wget`, `ssh`, `scp`, `nc` (a folder in front, like `/bin/sh`, does not help; the case
+  does not matter). `git` needs a subcommand that starts with a lower-case letter, and it is not
+  `push`, `reset`, `clean`, `checkout` or `config`: `Bash(git status:*)` is allowed, `Bash(git:*)`
+  and `Bash(git push:*)` are refused.
+- `Read`, `Glob`, `Grep`: a path that is relative to the project (not `/...`, not `~...`) with no
+  `..` part. The bare names `Read`, `Glob` and `Grep` are refused now: they open the whole disk.
+- `WebFetch`: only `domain:<host>`, with a host of `[A-Za-z0-9.-]` that has a dot and no empty
+  part, so `WebFetch(*)` and `WebFetch(domain:*)` are refused.
+
+A rule must match the command as Claude sees it after the hooks of the operator. On a machine with
+a hook that rewrites commands (for example RTK), `cargo test` becomes `rtk cargo test`, so the rule
+is `Bash(rtk cargo test:*)`. The UI repeats the check (`ui/src/lib/permissions.ts`) and the Rust
 side checks again (`crates/core/src/model.rs`, `check_allow_rule`). A rule that a hand edit of
-`floor.toml` puts in the file and that fails the check is dropped when a session starts.
+`floor.toml` puts in the file and that fails the check is dropped when a session starts. The
+error text of a refusal names the reason.
+
+The setup session can write `floor.toml` (it runs with `acceptEdits`). So the app keeps the value
+of `[permissions]` that it read when the setup session started. After each turn of the setup
+session (and at its stop), if the table in the file is not that value, the app writes the old
+value back and sends the `notice` `permissions_restored`. A change that the operator makes with
+`floor_permissions_set` while the setup session runs is the new value.
 
 ## Events
 
 | Event | Payload | When |
 |---|---|---|
-| `notice` | `{ path, kind, text }` | Something that the operator must see. `kind` is `task_blocked` (a merge that the app could not do: `text` is `Task T-12 is blocked: <reason>`) or `resume_failed` (`text` is `Could not resume <slug>: <error>`). The UI shows a toast |
+| `notice` | `{ path, kind, text }` | Something that the operator must see. `kind` is `task_blocked` (a merge that the app could not do: `text` is `Task T-12 is blocked: <reason>`), `resume_failed` (`text` is `Could not resume <slug>: <error>`), `permissions_restored` (new, 2026-11-21: `text` is `The setup agent tried to change the commands with no question. The app put the old list back.`) or `task_done_unmerged` (new, 2026-11-21: the operator set `done` on a task that has a branch. `text` is `Task T-12 is set to done, but its branch <branch> is not merged. The app did not merge it. Use the merge on the board to merge it.`). The UI shows a toast |
 
 `tasks-changed` follows each merge, discard and worktree. `floor-changed` follows each start of the
 resume, so that `resumeProgress` and `resumable` stay current.
@@ -93,7 +129,33 @@ resume, so that `resumeProgress` and `resumable` stay current.
   message is `T-12: <title>` and a line `By: <Name> (<Role>)`. If the repository has no user, the
   commit gets the name of the employee and the e-mail `<slug>@agent-tower.local`; else it keeps the
   identity of the operator. No change: no commit, and the note of the status event says so.
-- `task_merge` (the `pm`, the `ceo`, the operator): commit the worktree, check that the main
+- The snapshot does not commit everything (2026-11-21, finding M5). After `git add -A` the app
+  reads the staged files. It does not commit when one of these is staged: a file over 5 MB; more
+  than 2000 files; a nested repository (a git link, mode 160000); a NEW file in a folder named
+  `target`, `node_modules`, `dist`, `build`, `.venv` or `__pycache__`; a NEW file named `.env`,
+  `.env.*` (not `.env.example`), `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12` or `*.pfx`.
+  (A file that the repository tracks already is not blocked for its folder or its name.) Then the
+  app empties the index of the worktree (`git reset -q`, never `--hard`, no file changes), makes no
+  commit, and sets the task to `blocked`. The text lists the paths and orders the agent to add an
+  ignore rule in `.gitignore` or to remove the files. At `review` the caller gets this as an error
+  result. At `task_merge` it is the reason of the block.
+- Before the app runs a git command in a worktree, it checks that `git rev-parse
+  --absolute-git-dir` there gives the git dir that git made for that worktree
+  (`<common git dir>/worktrees/<name>`). The agent can write the `.git` file of its worktree; a
+  changed file is refused with the text `The git link of the worktree ... is not the one that git
+  made for it`. Then the commands name that git dir (`--git-dir`, `--work-tree`).
+- Every git command of the app has `-c core.fsmonitor=false`, and no variable that starts with
+  `GIT_` (and no `PAGER`) comes from the parent process.
+- Only `task_merge` sets `done` for a task that has a branch. `task_update` from an employee with
+  `status: "done"` on such a task is an error: `Task T-12 has a branch, so you cannot set it to
+  done. Set it to review. ...` (the assignee) or `Task T-12 has a branch: use task_merge. ...`
+  (the others). The operator can still set any status.
+- `task_merge` (the `pm`, the `ceo`, the operator): block the task (status `blocked`, nothing
+  changed) when the main checkout is in the middle of a merge, a cherry-pick, a revert or a rebase
+  that the operator started (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge`,
+  `rebase-apply`): the app never ends such an operation. `git merge --abort` runs only for a merge
+  that this call started. A discarded task answers `discarded, nothing to merge` and does not
+  become `done`. Then: commit the worktree, check that the main
   checkout is on the base branch, check that `git status --porcelain --untracked-files=no` shows no
   change outside `.swarm/`, `git merge --no-ff`, then `git worktree remove` and `git branch -d`.
   A conflict stops the merge with `git merge --abort`. The app never uses `--force` (except
@@ -118,10 +180,22 @@ session for it: the message waits when the receiver has no live session.
 
 ## The restore of the last team
 
-`shutdown` stores the employees that have a live session (table `resume_marks` of the floor
-database) BEFORE it kills the sessions. A floor with no live session at the close keeps its old
-list. A session that the operator stops with `session_stop` leaves the list (also when the app
-closes a moment later). Nothing resumes by itself at the start of the app.
+The list is the table `resume_marks` of the floor database. Changed on 2026-11-21 (finding M7):
+a session of an employee puts its mark when it starts (so a crash of the app keeps the list; a
+session that never had a turn cannot resume, and `FloorView.resumable` drops it). A session that
+the operator stops with `session_stop` leaves the list. A session that ends by itself (the CLI
+exits) leaves the list, unless the app is closing. The setup session never has a mark.
+`shutdown` still replaces the list with the sessions that are live, BEFORE it kills them. A floor
+with no live session at the close keeps its old list. Nothing resumes by itself at the start of the
+app.
+
+## Limits on task messages
+
+At most 60 task messages (`task_assign` and the status messages) for one ordered pair of employees
+(sender, receiver) in a rolling hour (`TASK_MESSAGE_LIMIT` in `crates/core/src/store.rs`). Over the
+limit, `task_assign` and `task_update` are errors that say `Task message limit: ... Stop now. ...
+Wait for the operator.`, and nothing is changed. The messages of the operator do not count. They do
+not count for the limit of 30 plain messages of `send`, either.
 
 ## Mock
 

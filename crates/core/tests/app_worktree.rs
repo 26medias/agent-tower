@@ -900,6 +900,16 @@ fn the_operator_discards_a_task_that_is_not_done() {
 // Safety of the git calls
 // ---------------------------------------------------------------------------------------------
 
+/// Change the `worktree` and the `branch` of a task row, as someone with the database file can.
+fn set_row(rig: &Rig, id: i64, worktree: &str, branch: &str) {
+    let conn = rusqlite::Connection::open(rig.cwd.join(".swarm/state/floor.db")).unwrap();
+    conn.execute(
+        "UPDATE tasks SET worktree = ?2, branch = ?3 WHERE id = ?1",
+        rusqlite::params![id, worktree, branch],
+    )
+    .unwrap();
+}
+
 #[test]
 fn a_changed_row_cannot_point_a_forced_removal_at_another_folder() {
     let rig = git_rig();
@@ -909,13 +919,7 @@ fn a_changed_row_cannot_point_a_forced_removal_at_another_folder() {
     fs::create_dir_all(&precious).unwrap();
     fs::write(precious.join("keep.txt"), "keep\n").unwrap();
     // Someone changes the database row: the worktree is "precious", the branch is "main".
-    let conn = rusqlite::Connection::open(rig.cwd.join(".swarm/state/floor.db")).unwrap();
-    conn.execute(
-        "UPDATE tasks SET worktree = 'precious', branch = 'main' WHERE id = 1",
-        [],
-    )
-    .unwrap();
-    drop(conn);
+    set_row(&rig, id, "precious", "main");
     let error = rig
         .tower
         .task_discard(&rig.cwd, id)
@@ -930,4 +934,461 @@ fn a_changed_row_cannot_point_a_forced_removal_at_another_folder() {
             .trim(),
         "main"
     );
+}
+
+/// The two checks of `discard_worktree` with values that git does not refuse by itself (finding
+/// M8). `main` and `precious` above fail in git whatever the app checks. A real worktree of
+/// another task and a branch that nobody has checked out pass in git, so only the checks of the
+/// app stop them.
+#[test]
+fn the_discard_checks_stop_the_worktree_of_another_task_and_a_branch_of_no_task() {
+    let rig = git_rig();
+    rig.git(&["branch", "feature"]);
+    let one = make_task(&rig, "One");
+    assign(&rig, one, "eng");
+    let two = make_task(&rig, "Two");
+    assign(&rig, two, "eng2");
+    work(&rig, two, "precious.txt", "uncommitted work of eng2\n");
+    let one_branch = branch_of(&rig, one);
+
+    // 1. The row of T-1 names the worktree of T-2. The branch is the right one.
+    set_row(&rig, one, ".swarm/worktrees/T-2", &one_branch);
+    let error = rig
+        .tower
+        .task_discard(&rig.cwd, one)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("could not discard"), "{error}");
+    assert!(
+        rig.worktree(two).join("precious.txt").is_file(),
+        "the work of T-2 is lost"
+    );
+
+    // 2. The row of T-1 names a branch that is not a task branch. The worktree is the right one.
+    set_row(&rig, one, ".swarm/worktrees/T-1", "feature");
+    let error = rig
+        .tower
+        .task_discard(&rig.cwd, one)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("could not discard"), "{error}");
+    assert!(
+        rig.git(&["branch", "--list", "feature"])
+            .contains("feature"),
+        "the branch feature is deleted"
+    );
+    assert!(
+        rig.worktree(one).is_dir(),
+        "nothing is removed when a name is bad"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// M1: the `.git` file of a worktree is not trusted
+// ---------------------------------------------------------------------------------------------
+
+/// The agent can write the `.git` file of its worktree. It makes a git dir of its own with a
+/// `core.fsmonitor` command and aims the `.git` file at it (finding M1, probe P1). The app must
+/// refuse to run git there, and it must change nothing.
+#[test]
+fn a_git_file_aimed_at_a_fake_git_dir_makes_the_review_refuse() {
+    let rig = git_rig();
+    let id = make_task(&rig, "Evil");
+    assign(&rig, id, "eng");
+    let wt = rig.worktree(id);
+    let marker = rig.root.path().join("pwned");
+    let fake = wt.join("fakegit");
+    fs::create_dir_all(fake.join("objects")).unwrap();
+    fs::create_dir_all(fake.join("refs/heads")).unwrap();
+    fs::write(fake.join("HEAD"), "ref: refs/heads/x\n").unwrap();
+    fs::write(
+        fake.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = \"touch {}; false\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::write(wt.join(".git"), "gitdir: fakegit\n").unwrap();
+    work(&rig, id, "a.txt", "A\n");
+    let before = task(&rig, id);
+    let result = review_as(&rig, id, "eng");
+    let text = refused(&result);
+    assert!(text.contains("git link"), "{text}");
+    assert!(text.contains("not the one that git made"), "{text}");
+    assert!(!marker.exists(), "the program of core.fsmonitor ran");
+    // Nothing is set: the status is as before and the fake git dir has no commit.
+    assert_eq!(task(&rig, id).status, before.status);
+    assert_eq!(task(&rig, id).report, before.report);
+    assert!(!fake.join("index").exists());
+    // The merge of the same task is blocked in the same way, and nothing ran there either.
+    rig.tower
+        .task_update(&rig.cwd, id, TaskStatus::Blocked, None)
+        .unwrap();
+    let merged = merge_as(&rig, "pm", id);
+    assert!(
+        refused(&merged).contains("not the one that git made"),
+        "{merged:?}"
+    );
+    assert!(!marker.exists());
+}
+
+/// The `.git` file points at the main git dir: `git add -A` and `git commit` would run in the
+/// operator's checkout (probe P1b). The staged file of the operator must stay staged, and the
+/// branch `main` must not move.
+#[test]
+fn a_git_file_aimed_at_the_main_repository_commits_nothing_there() {
+    let rig = git_rig();
+    fs::write(rig.cwd.join("staged.txt"), "operator staged\n").unwrap();
+    rig.git(&["add", "staged.txt"]);
+    let main_before = rig.git(&["rev-parse", "main"]);
+    let id = make_task(&rig, "Evil2");
+    assign(&rig, id, "eng");
+    let wt = rig.worktree(id);
+    fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}\n", rig.cwd.join(".git").display()),
+    )
+    .unwrap();
+    work(&rig, id, "agent.txt", "agent\n");
+    let result = review_as(&rig, id, "eng");
+    assert!(
+        refused(&result).contains("not the one that git made"),
+        "{result:?}"
+    );
+    assert_eq!(rig.git(&["rev-parse", "main"]), main_before);
+    assert_eq!(
+        rig.git(&["diff", "--cached", "--name-only"]),
+        "staged.txt",
+        "the index of the operator changed"
+    );
+    // A deleted `.git` file makes git look in the parent folders: the main checkout. Same result.
+    fs::remove_file(wt.join(".git")).unwrap();
+    let result = review_as(&rig, id, "eng");
+    assert!(
+        refused(&result).contains("not the one that git made"),
+        "{result:?}"
+    );
+    assert_eq!(rig.git(&["rev-parse", "main"]), main_before);
+    assert_eq!(rig.git(&["diff", "--cached", "--name-only"]), "staged.txt");
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2: a merge that the operator started is not aborted
+// ---------------------------------------------------------------------------------------------
+
+fn merge_head_exists(rig: &Rig, name: &str) -> bool {
+    git_try(&rig.cwd, &["rev-parse", "-q", "--verify", name]).0
+}
+
+/// The operator is in the middle of `git merge --no-commit` (probe P2). `task_merge` must block
+/// with a clear text and must not run `git merge --abort`.
+#[test]
+fn a_merge_of_the_operator_in_progress_blocks_the_task_merge_and_is_not_aborted() {
+    let rig = git_rig();
+    let id = task_in_review(&rig, "Add a", "eng", "a.txt", "A\n");
+    rig.git(&["branch", "side"]);
+    rig.git(&["checkout", "-q", "side"]);
+    fs::write(rig.cwd.join("side.txt"), "side\n").unwrap();
+    rig.git(&["add", "side.txt"]);
+    rig.git(&["commit", "-q", "-m", "side"]);
+    rig.git(&["checkout", "-q", "main"]);
+    rig.git(&["merge", "-q", "-s", "ours", "--no-commit", "side"]);
+    assert!(merge_head_exists(&rig, "MERGE_HEAD"));
+    let head = rig.git(&["rev-parse", "HEAD"]);
+    let result = merge_as(&rig, "pm", id);
+    let text = refused(&result);
+    assert!(text.contains("in the middle of a merge"), "{text}");
+    assert!(text.contains("The status is blocked"), "{text}");
+    assert!(
+        merge_head_exists(&rig, "MERGE_HEAD"),
+        "the merge of the operator was aborted"
+    );
+    assert_eq!(rig.git(&["rev-parse", "HEAD"]), head);
+    assert_eq!(task(&rig, id).status, TaskStatus::Blocked);
+    assert!(rig.worktree(id).is_dir(), "the worktree stays");
+    assert!(branches(&rig).contains("task/T-1"));
+    // The operator ends the merge. The same task now merges.
+    rig.git(&["commit", "-q", "-m", "operator merge"]);
+    ok(&merge_as(&rig, "pm", id));
+    assert_eq!(task(&rig, id).status, TaskStatus::Done);
+}
+
+/// A cherry-pick in progress with nothing staged (probe P2b), and a rebase (probe P15).
+#[test]
+fn a_cherry_pick_or_a_rebase_in_progress_blocks_the_task_merge() {
+    let rig = git_rig();
+    let id = task_in_review(&rig, "Add a", "eng", "a.txt", "A\n");
+    rig.git(&["branch", "side"]);
+    rig.git(&["checkout", "-q", "side"]);
+    fs::write(rig.cwd.join("notes.txt"), "one\nSIDE\nthree\n").unwrap();
+    rig.git(&["commit", "-qam", "side"]);
+    rig.git(&["checkout", "-q", "main"]);
+    fs::write(rig.cwd.join("notes.txt"), "one\nMAIN\nthree\n").unwrap();
+    rig.git(&["commit", "-qam", "main change"]);
+    let (_ok, out) = git_try(&rig.cwd, &["cherry-pick", "side"]);
+    assert!(
+        out.contains("conflict") || out.contains("CONFLICT"),
+        "{out}"
+    );
+    // The operator picks the main version: nothing is staged and CHERRY_PICK_HEAD stays.
+    rig.git(&["checkout", "HEAD", "--", "notes.txt"]);
+    assert!(merge_head_exists(&rig, "CHERRY_PICK_HEAD"));
+    let result = merge_as(&rig, "pm", id);
+    assert!(
+        refused(&result).contains("in the middle of a cherry-pick"),
+        "{result:?}"
+    );
+    assert!(
+        merge_head_exists(&rig, "CHERRY_PICK_HEAD"),
+        "the cherry-pick was ended"
+    );
+    rig.git(&["cherry-pick", "--abort"]);
+
+    // A rebase with a conflict.
+    rig.git(&["checkout", "-q", "-b", "side2", "side"]);
+    fs::write(rig.cwd.join("notes.txt"), "one\nSIDE2\nthree\n").unwrap();
+    rig.git(&["commit", "-qam", "side2"]);
+    rig.git(&["checkout", "-q", "main"]);
+    let (_ok, out) = git_try(&rig.cwd, &["rebase", "side2"]);
+    assert!(out.contains("onflict"), "{out}");
+    let state = rig.git(&["rev-parse", "--git-path", "rebase-merge"]);
+    assert!(rig.cwd.join(state).exists());
+    let result = merge_as(&rig, "pm", id);
+    assert!(
+        refused(&result).contains("in the middle of a rebase"),
+        "{result:?}"
+    );
+    assert!(
+        rig.cwd
+            .join(rig.git(&["rev-parse", "--git-path", "rebase-merge"]))
+            .exists()
+    );
+    rig.git(&["rebase", "--abort"]);
+    assert_eq!(task(&rig, id).status, TaskStatus::Blocked);
+}
+
+// ---------------------------------------------------------------------------------------------
+// M3: only a merge makes a task with a branch `done`
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn an_employee_cannot_set_done_on_a_task_with_a_branch() {
+    let rig = git_rig();
+    let id = make_task(&rig, "Add a");
+    assign(&rig, id, "eng");
+    work(&rig, id, "a.txt", "A\n");
+    let report = rig.cwd.join(format!(".swarm/reports/T-{id}.md"));
+    fs::write(&report, "Done.\n").unwrap();
+    // The assignee: told to set review.
+    let result = rig.tool(
+        "eng",
+        "task_update",
+        json!({"task": "T-1", "status": "done", "report": report.to_str().unwrap()}),
+    );
+    let text = refused(&result);
+    assert!(text.contains("Set it to review"), "{text}");
+    assert_eq!(task(&rig, id).status, TaskStatus::Todo);
+    // The pm: told to use task_merge. The task is in review first.
+    ok(&review_as(&rig, id, "eng"));
+    let result = rig.tool(
+        "pm",
+        "task_update",
+        json!({"task": "T-1", "status": "done"}),
+    );
+    let text = refused(&result);
+    assert!(text.contains("use task_merge"), "{text}");
+    assert_eq!(task(&rig, id).status, TaskStatus::Review);
+    assert!(!rig.cwd.join("a.txt").exists());
+    // The merge sets done.
+    ok(&merge_as(&rig, "pm", id));
+    assert_eq!(task(&rig, id).status, TaskStatus::Done);
+    assert!(rig.cwd.join("a.txt").exists());
+}
+
+#[test]
+fn the_operator_can_set_done_with_a_warning_and_discard_a_done_task_that_has_a_worktree() {
+    let rig = git_rig();
+    let id = task_in_review(&rig, "Add a", "eng", "a.txt", "A\n");
+    let notices_before = app_support::lock(&rig.events.notices).len();
+    // The operator may set any status. The notice says that the branch is not merged.
+    let after = rig
+        .tower
+        .task_update(&rig.cwd, id, TaskStatus::Done, None)
+        .unwrap();
+    assert_eq!(after.status, TaskStatus::Done);
+    let notices = app_support::lock(&rig.events.notices).clone();
+    let (_, kind, text) = &notices[notices_before];
+    assert_eq!(kind, "task_done_unmerged");
+    assert!(text.contains("not merged"), "{text}");
+    assert!(!rig.cwd.join("a.txt").exists());
+    // The worktree is still there, so the operator can discard the task.
+    assert!(rig.worktree(id).is_dir());
+    let discarded = rig.tower.task_discard(&rig.cwd, id).unwrap();
+    assert_eq!(discarded.status, TaskStatus::Blocked);
+    assert!(!rig.worktree(id).exists());
+    assert_eq!(branches(&rig), "");
+    // A merge of the discarded task does not make it `done`.
+    let result = merge_as(&rig, "pm", id);
+    let text = refused(&result);
+    assert!(text.contains("discarded, nothing to merge"), "{text}");
+    assert_eq!(task(&rig, id).status, TaskStatus::Blocked);
+    let merged = rig.tower.task_merge(&rig.cwd, id);
+    assert!(
+        merged
+            .unwrap_err()
+            .to_string()
+            .contains("discarded, nothing to merge")
+    );
+    assert_eq!(task(&rig, id).status, TaskStatus::Blocked);
+}
+
+// ---------------------------------------------------------------------------------------------
+// M5: the snapshot does not commit everything
+// ---------------------------------------------------------------------------------------------
+
+/// A secret file, build output, a package folder, a file over 5 MB and a nested repository
+/// (probe P8). The snapshot commits none of them, unstages everything, blocks the task, and names
+/// the files. After an ignore rule, the same task goes to review.
+#[test]
+fn the_snapshot_blocks_secrets_build_output_big_files_and_nested_repositories() {
+    let rig = git_rig();
+    let id = make_task(&rig, "Build");
+    assign(&rig, id, "eng");
+    let base = task(&rig, id).base_commit.unwrap();
+    work(&rig, id, ".env", "API_KEY=fake-not-real\n");
+    work(&rig, id, ".env.example", "API_KEY=\n");
+    work(&rig, id, "target/debug/app", &"x".repeat(1000));
+    work(&rig, id, "node_modules/a/index.js", "x\n");
+    work(&rig, id, "deploy/server.pem", "not a key\n");
+    work(&rig, id, "src/lib.rs", "fn main() {}\n");
+    let big = rig.worktree(id).join("big.bin");
+    fs::write(&big, vec![7u8; 6 * 1024 * 1024]).unwrap();
+    let nested = rig.worktree(id).join("vendor/lib");
+    fs::create_dir_all(&nested).unwrap();
+    init_repo(&nested);
+
+    let result = review_as(&rig, id, "eng");
+    let text = refused(&result);
+    for path in [
+        ".env",
+        "target/debug/app",
+        "node_modules/a/index.js",
+        "deploy/server.pem",
+        "big.bin",
+        "vendor/lib",
+    ] {
+        assert!(text.contains(path), "{path} is not in: {text}");
+    }
+    assert!(!text.contains(".env.example"), "{text}");
+    assert!(!text.contains("src/lib.rs"), "{text}");
+    assert!(text.contains("Add an ignore rule"), "{text}");
+    assert!(text.contains("The status is blocked"), "{text}");
+    // Nothing is committed, the index is empty, the files are still on disk.
+    let wt = rig.worktree(id);
+    assert_eq!(rig.git(&["rev-parse", &branch_of(&rig, id)]), base);
+    assert_eq!(git(&wt, &["diff", "--cached", "--name-only"]), "");
+    assert!(wt.join(".env").is_file() && big.is_file());
+    assert_eq!(task(&rig, id).status, TaskStatus::Blocked);
+
+    // The employee adds an ignore rule and removes the nested repository. Now it commits.
+    fs::remove_dir_all(&nested).unwrap();
+    work(
+        &rig,
+        id,
+        ".gitignore",
+        ".env\ntarget/\nnode_modules/\n*.pem\nbig.bin\n",
+    );
+    ok(&review_as(&rig, id, "eng"));
+    assert_eq!(task(&rig, id).status, TaskStatus::Review);
+    let committed = git(&wt, &["show", "--name-only", "--format=", "HEAD"]);
+    let mut names: Vec<&str> = committed.lines().collect();
+    names.sort_unstable();
+    assert_eq!(names, [".env.example", ".gitignore", "src/lib.rs"]);
+}
+
+#[test]
+fn the_snapshot_blocks_more_than_2000_files_and_a_normal_change_still_commits() {
+    let rig = git_rig();
+    let id = make_task(&rig, "Many");
+    assign(&rig, id, "eng");
+    let dir = rig.worktree(id).join("gen");
+    fs::create_dir_all(&dir).unwrap();
+    for n in 0..2001 {
+        fs::write(dir.join(format!("f{n}.txt")), "x\n").unwrap();
+    }
+    let result = review_as(&rig, id, "eng");
+    let text = refused(&result);
+    assert!(text.contains("2001 files are staged"), "{text}");
+    assert_eq!(
+        git(&rig.worktree(id), &["diff", "--cached", "--name-only"]),
+        ""
+    );
+    // A normal change commits, and the merge brings it to the main checkout.
+    fs::remove_dir_all(&dir).unwrap();
+    work(&rig, id, "docs/guide.md", "# Guide\n");
+    work(&rig, id, "notes.txt", "one\ntwo\nthree\nfour\n");
+    ok(&review_as(&rig, id, "eng"));
+    ok(&merge_as(&rig, "pm", id));
+    assert!(rig.cwd.join("docs/guide.md").is_file());
+    assert_eq!(task(&rig, id).status, TaskStatus::Done);
+}
+
+/// A file that the repository tracks already is the choice of the operator: a change of it is
+/// committed, also in a folder named `build` or with the name `.env`.
+#[test]
+fn a_tracked_file_in_a_build_folder_is_committed_when_it_changes() {
+    let rig = Rig::new();
+    rig.create_floor();
+    init_repo(&rig.cwd);
+    fs::create_dir_all(rig.cwd.join("build")).unwrap();
+    fs::write(rig.cwd.join("build/tracked.txt"), "v1\n").unwrap();
+    rig.git(&["add", "build/tracked.txt"]);
+    rig.git(&["commit", "-q", "-m", "track build"]);
+    rig.add_editor("eng", Some("pm"));
+    for slug in ["ceo", "pm", "eng"] {
+        rig.start(slug);
+        rig.live_idle(slug);
+    }
+    let id = make_task(&rig, "Edit build");
+    assign(&rig, id, "eng");
+    work(&rig, id, "build/tracked.txt", "v2\n");
+    ok(&review_as(&rig, id, "eng"));
+    assert_eq!(
+        git(
+            &rig.worktree(id),
+            &["show", "--name-only", "--format=", "HEAD"]
+        ),
+        "build/tracked.txt"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A leftover folder does not stop an assignment for ever
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_leftover_folder_with_the_worktree_name_gives_a_free_name() {
+    let rig = git_rig();
+    let id = make_task(&rig, "Leftover");
+    // A folder that git does not know, with the name of the worktree of the task.
+    let leftover = rig.worktree(id);
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("old.txt"), "old\n").unwrap();
+    assign(&rig, id, "eng");
+    let row = task(&rig, id);
+    assert_eq!(row.worktree.as_deref(), Some(".swarm/worktrees/T-1-2"));
+    assert!(rig.cwd.join(".swarm/worktrees/T-1-2/.git").exists());
+    assert!(
+        leftover.join("old.txt").is_file(),
+        "the leftover is not touched"
+    );
+    // The task works in the new folder: review, merge and the removal use the stored path.
+    let path = rig.cwd.join(".swarm/worktrees/T-1-2/a.txt");
+    fs::write(path, "A\n").unwrap();
+    ok(&review_as(&rig, id, "eng"));
+    ok(&merge_as(&rig, "pm", id));
+    assert!(rig.cwd.join("a.txt").is_file());
+    assert!(!rig.cwd.join(".swarm/worktrees/T-1-2").exists());
+    assert!(leftover.join("old.txt").is_file());
 }

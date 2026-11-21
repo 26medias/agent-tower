@@ -46,9 +46,16 @@ fn shutdown_stores_the_live_employees_before_it_kills_them_and_the_list_survives
         rig.start(slug);
         rig.live_idle(slug);
     }
+    // A session puts its mark when it starts, so the list is there before the close.
+    let mut before = rig.db().resume_marks().unwrap();
+    before.sort();
+    assert_eq!(before, ["ceo", "eng", "pm"]);
     let eng = rig.live_idle("eng");
     rig.stop_and_wait(&eng);
-    assert_eq!(rig.db().resume_marks().unwrap(), Vec::<String>::new());
+    // The manual stop takes `eng` out of the list.
+    let mut after_stop = rig.db().resume_marks().unwrap();
+    after_stop.sort();
+    assert_eq!(after_stop, ["ceo", "pm"]);
 
     rig.tower.shutdown();
     // The marks are the sessions that were live when the app closed.
@@ -205,4 +212,55 @@ fn an_employee_that_never_had_a_turn_or_is_gone_is_not_in_the_list() {
     let view = second.floor_open(&rig.cwd).unwrap();
     // `ghost` was never an employee. `eng` is removed. `eng` never started: it has no session.
     assert_eq!(view.resumable, ["ceo"]);
+}
+
+/// Finding M7: the list was written only at `shutdown`, so a crash lost it. Now a session puts its
+/// mark when it starts. Two sessions start, the first Tower is NOT closed (a crash: the
+/// `Drop` that calls `shutdown` does not run, the first Tower stays alive here), and a new Tower
+/// on the same floor shows both.
+#[test]
+fn a_crash_of_the_app_keeps_the_sessions_that_were_live() {
+    let rig = Rig::new();
+    rig.create_floor();
+    for slug in ["ceo", "pm"] {
+        rig.start(slug);
+        rig.live_idle(slug);
+    }
+    // No `shutdown`. The marks are in the database already.
+    let mut marks = rig.db().resume_marks().unwrap();
+    marks.sort();
+    assert_eq!(marks, ["ceo", "pm"]);
+    let shared = Arc::new(Shared::default());
+    let second = restart(&rig, Duration::from_millis(1), &shared);
+    let view = second.floor_open(&rig.cwd).unwrap();
+    assert_eq!(view.resumable, ["ceo", "pm"]);
+}
+
+/// A session that ends by itself (the CLI exits) leaves the list. The setup session never enters.
+#[test]
+fn a_session_that_ends_by_itself_leaves_the_list_and_the_setup_session_never_enters() {
+    let rig = Rig::new();
+    rig.create_floor();
+    for slug in ["ceo", "pm"] {
+        rig.start(slug);
+        rig.live_idle(slug);
+    }
+    let mut marks = rig.db().resume_marks().unwrap();
+    marks.sort();
+    assert_eq!(marks, ["ceo", "pm"]);
+    // The CLI of `pm` ends: the fake CLI exits when it reads `/exit`.
+    let pm = rig.live_idle("pm");
+    rig.tower.pty_write(&pm, b"/exit 3\r").unwrap();
+    wait_for("the end of the session of pm", || {
+        rig.db().resume_marks().unwrap() == ["ceo"]
+    });
+    // The setup session has no mark, at the start and at the end.
+    let setup = rig
+        .tower
+        .setup_start(&rig.cwd, tower_core::model::CliKind::Claude, 24, 80)
+        .unwrap()
+        .session_id;
+    assert_eq!(rig.db().resume_marks().unwrap(), ["ceo"]);
+    rig.stop_and_wait(&setup);
+    assert_eq!(rig.db().resume_marks().unwrap(), ["ceo"]);
 }

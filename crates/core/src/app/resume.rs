@@ -1,8 +1,20 @@
 //! The restore of the last team (M3, decision 10 of the milestone, 2026-11-21).
 //!
-//! The app stops all sessions when it closes. Before it does, `shutdown` stores the slugs of the
-//! employees that had a live session (`Database::replace_resume_marks`). The operator stops a
-//! session by hand with `session_stop`: that clears the mark of that employee. `FloorView`
+//! The list (the table `resume_marks`) is kept all the time, so a crash of the app does not lose
+//! it (changed 2026-11-21):
+//!
+//! - A session of an employee puts its mark when it starts (`launch`), and not at its first
+//!   `working`. Reason: the start is the one point that all starts share (the operator, a
+//!   message, the resume), and a session that never had a turn cannot resume anyway: the list
+//!   that `FloorView` shows drops it (`resumable_slugs` needs `can_resume`).
+//! - The operator stops a session by hand with `session_stop`: that clears the mark.
+//! - A session that ends by itself (the CLI exits) clears its mark too (`forget_mark_after_exit`),
+//!   unless the app is closing: the kill at the close is not a choice of the employee.
+//! - The setup session never has a mark.
+//! - `shutdown` still replaces the list with the sessions that are live then
+//!   (`Database::replace_resume_marks`), BEFORE it kills them.
+//!
+//! The list is the source for the restore. `FloorView`
 //! lists the marked employees that have no live session now and that can resume
 //! (`resumable_slugs`). The command `team_resume` resumes them one by one in a background
 //! thread, with a pause between two starts. A failure of one start does not stop the others: it
@@ -120,6 +132,36 @@ impl TowerCore {
                 super::live::warn(&format!("cannot store the team to resume: {error}"));
             }
         }
+    }
+
+    /// A session of the employee `slug` started: put it in the list. The setup session never.
+    pub(super) fn add_resume_mark(&self, floor: &FloorHandle, slug: &str) {
+        if slug == SETUP_SLUG {
+            return;
+        }
+        let stored = locked(&floor.store).db().add_resume_mark(slug, now_ms());
+        if let Err(error) = stored {
+            super::live::warn(&format!("cannot store the resume mark of {slug}: {error}"));
+        }
+    }
+
+    /// The session `live` ended by itself (the CLI exited): take its employee out of the list.
+    /// Not when the app is closing, not when the operator stopped the session (the mark is gone
+    /// already), and not when another session of the same employee runs now.
+    pub(super) fn forget_mark_after_exit(&self, live: &Live) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        {
+            let registry = locked(&self.registry);
+            let other_live = registry.live.values().any(|l| {
+                l.id != live.id && l.path == live.path && l.slug == live.slug && !l.exited()
+            });
+            if registry.manual_stops.contains(&live.id) || other_live {
+                return;
+            }
+        }
+        self.clear_resume_mark(&live.path, &live.slug);
     }
 
     /// The operator stopped the session of `slug` by hand.

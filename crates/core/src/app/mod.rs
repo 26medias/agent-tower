@@ -362,6 +362,10 @@ struct FloorHandle {
     git: Mutex<()>,
     /// The resume of the last team that runs now (memory only).
     resume: Mutex<Option<ResumeProgress>>,
+    /// The `[permissions]` value that the app read when the last setup session started. The
+    /// setup hook puts it back when the setup agent changes the table (memory only). Lock order:
+    /// `store`, then this one.
+    setup_permissions: Mutex<Option<FloorPermissions>>,
 }
 
 impl FloorHandle {
@@ -372,6 +376,7 @@ impl FloorHandle {
             logo: Mutex::default(),
             git: Mutex::new(()),
             resume: Mutex::new(None),
+            setup_permissions: Mutex::new(None),
         }
     }
 
@@ -495,6 +500,32 @@ fn reload(floor: &FloorHandle) -> Result<()> {
     let mut store = locked(&floor.store);
     *store = FloorStore::open(&floor.path)?;
     Ok(())
+}
+
+/// The text of the notice when the app puts back the `[permissions]` table.
+pub const PERMISSIONS_RESTORED_TEXT: &str =
+    "The setup agent tried to change the commands with no question. The app put the old list back.";
+
+/// The setup agent runs with `acceptEdits`, so it can write `floor.toml`. If its `[permissions]`
+/// table is not the one that the app read when the setup session started, write the old table
+/// back (with the store writer) and return `true`. A `floor.toml` that does not load is left
+/// alone: the next turn checks again.
+fn put_back_permissions(floor: &FloorHandle) -> bool {
+    let mut store = locked(&floor.store);
+    let Some(expected) = locked(&floor.setup_permissions).clone() else {
+        return false;
+    };
+    let Ok(mut fresh) = FloorStore::open(&floor.path) else {
+        return false;
+    };
+    if fresh.floor().permissions == expected {
+        return false;
+    }
+    if fresh.restore_permissions(expected).is_err() {
+        return false;
+    }
+    *store = fresh;
+    true
 }
 
 /// The Codex home folder: `$CODEX_HOME`, or `$HOME/.codex`. `None` when neither is set.
@@ -744,9 +775,17 @@ impl TowerCore {
             )));
         }
         let floor = self.floor_handle(path)?;
-        locked(&floor.store).set_permissions(FloorPermissions {
-            allow: clean.clone(),
-        })?;
+        {
+            let mut store = locked(&floor.store);
+            let permissions = FloorPermissions {
+                allow: clean.clone(),
+            };
+            store.set_permissions(permissions.clone())?;
+            // The operator changed the list on purpose. The setup hook must not undo it.
+            if let Some(expected) = locked(&floor.setup_permissions).as_mut() {
+                *expected = permissions;
+            }
+        }
         self.notifier.floor_changed(&floor.path);
         Ok(clean)
     }
@@ -1070,6 +1109,12 @@ impl TowerCore {
         let _reservation = self.reserve(&floor.path, slug)?;
         // The defaults are read from the current file, not from the file at app start.
         reload(&floor)?;
+        if setup_cli.is_some() {
+            // The setup agent can write `floor.toml`. Keep the value of `[permissions]` that the
+            // app has now, so the setup hook can put it back.
+            let current = locked(&floor.store).floor().permissions.clone();
+            *locked(&floor.setup_permissions) = Some(current);
+        }
 
         let (employee, previous, team, floor_allow) = {
             let store = locked(&floor.store);
@@ -1273,6 +1318,10 @@ impl TowerCore {
         locked(&self.registry)
             .live
             .insert(id.clone(), Arc::clone(&live));
+        // The restore list: this employee has a live session now. A crash of the app keeps it.
+        if setup_cli.is_none() {
+            self.add_resume_mark(&floor, slug);
+        }
         // From here the status thread removes the token when the session ends.
         if let Some(guard) = token_guard {
             guard.disarm();
@@ -1294,6 +1343,9 @@ impl TowerCore {
             learn_id,
         ) {
             live.kill();
+            if setup_cli.is_none() {
+                self.clear_resume_mark(&floor.path, slug);
+            }
             if let Some(token) = &token_text {
                 bus::forget_token(&self.tokens, token);
             }
@@ -1315,6 +1367,13 @@ impl TowerCore {
             // old data. The observer still gets the event, because employee files may have changed.
             // The setup agent marks a file that it wants removed; the app removes it here.
             setup::remove_marked_employees(&floor.path);
+            if put_back_permissions(&floor) {
+                notifier.notice(
+                    &floor.path,
+                    "permissions_restored",
+                    PERMISSIONS_RESTORED_TEXT,
+                );
+            }
             let loaded = reload(&floor).is_ok();
             notifier.floor_changed(&floor.path);
             // The app is closing: the stop of the session must not start a request.

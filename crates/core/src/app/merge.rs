@@ -14,11 +14,19 @@
 //! call sets it to `done`. For a task with a branch, the app does these steps, in the main
 //! checkout, under the git lock of the floor (`FloorHandle::git`):
 //!
-//! 1. It commits the worktree (the same snapshot as at `review`).
+//! 0. The main checkout must not be in the middle of a merge, a cherry-pick, a revert or a rebase
+//!    that the operator started (`gitwork::operation_in_progress`). The app never ends such an
+//!    operation. It runs `git merge --abort` only for a merge that this call started.
+//! 1. It commits the worktree (the same snapshot as at `review`). A file that must not go in a
+//!    commit (a secret, build output, a big file, a nested repository) stops the merge.
 //! 2. The main checkout must be on the base branch of the task.
 //! 3. `git status --porcelain --untracked-files=no` must show no change outside `.swarm/`.
 //! 4. `git merge --no-ff --no-edit`. On a conflict, `git merge --abort`.
 //! 5. On success: `git worktree remove` (no `--force`), `git branch -d`, status `done`.
+//!
+//! Only `task_merge` sets the status `done` for a task that has a branch (an employee cannot, and
+//! `task_update` refuses it). A task that the operator discarded answers "discarded, nothing to
+//! merge" and does not become `done`.
 //!
 //! A step that does not pass sets the status `blocked`, with the reason as the note. The result
 //! goes to the caller (the tool answer), to the assignee and the assigner (a task message), and
@@ -39,6 +47,9 @@ pub const DIFF_PATCH_MAX_BYTES: usize = 60_000;
 
 /// The most bytes of the diffstat that `task_diff` returns.
 pub const DIFF_STAT_MAX_BYTES: usize = 20_000;
+
+/// The note of the status event of a discard. `task_merge` reads it to know a discarded task.
+const DISCARD_NOTE: &str = "discarded by the operator";
 
 /// The most file names in the text of a blocked merge.
 const FILES_SHOWN: usize = 10;
@@ -130,10 +141,11 @@ impl TowerCore {
         self.diff_task(&floor, id).map_err(other)
     }
 
-    /// The operator discards a task that is not `done`: the app removes its worktree
-    /// (`--force`, this one worktree only) and its branch (`-D`, this one branch only), and sets
-    /// the status `blocked` with the note "discarded by the operator". The assignee and the
-    /// assigner get a message.
+    /// The operator discards a task: the app removes its worktree (`--force`, this one worktree
+    /// only) and its branch (`-D`, this one branch only), and sets the status `blocked` with the
+    /// note "discarded by the operator". The assignee and the assigner get a message. A `done`
+    /// task is refused, unless its worktree still exists (a `done` with no merge, or a merge that
+    /// could not remove the worktree).
     pub fn task_discard(&self, path: &std::path::Path, id: i64) -> Result<TaskRecord> {
         let floor = self.floor_handle(path)?;
         let team = self.team_of(&floor).map_err(other)?;
@@ -141,9 +153,9 @@ impl TowerCore {
         let after = {
             let _git = locked(&floor.git);
             let (task, _) = self.read_task(&floor, id)?;
-            if task.status == TaskStatus::Done {
+            if task.status == TaskStatus::Done && task.worktree.is_none() {
                 return Err(other(format!(
-                    "Task T-{id} is done. The app does not discard a done task."
+                    "Task T-{id} is done and has no worktree. The app does not discard a done task."
                 )));
             }
             gitwork::discard_worktree(
@@ -159,7 +171,7 @@ impl TowerCore {
                     id,
                     &actor.slug,
                     TaskStatus::Blocked,
-                    "discarded by the operator",
+                    DISCARD_NOTE,
                     GitAfter::AllGone,
                     now_ms(),
                 )
@@ -172,7 +184,7 @@ impl TowerCore {
             &team,
             &actor,
             &after,
-            "discarded by the operator",
+            DISCARD_NOTE,
             merge_result_orders(false, true),
         );
         Ok(after)
@@ -243,10 +255,22 @@ impl TowerCore {
         }
         // One git action at a time on the main checkout.
         let git = locked(&floor.git);
-        let (task, _) = self.read_task(floor, id).map_err(|e| e.to_string())?;
+        let (task, events) = self.read_task(floor, id).map_err(|e| e.to_string())?;
         if !matches!(task.status, TaskStatus::Review | TaskStatus::Blocked) {
             return Err(format!(
                 "Task T-{id} has the status {}. Only a task in review or blocked can be merged.",
+                task.status.as_str()
+            ));
+        }
+        // A discarded task has no branch and no worktree any more. That is not "nothing to
+        // merge": the work was thrown away, and the task must not become `done`.
+        if task.branch.is_none()
+            && events
+                .iter()
+                .any(|e| e.kind == "status" && e.text.as_deref() == Some(DISCARD_NOTE))
+        {
+            return Err(format!(
+                "Task T-{id} was discarded by the operator: discarded, nothing to merge. The status stays {}.",
                 task.status.as_str()
             ));
         }
@@ -323,6 +347,13 @@ impl TowerCore {
             });
         };
 
+        // 0. The operator may be in the middle of a merge, a cherry-pick, a revert or a rebase.
+        match gitwork::operation_in_progress(&floor.path) {
+            Ok(None) => {}
+            Ok(Some(what)) => return block(gitwork::operation_in_progress_text(what)),
+            Err(error) => return block(format!("The app could not read the git state: {error}")),
+        }
+
         // 1. Commit what the worktree has now.
         if let Some(relative) = &task.worktree {
             let path = gitwork::worktree_path(&floor.path, id, relative)?;
@@ -336,8 +367,9 @@ impl TowerCore {
                     name: assignee.map_or("Employee", |e| e.name.as_str()),
                     role: assignee.map_or("Employee", |e| e.role.as_str()),
                 };
-                match gitwork::snapshot(&path, id, &task.title, &author) {
+                match gitwork::snapshot(&floor.path, &path, id, &task.title, &author) {
                     Ok(Snapshot::NoChanges | Snapshot::Committed { .. }) => {}
+                    Ok(Snapshot::Blocked { reason, .. }) => return block(reason),
                     Err(error) => {
                         return block(format!(
                             "The app could not commit the changes of the worktree: {error}"

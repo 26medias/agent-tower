@@ -213,7 +213,10 @@ complete and that they can stop this session.
       for example `allow = ["Bash(cargo test:*)", "Bash(git status:*)"]`. The app adds these
       rules to each `claude` employee, except an `ask-always` employee. The operator sets the list
       in Settings. Do NOT write this table, and do not ask the operator for it in the team
-      proposal. It applies at the next start of a session.
+      proposal. It applies at the next start of a session. A rule must match the command as the
+      CLI sees it after the hooks of the operator. On a machine with a hook that rewrites
+      commands (for example RTK), `cargo test` becomes `rtk cargo test`, and the rule must name
+      that form.
 - **Permission with the CLI `codex`.** The CLI does not enforce `read-only` or
   `edit-in-worktree` on this machine: only the role text limits the employee. So write the limit
   as an order in the role text (for example "Do not edit files."). `ask-always` does not work
@@ -337,16 +340,16 @@ name = "Acme"
 cli = "claude"
 model = "sonnet"
 
-[permissions]
-allow = ["Bash(cargo test:*)"]
-
 [brand]
 description = "A web shop for hand-made candles."
 logo_prompt = "A golden honeycomb hexagon with a small bee."
 ```
 
-The tables `[defaults]` and `[permissions]` can be missing or empty. Keep them as they are. If the
-file has no `[brand]` table, add it at the end of the file.
+The tables `[defaults]` and `[permissions]` can be missing or empty. Keep them as they are. Do not
+add or change `[permissions]`: the app checks it after each turn of this session, and it puts the
+old list back if you change it. If the file has no `[brand]` table, add it at the end of the file.
+A rule in `[permissions]` must match the command as the CLI sees it after the hooks of the
+operator (on a machine with the RTK hook, `cargo test` becomes `rtk cargo test`).
 
 ## Rules
 
