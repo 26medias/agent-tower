@@ -795,12 +795,12 @@ impl TowerCore {
         }
         if employee.slug == SETUP_SLUG {
             return Err(other(format!(
-                "the slug \"{SETUP_SLUG}\" is reserved for the setup agent. Use another slug."
+                "the file name \"{SETUP_SLUG}\" is reserved for the setup agent. Use another name for the employee."
             )));
         }
         if employee.slug == OPERATOR {
             return Err(other(format!(
-                "the slug \"{OPERATOR}\" is reserved for the operator. Use another slug."
+                "the file name \"{OPERATOR}\" is reserved for the operator. Use another name for the employee."
             )));
         }
         // The model goes to the CLI as an argument. A bad name is refused before it is stored.

@@ -422,11 +422,11 @@ export async function last3Checks({ page, check, url, shots }) {
     await M("setStatus", pm2, "idle");
     await pause();
     const pmRows2 = await rowsOf("Maya (Project Manager)");
-    // Changed on purpose (activity fold): a message does NOT stop the fold. Maya sent a message, then her turn ended: the
-    // new "answered" row adds nothing (the message is the news of that turn), and her old "is working" row goes. The
+    // Changed on purpose (activity fold): a message does NOT stop the fold. Maya sent a message, then her turn ended:
+    // the new "answered" row replaces her old "is working" row. Each employee keeps its newest status row. The
     // question row stays.
-    check("D-c: Maya sends a message, then answers: no new \"answered\" row, her old \"is working\" row goes, her question row stays",
-        JSON.stringify(pmRows2) === JSON.stringify(pmRows.slice(1)) && pmRows2.length === pmRows.length - 1, JSON.stringify(pmRows2));
+    check("D-c: Maya sends a message, then answers: her \"answered\" row replaces her \"is working\" row, and her question row stays",
+        JSON.stringify(pmRows2) === JSON.stringify(["Maya (Project Manager) answered", ...pmRows.slice(1)]) && pmRows2.length === pmRows.length, JSON.stringify(pmRows2));
     check("D-c: the list is still newest first, and it has no row about a status twice for one employee", (await rows().count()) === (await lineTexts()).length);
     await activity.screenshot({ path: join(shots, "activity-list-2560.png") });
     await shot("activity-2560.png");

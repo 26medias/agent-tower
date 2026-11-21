@@ -43,7 +43,9 @@
         // The floor of the stack: the top of the 8th row from the bottom of the terminal on view, else the area less 130 px.
         let limit = rect.bottom - FALLBACK_BOTTOM_PX;
         const rows = document.querySelectorAll(".pane:not(.hidden) .xterm-rows > div");
-        if (rows.length >= KEEP_ROWS) limit = rows[rows.length - KEEP_ROWS].getBoundingClientRect().top - ROWS_GAP_PX;
+        // A terminal can have more rows than fit in the area for a moment (before it is fitted). So the rows can only
+        // make the limit higher on the screen, never lower than the limit of the area.
+        if (rows.length >= KEEP_ROWS) limit = Math.min(limit, rows[rows.length - KEEP_ROWS].getBoundingClientRect().top - ROWS_GAP_PX);
         top = Math.round(start);
         maxHeight = Math.max(0, Math.floor(limit - start));
     }

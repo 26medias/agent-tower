@@ -301,7 +301,9 @@ export async function toastChecks({ page, check, url, shots }) {
             },
             [rootSel, testid],
         );
-    const refused = (name, r) => r.there && r.inside && r.role === "alert" && r.text.includes(REFUSED) && r.toast.some((t) => t.includes(REFUSED));
+    // Changed on purpose: the error of a modal's own action shows inside the modal only. No toast repeats it (a toast
+    // would stay after the modal closes).
+    const refused = (name, r) => r.there && r.inside && r.role === "alert" && r.text.includes(REFUSED) && !r.toast.some((t) => t.includes(REFUSED));
     await fresh(SMALL);
     // Employee form.
     await page.click('[data-testid="add-employee"]');
@@ -330,7 +332,7 @@ export async function toastChecks({ page, check, url, shots }) {
         await act();
         await page.locator(`[data-testid="${testid}"]`).waitFor({ timeout: 3000 }).catch(() => {});
         const res = await inModal(settings, testid);
-        check(`T refused ${label}: Settings shows the error inside the panel (role alert), and a toast has the same text`, refused(label, res), JSON.stringify(res));
+        check(`T refused ${label}: Settings shows the error inside the panel (role alert), and no toast repeats it`, refused(label, res), JSON.stringify(res));
     };
     await settingsAction("OpenAI key", "action-error-keys", "settings_set", async () => {
         await page.fill("#settings-openai-key", "sk-not-a-real-key");
@@ -411,7 +413,8 @@ export async function toastChecks({ page, check, url, shots }) {
     const mayaRows = all.filter((t) => t.startsWith("Maya (Project Manager)") && !t.includes(ARROW));
     const linRows = all.filter((t) => t.startsWith("Lin (Engineer)") && !t.includes(ARROW));
     check("T activity: in the live-run order Maya has ONE status row (answered), not two", JSON.stringify(mayaRows) === JSON.stringify(["Maya (Project Manager) answered"]), JSON.stringify(all));
-    check("T activity: Lin sent a message, then answered: no \"answered\" row for Lin, and no old \"is working\" row", linRows.length === 0 && all.some((t) => t === `Lin (Engineer) ${ARROW} Maya (Project Manager): MANGO` || t.includes("MANGO")), JSON.stringify(all));
+    // Changed on purpose: each employee that took part keeps its newest status row.
+    check("T activity: Lin sent a message, then answered: Lin has ONE status row (answered), and no old \"is working\" row", JSON.stringify(linRows) === JSON.stringify(["Lin (Engineer) answered"]) && all.some((t) => t.includes("MANGO")), JSON.stringify(all));
     check("T activity: the two message rows stay", all.filter((t) => t.includes(ARROW)).length === 2, JSON.stringify(all));
     await activity.screenshot({ path: join(shots, "t-activity-list-2560.png") });
     await page.setViewportSize(SMALL);

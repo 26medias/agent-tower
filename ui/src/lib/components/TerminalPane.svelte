@@ -36,6 +36,9 @@
         name: string;
     } = $props();
 
+    // "resume" exists only for a session that had a turn (the app says so in `canResume`).
+    const canResume = $derived(store.sessionCanResume(sessionId));
+
     // A prop getter re-runs its effect each time the parent object changes, even when the value
     // is the same. A $derived compares values, so the effects below run only on a real change.
     // Without this, each status change would rebuild the terminal and steal the focus.
@@ -96,7 +99,11 @@
 {#if status === "stopped"}
     <!-- The CLI prints its own "resume with" line. This line says what to do in the app. -->
     <div class="stopped-note" class:hidden={!isActive} data-role="stopped-note" role="status">
-        Stopped. Use "resume" or "start" in the bar of the employee to continue.
+        {#if canResume}
+            Stopped. Use "resume" or "start" in the bar of the employee to continue.
+        {:else}
+            Stopped before its first answer, so it cannot resume. Press "start" in the bar of the employee for a new session.
+        {/if}
     </div>
 {/if}
 

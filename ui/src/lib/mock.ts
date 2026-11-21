@@ -903,7 +903,7 @@ export function createMockBackend(): Backend {
             case "employee_save": {
                 const { path, employee: emp } = args<{ path: string; employee: Employee }>(raw, ["path", "employee"]);
                 const floor = floorOf(path);
-                if (emp.slug === SETUP_SLUG) throw `the slug "${SETUP_SLUG}" is reserved`;
+                if (emp.slug === SETUP_SLUG) throw `the file name "${SETUP_SLUG}" is reserved for the setup agent. Use another name for the employee.`;
                 if (!/^[a-z0-9][a-z0-9-]*$/.test(emp.slug)) throw `bad slug "${emp.slug}"`;
                 checkModelAndEffort(`employee ${emp.slug}`, emp.model, emp.effort);
                 const i = floor.employees.findIndex((e) => e.slug === emp.slug);

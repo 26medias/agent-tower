@@ -253,6 +253,11 @@ class Store {
         return pickActive(this.tabs, this.activeByPath[path] ?? null);
     });
 
+    /** True when the app can resume this session (it had a turn). The stopped note of a pane uses it. */
+    sessionCanResume(sessionId: string): boolean {
+        return this.sessionState.byId[sessionId]?.canResume === true;
+    }
+
     activeSession = $derived(this.activeId ? (this.sessionState.byId[this.activeId] ?? null) : null);
 
     /** The selected employee of the open floor, if it still exists. */
@@ -478,11 +483,12 @@ class Store {
         } else this.actionErrors = { ...this.actionErrors, [area]: text };
     }
 
-    /** An action of a modal failed: the inline line of `area` and a toast, both with the same text. */
+    /**
+     * An action of a modal failed: the error shows in the inline line of `area`, inside the modal. No toast: the
+     * operator already sees the text where the action is, and a toast would stay after the modal closes.
+     */
     private failIn(area: string, e: unknown): void {
-        const raw = ipc.errorText(e);
-        this.setActionError(area, describeError(raw).text);
-        this.toast(raw);
+        this.setActionError(area, describeError(ipc.errorText(e)).text);
     }
 
     // ---- floors ----
