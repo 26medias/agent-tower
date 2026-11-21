@@ -14,7 +14,7 @@
 
 use crate::views::{
     AttachResult, Cli, Employee, FloorDefaults, FloorEntry, FloorView, ModelCatalog, OutputMessage,
-    Programs, SessionView, Settings,
+    Programs, SessionView, Settings, TaskDetail, TaskStatus, TaskView,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -365,6 +365,90 @@ pub async fn programs_set(
         t.programs_set(&name, path.trim()).map(Programs::from)
     })
     .await
+}
+
+/// The tasks of the floor, oldest first (`docs/ipc-m2.md`).
+#[tauri::command]
+pub async fn task_list(tower: State<'_, Shared>, path: String) -> Result<Vec<TaskView>, String> {
+    blocking(&tower, move |t| {
+        Ok(t.task_list(&path_of(&path))?
+            .into_iter()
+            .map(TaskView::from)
+            .collect())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_get(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+) -> Result<TaskDetail, String> {
+    blocking(&tower, move |t| {
+        let (task, events) = t.task_get(&path_of(&path), id)?;
+        Ok(TaskDetail {
+            task: task.into(),
+            events: events.into_iter().map(Into::into).collect(),
+        })
+    })
+    .await
+}
+
+/// The operator makes a task. The creator is `operator`.
+#[tauri::command]
+pub async fn task_create(
+    tower: State<'_, Shared>,
+    path: String,
+    title: String,
+    description: String,
+) -> Result<TaskView, String> {
+    blocking(&tower, move |t| {
+        t.task_create(&path_of(&path), &title, &description)
+            .map(TaskView::from)
+    })
+    .await
+}
+
+/// The operator gives a task to an employee. The employee gets a message, and the app starts its
+/// session if there is none.
+#[tauri::command]
+pub async fn task_assign(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+    slug: String,
+) -> Result<TaskView, String> {
+    blocking(&tower, move |t| {
+        t.task_assign(&path_of(&path), id, &slug)
+            .map(TaskView::from)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_update(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+    status: TaskStatus,
+    note: Option<String>,
+) -> Result<TaskView, String> {
+    blocking(&tower, move |t| {
+        t.task_update(&path_of(&path), id, status, note.as_deref())
+            .map(TaskView::from)
+    })
+    .await
+}
+
+/// The text of the report file of a task, or `null` when the task has no report.
+#[tauri::command]
+pub async fn task_report(
+    tower: State<'_, Shared>,
+    path: String,
+    id: i64,
+) -> Result<Option<String>, String> {
+    blocking(&tower, move |t| t.task_report(&path_of(&path), id)).await
 }
 
 #[cfg(test)]

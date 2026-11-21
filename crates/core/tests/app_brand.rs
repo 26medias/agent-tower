@@ -383,6 +383,19 @@ fn the_instructions_show_the_format_that_the_store_reads() {
     ] {
         assert!(FLOOR_INIT.contains(word), "{word}");
     }
+    // The facts about the task board and the report files (spec 4.4 and 4.10).
+    for word in [
+        "task_create(title, description, parent?)",
+        "task_assign(task, employee)",
+        "task_update(task, status, note?, report?)",
+        "task_get(task)",
+        "task_list(status?, assignee?)",
+        "task_comment(task, text)",
+        ".swarm/reports/<task-id>.md",
+        "[task T-12 from <Name> (<Role>)]",
+    ] {
+        assert!(FLOOR_INIT.contains(word), "{word}");
+    }
 }
 
 #[test]

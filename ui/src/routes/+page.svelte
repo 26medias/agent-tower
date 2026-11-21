@@ -7,6 +7,7 @@
     import ResizeHandle from "$lib/components/ResizeHandle.svelte";
     import SettingsPanel from "$lib/components/SettingsPanel.svelte";
     import Tabs from "$lib/components/Tabs.svelte";
+    import TaskBoard from "$lib/components/TaskBoard.svelte";
     import TerminalArea from "$lib/components/TerminalArea.svelte";
     import Toasts from "$lib/components/Toasts.svelte";
     import { layout } from "$lib/layout.svelte";
@@ -54,7 +55,7 @@
 
 <svelte:window onresize={measure} />
 
-<div class="app" style:--col-w="{layout.colW}px">
+<div class="app" style:--col-w="{layout.colW}px" style:--board-w="{layout.boardW}px">
     <BuildingColumn />
     <ResizeHandle
         orientation="vertical"
@@ -73,6 +74,7 @@
         <TerminalArea />
         <DebugPaste />
     </main>
+    <TaskBoard />
 </div>
 
 {#if store.settingsOpen}
@@ -89,7 +91,7 @@
     .app {
         position: relative;
         display: grid;
-        grid-template-columns: var(--col-w) minmax(0, 1fr);
+        grid-template-columns: var(--col-w) minmax(0, 1fr) var(--board-w);
         height: 100vh;
     }
 

@@ -20,8 +20,10 @@
 //!   closes the new connection.
 //! - A request (the head and the body together) must be complete `REQUEST_DEADLINE` after its
 //!   first byte. It is one deadline for the whole request, not a time for each read, so a client
-//!   that sends one byte at a time cannot keep a thread. A connection with no request is closed
-//!   after `IDLE_TIMEOUT`.
+//!   that sends one byte at a time cannot keep a thread. A NEW connection must send its first
+//!   byte within `FIRST_BYTE_TIMEOUT`, so idle connections cannot fill the cap of
+//!   `MAX_CONNECTIONS`. After its first request, a connection with no request is closed after
+//!   `IDLE_TIMEOUT` (the CLIs keep one connection for many calls).
 //! - The token is checked after the head and BEFORE the body is read. A request with a wrong
 //!   token gets 401 and costs the server no body read.
 //!
@@ -55,8 +57,14 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_LINE: usize = 16 * 1024;
 const MAX_HEADERS: usize = 100;
 
-/// A connection that sends nothing for this long is closed. The client connects again.
+/// A connection that has done a request, and then sends nothing for this long, is closed. The
+/// client connects again.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A new connection must send its first byte within this time, or it is closed. A client sends
+/// its first request at once after it connects, so 5 s is generous. Without this limit, 256
+/// idle connections would hold all places for `IDLE_TIMEOUT`.
+pub const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most open connections. A new one over this gets HTTP 503.
 pub const MAX_CONNECTIONS: usize = 256;
@@ -69,6 +77,8 @@ pub const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 pub struct McpLimits {
     pub max_connections: usize,
     pub request_deadline: Duration,
+    /// How long a new connection may stay silent. See `FIRST_BYTE_TIMEOUT`.
+    pub first_byte_timeout: Duration,
 }
 
 impl Default for McpLimits {
@@ -76,6 +86,7 @@ impl Default for McpLimits {
         McpLimits {
             max_connections: MAX_CONNECTIONS,
             request_deadline: REQUEST_DEADLINE,
+            first_byte_timeout: FIRST_BYTE_TIMEOUT,
         }
     }
 }
@@ -179,8 +190,9 @@ enum ReadError {
 }
 
 /// The read half of a connection, with the time limits. Each read gets the time that is left to
-/// ONE deadline. Before the first byte of a request, the deadline is `IDLE_TIMEOUT`. The first
-/// byte sets the deadline of the whole request (`request_deadline`).
+/// ONE deadline. Before the first byte of a request, the deadline is `FIRST_BYTE_TIMEOUT` on a
+/// new connection and `IDLE_TIMEOUT` after that. The first byte sets the deadline of the whole
+/// request (`request_deadline`).
 struct Timed {
     stream: TcpStream,
     deadline: Instant,
@@ -190,13 +202,14 @@ struct Timed {
 
 impl Timed {
     /// A new request is next. `buffered` is true when bytes of it are in the buffer already.
-    fn next_request(&mut self, buffered: bool) {
+    /// `silent_limit` is how long the client may stay silent before the first byte of it.
+    fn next_request(&mut self, buffered: bool, silent_limit: Duration) {
         self.begun = buffered;
         self.deadline = Instant::now()
             + if buffered {
                 self.request_deadline
             } else {
-                IDLE_TIMEOUT
+                silent_limit
             };
     }
 }
@@ -353,14 +366,17 @@ fn serve_connection(stream: TcpStream, core: &Weak<TowerCore>, limits: McpLimits
     };
     let mut reader = BufReader::new(Timed {
         stream: reader_half,
-        deadline: Instant::now() + IDLE_TIMEOUT,
+        deadline: Instant::now() + limits.first_byte_timeout,
         begun: false,
         request_deadline: limits.request_deadline,
     });
     let mut writer = stream;
+    // The first request of a connection has the short silent limit. The next ones have the long one.
+    let mut silent_limit = limits.first_byte_timeout;
     loop {
         let buffered = !reader.buffer().is_empty();
-        reader.get_mut().next_request(buffered);
+        reader.get_mut().next_request(buffered, silent_limit);
+        silent_limit = IDLE_TIMEOUT;
         let mut request = match read_head(&mut reader) {
             Ok(request) => request,
             Err(ReadError::Closed) => return,

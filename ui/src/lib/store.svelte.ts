@@ -30,6 +30,9 @@ import {
     type Programs,
     type SessionView,
     type Settings,
+    type TaskDetail,
+    type TaskStatus,
+    type TaskView,
     type TrackedSession,
 } from "./types";
 
@@ -83,6 +86,14 @@ class Store {
     logoCallError = $state.raw<Record<string, string>>({});
     /** Set when `floor_open` failed with `NO_FLOOR:`. The UI offers to create the floor. */
     pendingCreate = $state.raw<{ path: string; message: string } | null>(null);
+    /** The tasks of each floor that the UI has loaded, oldest first. */
+    tasksByPath = $state.raw<Record<string, TaskView[]>>({});
+    /** The task whose detail panel is open, by floor path. */
+    openTaskByPath = $state.raw<Record<string, number>>({});
+    /** The detail of the open task. `report` is `undefined` while it loads, `null` when the task has none. */
+    taskDetail = $state.raw<{ path: string; detail: TaskDetail; report: string | null | undefined; reportError: string | null } | null>(
+        null,
+    );
     backend = $state<"tauri" | "mock" | "">("");
     ready = $state(false);
     private busy = $state.raw<Record<string, LaunchKind>>({});
@@ -96,6 +107,12 @@ class Store {
     private unlisten: ipc.Unlisten[] = [];
     /** Version of the logo that was loaded (or asked for) for each floor. */
     private logoLoaded = new Map<string, number | null>();
+
+    /** The tasks of the open floor. */
+    tasks = $derived(this.openPath ? (this.tasksByPath[this.openPath] ?? []) : []);
+
+    /** The ID of the task that is open in the detail panel of the open floor. */
+    openTaskId = $derived(this.openPath ? (this.openTaskByPath[this.openPath] ?? null) : null);
 
     /** Tabs of the open floor, in a stable order. */
     tabs = $derived.by(() => {
@@ -148,6 +165,10 @@ class Store {
                 // change the active tab: the operator keeps the tab that is open.
                 await ipc.onEmployeeStarted((payload) => {
                     this.toast(employeeStartedText(payload), "info");
+                }),
+                await ipc.onTasksChanged((payload) => {
+                    // The tasks of another floor load when the operator opens that floor.
+                    if (payload.path === this.openPath) void this.loadTasks(payload.path);
                 }),
                 await ipc.onFloorChanged((payload) => {
                     // The list carries the logo version of every floor.
@@ -221,6 +242,12 @@ class Store {
     private switchTo(view: FloorView): void {
         if (this.openPath !== null && this.openPath !== view.path) this.clearLogoCallError(this.openPath);
         this.openPath = view.path;
+        // The detail panel of the floor that the operator comes back to shows its task again.
+        const open = this.openTaskByPath[view.path];
+        if (this.taskDetail?.path !== view.path || this.taskDetail.detail.task.id !== open) {
+            this.taskDetail = null;
+            if (open !== undefined) void this.loadTaskDetail(view.path, open);
+        }
     }
 
     /** Load the logo of each floor again when its version changed. */
@@ -271,6 +298,7 @@ class Store {
             this.switchTo(view);
             this.applyView(view);
             writeLastFloor(view.path);
+            void this.loadTasks(view.path);
             await this.loadFloors();
             return true;
         } catch (e) {
@@ -291,6 +319,7 @@ class Store {
             this.switchTo(view);
             this.applyView(view);
             writeLastFloor(view.path);
+            void this.loadTasks(view.path);
             await this.loadFloors();
             return true;
         } catch (e) {
@@ -324,6 +353,114 @@ class Store {
             if (this.openPath === path) this.applyView(view);
         } catch (e) {
             this.fail(e);
+        }
+    }
+
+    // ---- tasks (docs/ipc-m2.md) ----
+
+    private taskLoads = new Map<string, number>();
+
+    /** Load the tasks of a floor. An answer that is older than a newer call is dropped. */
+    async loadTasks(path: string): Promise<void> {
+        const call = (this.taskLoads.get(path) ?? 0) + 1;
+        this.taskLoads.set(path, call);
+        try {
+            const tasks = await ipc.taskList(path);
+            if (this.taskLoads.get(path) !== call) return;
+            this.tasksByPath = { ...this.tasksByPath, [path]: tasks };
+        } catch (e) {
+            if (this.taskLoads.get(path) === call) this.fail(e);
+            return;
+        }
+        // The panel that is open shows the newest events and report.
+        const open = this.openTaskByPath[path];
+        if (open !== undefined) await this.loadTaskDetail(path, open);
+    }
+
+    /** Load the detail of a task, and its report text when it has a report path. */
+    async loadTaskDetail(path: string, id: number): Promise<void> {
+        let detail: TaskDetail;
+        try {
+            detail = await ipc.taskGet(path, id);
+        } catch (e) {
+            // The task is gone, or the floor is: close the panel.
+            this.closeTask();
+            this.fail(e);
+            return;
+        }
+        if (this.openTaskByPath[path] !== id) return;
+        const keep = this.taskDetail && this.taskDetail.path === path && this.taskDetail.detail.task.id === id ? this.taskDetail : null;
+        this.taskDetail = {
+            path,
+            detail,
+            report: detail.task.report === null ? null : (keep?.report ?? undefined),
+            reportError: keep?.reportError ?? null,
+        };
+        if (detail.task.report === null) return;
+        try {
+            const text = await ipc.taskReport(path, id);
+            if (this.openTaskByPath[path] !== id) return;
+            this.taskDetail = { path, detail, report: text, reportError: null };
+        } catch (e) {
+            if (this.openTaskByPath[path] !== id) return;
+            this.taskDetail = { path, detail, report: null, reportError: ipc.errorText(e) };
+        }
+    }
+
+    openTask(id: number): void {
+        const path = this.openPath;
+        if (!path) return;
+        this.openTaskByPath = { ...this.openTaskByPath, [path]: id };
+        this.taskDetail = null;
+        void this.loadTaskDetail(path, id);
+    }
+
+    closeTask(): void {
+        const path = this.openPath;
+        if (!path) return;
+        const next = { ...this.openTaskByPath };
+        delete next[path];
+        this.openTaskByPath = next;
+        this.taskDetail = null;
+    }
+
+    /** The operator makes a task. Returns the new task, or `null` when the command failed. */
+    async createTask(title: string, description: string): Promise<TaskView | null> {
+        const path = this.openPath;
+        if (!path) return null;
+        try {
+            const task = await ipc.taskCreate(path, title, description);
+            await this.loadTasks(path);
+            return task;
+        } catch (e) {
+            this.fail(e);
+            return null;
+        }
+    }
+
+    async assignTask(id: number, slug: string): Promise<boolean> {
+        const path = this.openPath;
+        if (!path) return false;
+        try {
+            await ipc.taskAssign(path, id, slug);
+            await this.loadTasks(path);
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
+    }
+
+    async updateTask(id: number, status: TaskStatus, note: string): Promise<boolean> {
+        const path = this.openPath;
+        if (!path) return false;
+        try {
+            await ipc.taskUpdate(path, id, status, note.trim() === "" ? null : note);
+            await this.loadTasks(path);
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
         }
     }
 

@@ -4,6 +4,8 @@
     // keys); "horizontal" sits between a top and a bottom area and changes a height (up and down
     // arrow keys). A drag uses pointer capture, so it goes on over a terminal or an SVG.
     // `value` is the size in px. `onchange` gets the wanted size. The owner clamps it.
+    // `reverse` is for a pane on the right (or at the bottom) of the handle: a drag to the left
+    // makes the pane wider.
     import { KEY_STEP } from "$lib/sizes";
 
     let {
@@ -13,6 +15,7 @@
         max,
         label,
         place = "",
+        reverse = false,
         onchange,
         onreset,
     }: {
@@ -23,6 +26,7 @@
         label: string;
         /** CSS for the position (left, bottom, ...). The handle is absolute inside its parent. */
         place?: string;
+        reverse?: boolean;
         onchange: (px: number) => void;
         onreset: () => void;
     } = $props();
@@ -53,7 +57,8 @@
             dragging = false;
             return;
         }
-        onchange(startValue + (pos(e) - startPos));
+        const delta = pos(e) - startPos;
+        onchange(startValue + (reverse ? -delta : delta));
     }
 
     function end(): void {
@@ -63,8 +68,9 @@
     function key(e: KeyboardEvent): void {
         const back = horizontal ? "ArrowUp" : "ArrowLeft";
         const forward = horizontal ? "ArrowDown" : "ArrowRight";
-        if (e.key === back) onchange(value - KEY_STEP);
-        else if (e.key === forward) onchange(value + KEY_STEP);
+        const sign = reverse ? -1 : 1;
+        if (e.key === back) onchange(value - sign * KEY_STEP);
+        else if (e.key === forward) onchange(value + sign * KEY_STEP);
         else return;
         e.preventDefault();
     }

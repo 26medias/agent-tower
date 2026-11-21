@@ -95,6 +95,12 @@ impl Notifier {
         }
     }
 
+    pub fn tasks_changed(&self, path: &Path) {
+        if let Some(observer) = self.get() {
+            observer.tasks_changed(path);
+        }
+    }
+
     pub fn employee_started(&self, path: &Path, event: &super::EmployeeStarted) {
         if let Some(observer) = self.get() {
             observer.employee_started(path, event);

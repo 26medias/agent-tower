@@ -77,6 +77,8 @@ pub struct Events {
     changed: Condvar,
     /// The `employee_started` events, oldest first.
     pub started: Mutex<Vec<(PathBuf, EmployeeStarted)>>,
+    /// The floors of the `tasks_changed` events, oldest first.
+    pub tasks: Mutex<Vec<PathBuf>>,
 }
 
 impl Observer for Events {
@@ -92,6 +94,11 @@ impl Observer for Events {
 
     fn employee_started(&self, path: &Path, event: &EmployeeStarted) {
         lock(&self.started).push((path.to_path_buf(), event.clone()));
+        self.changed.notify_all();
+    }
+
+    fn tasks_changed(&self, path: &Path) {
+        lock(&self.tasks).push(path.to_path_buf());
         self.changed.notify_all();
     }
 }

@@ -1,9 +1,14 @@
 // The sizes that the operator can change by dragging: the width of the building column, the
-// height of the office, and the width of the info panel in the office.
+// height of the office, the width of the info panel in the office, and the width of the task board
+// (and whether the board is collapsed).
 // A size that the operator never changed is `null`: it follows the window (the old fixed rules).
 // A custom size is kept in localStorage. Each read of a size clamps it to the limits of the
 // current window, so a window that shrinks never leaves a handle out of reach.
 import {
+    BOARD_DEFAULT,
+    BOARD_STRIP,
+    boardCollapsedByDefault,
+    boardRange,
     clamp,
     columnRange,
     defaultColumn,
@@ -45,7 +50,13 @@ class Layout {
     space = $state(740);
 
     /** Custom sizes. `null`: the default. */
-    private custom = $state.raw<StoredSizes>({ col: null, office: null, info: null });
+    private custom = $state.raw<StoredSizes>({
+        col: null,
+        office: null,
+        info: null,
+        board: null,
+        boardCollapsed: null,
+    });
 
     colRange = $derived(columnRange(this.winW));
     colW = $derived(resolveSize(this.custom.col, defaultColumn(this.winW), this.colRange));
@@ -55,6 +66,13 @@ class Layout {
     // The default width follows the REAL height of the office (`officeH`), so a taller office gives
     // the room a wider box. A width that the operator set by hand (`custom.info`) is kept as it is.
     infoW = $derived(resolveSize(this.custom.info, defaultInfo(this.workW, this.officeH), this.infoRangeNow));
+
+    boardRangeNow = $derived(boardRange(this.winW, this.colW));
+    boardOpenW = $derived(resolveSize(this.custom.board, BOARD_DEFAULT, this.boardRangeNow));
+    /** The operator's choice, else the window decides: a narrow window starts with a collapsed board. */
+    boardCollapsed = $derived(this.custom.boardCollapsed ?? boardCollapsedByDefault(this.winW, this.colW));
+    /** The width of the board column now: the open width, or the strip. */
+    boardW = $derived(this.boardCollapsed ? BOARD_STRIP : this.boardOpenW);
 
     constructor() {
         this.custom = read();
@@ -83,6 +101,18 @@ class Layout {
 
     setInfo(px: number): void {
         this.store({ ...this.custom, info: Math.round(clamp(px, this.infoRangeNow.min, this.infoRangeNow.max)) });
+    }
+
+    setBoard(px: number): void {
+        this.store({ ...this.custom, board: Math.round(clamp(px, this.boardRangeNow.min, this.boardRangeNow.max)) });
+    }
+
+    setBoardCollapsed(collapsed: boolean): void {
+        this.store({ ...this.custom, boardCollapsed: collapsed });
+    }
+
+    resetBoard(): void {
+        this.store({ ...this.custom, board: null });
     }
 
     resetColumn(): void {

@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import { layout } from "./layout.svelte";
 import { ART, T, buildingHeight } from "./office-layout";
 import {
+    BOARD_DEFAULT,
+    BOARD_MIN,
     BUILDING_MIN_W,
     INFO_DEFAULT_MIN,
     INFO_MIN,
+    WORK_MIN,
+    boardCollapsedByDefault,
+    boardRange,
     buildingScale,
     clamp,
     columnRange,
@@ -154,24 +159,71 @@ describe("resolveSize", () => {
 
 describe("parseStored", () => {
     it("reads a good object", () => {
-        expect(parseStored(serializeStored({ col: 200, office: 300, info: null }))).toEqual({
+        expect(
+            parseStored(serializeStored({ col: 200, office: 300, info: null, board: 240, boardCollapsed: true })),
+        ).toEqual({
             col: 200,
             office: 300,
             info: null,
+            board: 240,
+            boardCollapsed: true,
         });
     });
 
     it("gives defaults for bad text", () => {
-        const none = { col: null, office: null, info: null };
+        const none = { col: null, office: null, info: null, board: null, boardCollapsed: null };
         expect(parseStored(null)).toEqual(none);
         expect(parseStored("")).toEqual(none);
         expect(parseStored("{not json")).toEqual(none);
-        expect(parseStored("[1,2]")).toEqual({ col: null, office: null, info: null });
+        expect(parseStored("[1,2]")).toEqual(none);
         expect(parseStored("5")).toEqual(none);
     });
 
     it("drops a field that is not a positive number", () => {
-        expect(parseStored('{"col":"x","office":-4,"info":0}')).toEqual({ col: null, office: null, info: null });
+        expect(parseStored('{"col":"x","office":-4,"info":0,"board":"y","boardCollapsed":"yes"}')).toEqual({
+            col: null,
+            office: null,
+            info: null,
+            board: null,
+            boardCollapsed: null,
+        });
+    });
+
+    it("keeps an old stored object (no board fields) and gives the board defaults", () => {
+        expect(parseStored('{"col":210,"office":300,"info":250}')).toEqual({
+            col: 210,
+            office: 300,
+            info: 250,
+            board: null,
+            boardCollapsed: null,
+        });
+    });
+});
+
+describe("the task board width", () => {
+    it("is 200 px at least, and leaves 480 px to the terminal", () => {
+        // 1280 wide, column 320: 1280 - 320 - 480 = 480 px at most.
+        expect(boardRange(1280, 320)).toEqual({ min: BOARD_MIN, max: 480 });
+        expect(boardRange(1100, 275)).toEqual({ min: BOARD_MIN, max: 345 });
+    });
+
+    it("keeps the minimum when the window is too narrow", () => {
+        expect(boardRange(900, 260)).toEqual({ min: BOARD_MIN, max: BOARD_MIN });
+    });
+
+    it("has the default width 260 and keeps it inside the range", () => {
+        expect(BOARD_DEFAULT).toBe(260);
+        expect(WORK_MIN).toBe(480);
+        expect(resolveSize(null, BOARD_DEFAULT, boardRange(1280, 320))).toBe(260);
+        expect(resolveSize(900, BOARD_DEFAULT, boardRange(1280, 320))).toBe(480);
+    });
+
+    it("is open at 1280 x 800 and collapsed by default when the terminal would get under 480 px", () => {
+        expect(boardCollapsedByDefault(1280, defaultColumn(1280))).toBe(false);
+        // 1280 - 320 - 260 = 700 px of terminal.
+        expect(boardCollapsedByDefault(1000, defaultColumn(1000))).toBe(false); // 1000 - 260 - 260 = 480
+        expect(boardCollapsedByDefault(999, defaultColumn(999))).toBe(true); // 479
+        expect(boardCollapsedByDefault(800, defaultColumn(800))).toBe(true);
     });
 });
 

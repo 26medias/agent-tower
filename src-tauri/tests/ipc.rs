@@ -153,7 +153,12 @@ fn app() -> App {
         .unwrap();
     install_tower(&app, tower);
     let events = Arc::new(Mutex::new(Vec::new()));
-    for name in ["session-changed", "floor-changed", "employee-started"] {
+    for name in [
+        "session-changed",
+        "floor-changed",
+        "employee-started",
+        "tasks-changed",
+    ] {
         let events = Arc::clone(&events);
         app.listen(name, move |event| {
             let payload: Value = serde_json::from_str(event.payload()).unwrap();
@@ -754,4 +759,147 @@ fn an_employee_start_comes_as_a_session_changed_and_an_employee_started_event() 
             "resumed": false,
         })
     );
+}
+
+/// `docs/ipc-m2.md`: the task commands through the IPC, with the argument names and the JSON
+/// shapes of the contract. Each change sends `tasks-changed`. A task of an employee (an MCP tool)
+/// sends it too.
+#[test]
+fn the_task_commands_work_through_the_ipc_and_each_change_sends_tasks_changed() {
+    let app = app();
+    let path = app.path();
+    app.call("floor_create", json!({ "path": path, "name": "Tower" }))
+        .unwrap();
+    let count = |app: &App| {
+        app.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(name, payload)| name == "tasks-changed" && payload == &json!({"path": path}))
+            .count()
+    };
+    assert_eq!(
+        app.call("task_list", json!({ "path": path })).unwrap(),
+        json!([])
+    );
+    let created = app
+        .call(
+            "task_create",
+            json!({ "path": path, "title": "Add hello", "description": "Write hello.txt" }),
+        )
+        .unwrap();
+    assert_eq!(created["id"], 1);
+    assert_eq!(created["status"], "todo");
+    assert_eq!(created["creator"], "operator");
+    assert_eq!(created["assignee"], Value::Null);
+    assert!(created["createdAt"].as_i64().unwrap() > 0);
+    assert_eq!(count(&app), 1);
+
+    // An assignment starts the session of the assignee (the message is its first message).
+    let assigned = app
+        .call(
+            "task_assign",
+            json!({ "path": path, "id": 1, "slug": "pm" }),
+        )
+        .unwrap();
+    assert_eq!(assigned["assignee"], "pm");
+    assert_eq!(assigned["assigner"], "operator");
+    assert_eq!(count(&app), 2);
+    app.wait_event("the session of the pm shows", |e| {
+        e["session"]["slug"] == "pm"
+    });
+
+    let updated = app
+        .call(
+            "task_update",
+            json!({ "path": path, "id": 1, "status": "blocked", "note": "waiting" }),
+        )
+        .unwrap();
+    assert_eq!(updated["status"], "blocked");
+    assert_eq!(count(&app), 3);
+    // A null note is allowed.
+    app.call(
+        "task_update",
+        json!({ "path": path, "id": 1, "status": "in_progress", "note": null }),
+    )
+    .unwrap();
+    let detail = app
+        .call("task_get", json!({ "path": path, "id": 1 }))
+        .unwrap();
+    assert_eq!(detail["task"]["status"], "in_progress");
+    let kinds: Vec<&str> = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["created", "assigned", "status", "status"]);
+    assert_eq!(detail["events"][2]["author"], "operator");
+    assert_eq!(detail["events"][2]["text"], "waiting");
+    assert_eq!(detail["events"][2]["value"], "blocked");
+
+    // The report: null with no path, and the text with a file.
+    assert_eq!(
+        app.call("task_report", json!({ "path": path, "id": 1 }))
+            .unwrap(),
+        Value::Null
+    );
+    let reports = app.cwd.join(".swarm/reports");
+    std::fs::write(reports.join("T-1.md"), "# Report\nOK\n").unwrap();
+    let token = app
+        .tokens
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .rev()
+        .find(|(slug, _)| slug == "pm")
+        .map(|(_, token)| token.clone())
+        .expect("the pm has a token");
+    let before = count(&app);
+    let answer = mcp_call(
+        &app.mcp_url,
+        &token,
+        "task_update",
+        json!({"task": "T-1", "status": "review", "report": ".swarm/reports/T-1.md"}),
+    );
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    assert_eq!(
+        count(&app),
+        before + 1,
+        "a tool of an employee sends the event too"
+    );
+    assert_eq!(
+        app.call("task_report", json!({ "path": path, "id": 1 }))
+            .unwrap(),
+        json!("# Report\nOK\n")
+    );
+    let list = app.call("task_list", json!({ "path": path })).unwrap();
+    assert_eq!(list[0]["status"], "review");
+    assert_eq!(list[0]["report"], ".swarm/reports/T-1.md");
+
+    // Errors are texts.
+    let error = app
+        .call("task_get", json!({ "path": path, "id": 9 }))
+        .unwrap_err();
+    assert!(error.contains("T-9"), "{error}");
+    let error = app
+        .call(
+            "task_assign",
+            json!({ "path": path, "id": 1, "slug": "nobody" }),
+        )
+        .unwrap_err();
+    assert!(error.contains("nobody"), "{error}");
+    let error = app
+        .call(
+            "task_create",
+            json!({ "path": path, "title": " ", "description": "" }),
+        )
+        .unwrap_err();
+    assert!(error.contains("empty"), "{error}");
+    app.call(
+        "task_update",
+        json!({ "path": path, "id": 1, "status": "bad", "note": null }),
+    )
+    .unwrap_err();
+    let _ = &app.dir;
 }

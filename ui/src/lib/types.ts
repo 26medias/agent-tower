@@ -1,4 +1,4 @@
-// Types copied from docs/ipc-m1.md ("Types" and "Events"), docs/ipc-visuals-init.md (section 3)
+// Types copied from docs/ipc-m2.md (tasks), docs/ipc-m1.md ("Types" and "Events"), docs/ipc-visuals-init.md (section 3)
 // and docs/ipc-settings.md (section 3).
 // Keep in step with those files.
 
@@ -121,6 +121,44 @@ export interface EmployeeStartedPayload {
     bySlug: string; // the employee that started it
     byName: string;
     resumed: boolean; // the last CLI session was resumed (not a fresh start)
+}
+
+/** Payload of the `tasks-changed` event (docs/ipc-m2.md). */
+export interface TasksChangedPayload {
+    path: string;
+}
+
+export type TaskStatus = "todo" | "in_progress" | "blocked" | "review" | "done";
+
+/** A task of a floor (docs/ipc-m2.md). */
+export interface TaskView {
+    id: number; // the number in the floor. The UI shows "T-" + id
+    title: string;
+    description: string;
+    parent: number | null;
+    creator: string; // an employee slug, or "operator"
+    assignee: string | null;
+    assigner: string | null; // an employee slug, or "operator"
+    status: TaskStatus;
+    report: string | null; // relative to the floor folder: ".swarm/reports/T-12.md"
+    createdAt: number; // Unix ms
+    updatedAt: number; // Unix ms
+}
+
+export type TaskEventKind = "created" | "assigned" | "status" | "comment" | "report";
+
+export interface TaskEvent {
+    id: number;
+    at: number; // Unix ms
+    author: string; // an employee slug, or "operator"
+    kind: TaskEventKind;
+    value: string | null; // status: the new status. assigned: the slug. report: the path
+    text: string | null; // status: the note. comment: the comment
+}
+
+export interface TaskDetail {
+    task: TaskView;
+    events: TaskEvent[]; // oldest first
 }
 
 /** Names accepted by `programs_set`. */

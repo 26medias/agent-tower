@@ -1034,6 +1034,17 @@ try {
         await page.keyboard.press(k);
         await page.waitForTimeout(40);
     };
+    // The checks of this section were written for a work area of 960 px (before the task board).
+    // The board is hidden while they run (its own checks are in section 19).
+    await page.addInitScript(() => {
+        document.addEventListener("DOMContentLoaded", () => {
+            if (sessionStorage.getItem("e2e-hide-board") !== "1") return;
+            const style = document.createElement("style");
+            style.textContent = ".app{--board-w:0px !important} .board{display:none !important}";
+            document.head.appendChild(style);
+        });
+    });
+    await page.evaluate(() => sessionStorage.setItem("e2e-hide-board", "1"));
     await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
     await page.reload();
     await page.waitForSelector(".storey.on");
@@ -1044,7 +1055,7 @@ try {
     check(
         "there are 3 separators: 2 vertical and 1 horizontal, each focusable and with a label",
         JSON.stringify(
-            await page.$$eval('[role="separator"]', (els) =>
+            await page.$$eval('[role="separator"]:not(.board *)', (els) =>
                 els.map((e) => [e.getAttribute("aria-orientation"), e.tabIndex, !!e.getAttribute("aria-label")]),
             ),
         ) === JSON.stringify([["vertical", 0, true], ["vertical", 0, true], ["horizontal", 0, true]]),
@@ -1328,7 +1339,7 @@ try {
     // office height, and the result was 556 px.)
     check("the three sizes changed by the drags", mine.col === 280 && mine.office === 286 && mine.info === 631, JSON.stringify(mine));
     const storedText = await page.evaluate(() => localStorage.getItem("agent-tower:layout"));
-    check("the sizes are in localStorage", storedText === JSON.stringify({ col: 280, office: 286, info: 631 }), String(storedText));
+    check("the sizes are in localStorage", storedText === JSON.stringify({ col: 280, office: 286, info: 631, board: null, boardCollapsed: null }), String(storedText));
     await page.reload();
     await page.waitForSelector(".storey.on");
     await page.waitForTimeout(400);
@@ -1371,6 +1382,11 @@ try {
     check("when the window gets lower the office shrinks so that the terminal area keeps 160 px", small >= 159 && small <= 175, String(small));
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+    await page.reload();
+    await page.waitForSelector(".storey.on");
+    await page.waitForTimeout(300);
+
+    await page.evaluate(() => sessionStorage.removeItem("e2e-hide-board"));
     await page.reload();
     await page.waitForSelector(".storey.on");
     await page.waitForTimeout(300);
@@ -1594,6 +1610,234 @@ try {
         await page.locator(`.tab[data-session="${newId}"]`).click();
         await page.waitForSelector(`.tab.active[data-session="${newId}"]`);
         check("the operator can open the new tab", (await sid()) === newId);
+    }
+
+
+    // ================= 19. The task board (M2 slice 2, docs/ipc-m2.md) =================
+    {
+        const FLOOR = "/home/demo/tower";
+        const boardShots = process.env.E2E_BOARD_SHOTS ?? "/tmp/agent-tower-review/m2b/board";
+        mkdirSync(boardShots, { recursive: true });
+        const H_BOARD = '[role="separator"][aria-label="Resize the task board"]';
+        await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+        await page.setViewportSize({ width: 1280, height: 800 });
+        await page.reload();
+        await page.waitForSelector(".storey.on");
+        await page.waitForSelector('.board .card');
+        await page.waitForTimeout(300);
+        const boardW = async () => Math.round((await page.locator(".board").boundingBox()).width);
+        const workW = async () => Math.round((await page.locator("main.work").boundingBox()).width);
+        const groupNames = () => page.$$eval(".board .group .g-name", (els) => els.map((e) => e.textContent.trim()));
+        const cardIds = (status) =>
+            page.$$eval(`.board .group[data-status="${status}"] .card`, (els) => els.map((e) => Number(e.dataset.task)));
+        await page.screenshot({ path: join(boardShots, "1-board.png") });
+
+        // 19a. The default board: 260 px at the right, the terminal keeps its room.
+        check("the board is at the right of the work area, 260 px wide", (await boardW()) === 260, String(await boardW()));
+        const boxes = await page.evaluate(() => {
+            const b = document.querySelector(".board").getBoundingClientRect();
+            const w = document.querySelector("main.work").getBoundingClientRect();
+            return { boardLeft: b.left, boardRight: b.right, workRight: w.right, win: window.innerWidth };
+        });
+        check("the board touches the right edge of the window and starts where the work area ends",
+            Math.abs(boxes.boardRight - boxes.win) < 1.5 && Math.abs(boxes.boardLeft - boxes.workRight) < 1.5, JSON.stringify(boxes));
+        check("at 1280 x 800 the terminal area is at least 480 px wide", (await workW()) >= 480, String(await workW()));
+        const termW = await page.locator(".area").boundingBox();
+        check("the terminal area is not cut: it is inside the window", termW.x + termW.width <= 1280 - 259, JSON.stringify(termW));
+        check("there are 4 separators: the board has one", (await page.$$('[role="separator"]')).length === 4);
+        check("the page has no horizontal scroll", await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+
+        // 19b. The groups and the cards.
+        check("the groups are in order: in progress, review, blocked, to do, done",
+            JSON.stringify(await groupNames()) === JSON.stringify(["In progress", "Review", "Blocked", "To do", "Done"]),
+            JSON.stringify(await groupNames()));
+        check("a group shows its count",
+            (await page.locator('.board .group[data-status="done"] .g-count').innerText()) === "1");
+        check("done is collapsed at the start: its card is not shown",
+            (await cardIds("done")).length === 0 &&
+            (await page.locator('.board .group[data-status="done"] .group-head').getAttribute("aria-expanded")) === "false");
+        check("the other groups show their cards", (await cardIds("in_progress")).join() === "2" && (await cardIds("review")).join() === "3" &&
+            (await cardIds("blocked")).join() === "4" && (await cardIds("todo")).join() === "5");
+        const card2 = page.locator('.board .card[data-task="2"]');
+        check("a card shows the ID, the title and the name of the assignee",
+            (await card2.locator(".c-id").innerText()) === "T-2" &&
+            (await card2.locator(".c-title").innerText()) === "Write the login form" &&
+            (await card2.locator(".c-who").innerText()) === "Lin",
+            (await card2.innerText()).replace(/\n/g, " | "));
+        check("a card of a task with no assignee says Unassigned", (await page.locator('.board .card[data-task="5"] .c-who').innerText()) === "Unassigned");
+        const colours = await page.$$eval(".board .card", (els) =>
+            Object.fromEntries(els.map((e) => [e.dataset.status, getComputedStyle(e).borderLeftColor])));
+        check("each status has its own colour on the card",
+            new Set(Object.values(colours)).size === 4 && colours.in_progress === "rgb(90, 169, 242)" && colours.review === "rgb(255, 197, 107)" &&
+            colours.blocked === "rgb(255, 122, 144)" && colours.todo === "rgb(147, 162, 194)", JSON.stringify(colours));
+        await page.locator('.board .group[data-status="done"] .group-head').click();
+        check("a click on the done group shows its card", (await cardIds("done")).join() === "1");
+        await page.locator('.board .group[data-status="done"] .group-head').click();
+        check("a second click collapses it again", (await cardIds("done")).length === 0);
+        check("the header counts the open tasks (not done)", (await page.locator(".board .open-count").innerText()) === "4 open");
+
+        // 19c. A click opens the detail panel.
+        await page.locator('.board .card[data-task="3"]').click();
+        await page.waitForSelector('.board [aria-label="Task detail"] pre.report');
+        const detail = page.locator('.board [aria-label="Task detail"]');
+        check("a click on a card opens the detail panel and hides the list", (await page.locator(".board .group").count()) === 0 && (await detail.count()) === 1);
+        check("the detail shows the ID, the title, the status and the assignee",
+            (await detail.locator(".id").innerText()) === "T-3" && (await detail.locator(".title").innerText()) === "Check the build on Linux" &&
+            (await detail.locator('[data-testid="detail-status"]').innerText()) === "Review" &&
+            (await detail.locator('[data-testid="detail-assignee"]').innerText()) === "Sam");
+        check("the detail shows the description", (await detail.locator(".text").innerText()) === "Run the build and report.");
+        const eventLines = await detail.locator(".events li").allInnerTexts();
+        check("the events have a time, an author and the action",
+            eventLines.length === 3 && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n/.test(eventLines[0]) &&
+            eventLines[0].includes("Maya made the task") &&
+            eventLines[1].includes("Maya gave the task to Sam") && eventLines[2].includes("Sam set the status to Review"),
+            JSON.stringify(eventLines));
+        check("the report text shows in a scroll box as plain text",
+            (await detail.locator("pre.report").innerText()).startsWith("# T-3 report") &&
+            (await detail.locator("pre.report").evaluate((e) => getComputedStyle(e).overflow)) === "auto");
+        check("the report was read with task_report", (await calls("task_report")).some((c) => c.args.path === FLOOR && c.args.id === 3));
+        check("the detail has the controls of the operator: assign, status and note",
+            (await detail.locator('select[aria-label="Assign to"]').count()) === 1 &&
+            (await detail.locator('select[aria-label="Status"]').count()) === 1 &&
+            (await detail.locator('textarea[aria-label="Note"]').count()) === 1);
+        await page.screenshot({ path: join(boardShots, "2-detail.png") });
+
+        // 19d. Assign and set the status: the commands get the contract arguments.
+        await detail.locator('select[aria-label="Assign to"]').selectOption("eng-lin");
+        await detail.getByRole("button", { name: "Assign", exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="detail-assignee"]')?.textContent === "Lin");
+        const assignCall = (await calls("task_assign")).pop();
+        check("assign calls task_assign with path, id and slug", JSON.stringify(assignCall.args) === JSON.stringify({ path: FLOOR, id: 3, slug: "eng-lin" }), JSON.stringify(assignCall.args));
+        check("the detail shows the new assignee and an assigned event",
+            (await detail.locator(".events li").count()) === 4 && (await detail.locator(".events li").last().innerText()).includes("Operator gave the task to Lin"));
+        await detail.locator('select[aria-label="Status"]').selectOption("done");
+        await detail.locator('textarea[aria-label="Note"]').fill("Looks good");
+        await detail.getByRole("button", { name: "Set the status" }).click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="detail-status"]')?.textContent === "Done");
+        const updateCall = (await calls("task_update")).pop();
+        check("set the status calls task_update with path, id, status and note",
+            JSON.stringify(updateCall.args) === JSON.stringify({ path: FLOOR, id: 3, status: "done", note: "Looks good" }), JSON.stringify(updateCall.args));
+        check("the note is in the events and the field is empty again",
+            (await detail.locator(".events li").last().innerText()).includes("Looks good") && (await detail.locator('textarea[aria-label="Note"]').inputValue()) === "");
+        // A note alone keeps the status.
+        await detail.locator('textarea[aria-label="Note"]').fill("One more thing");
+        await detail.getByRole("button", { name: "Add the note" }).click();
+        await page.waitForFunction(() => document.querySelectorAll(".board .events li").length === 6);
+        const noteCall = (await calls("task_update")).pop();
+        check("a note alone is task_update with the same status",
+            noteCall.args.status === "done" && noteCall.args.note === "One more thing", JSON.stringify(noteCall.args));
+        check("the button for a note with no status change is off while the note is empty",
+            await detail.getByRole("button", { name: "Add the note" }).isDisabled());
+        await detail.getByRole("button", { name: /Back/ }).click();
+        check("Back shows the list again, with the changed task in the done group",
+            (await cardIds("done")).length === 0 && (await page.locator('.board .group[data-status="done"] .g-count').innerText()) === "2" &&
+            (await page.locator(".board .open-count").innerText()) === "3 open");
+
+        // 19e. The form makes a task.
+        await page.getByRole("button", { name: "+ New" }).click();
+        const form = page.locator('.board form[aria-label="New task"]');
+        check("the new task button is off while the title is empty", await form.getByRole("button", { name: "Make the task" }).isDisabled());
+        await form.locator('input[aria-label="Title of the new task"]').fill("Ship the demo");
+        await form.locator('textarea').fill("Write the notes.\nSecond line.");
+        await form.getByRole("button", { name: "Make the task" }).click();
+        await page.waitForSelector('.board [aria-label="Task detail"]');
+        const createCall = (await calls("task_create")).pop();
+        check("the form calls task_create with path, title and description",
+            JSON.stringify(createCall.args) === JSON.stringify({ path: FLOOR, title: "Ship the demo", description: "Write the notes.\nSecond line." }), JSON.stringify(createCall.args));
+        check("the new task opens in the detail panel, in To do, made by the operator, with no assignee",
+            (await page.locator('[data-testid="detail-status"]').innerText()) === "To do" &&
+            (await page.locator('[data-testid="detail-assignee"]').innerText()) === "Unassigned" &&
+            (await page.locator(".board .title").innerText()) === "Ship the demo");
+        await page.getByRole("button", { name: /Back/ }).click();
+        check("the new task is a card in the To do group", (await cardIds("todo")).join() === "5,6");
+
+        // 19f. The board refreshes on tasks-changed (an employee changes a task).
+        const listCalls = (await calls("task_list")).length;
+        await page.evaluate((p) => window.__towerMock.taskByEmployee(p, "eng-lin", { id: 2, status: "review", note: "ready" }), FLOOR);
+        await page.waitForFunction(() => document.querySelector('.board .group[data-status="review"] .card[data-task="2"]'));
+        check("a task that an employee changed moves to its new group with no click", (await cardIds("review")).join() === "2" && (await cardIds("in_progress")).length === 0);
+        check("the board read the list again after the event", (await calls("task_list")).length > listCalls);
+        const newId = await page.evaluate((p) => window.__towerMock.taskByEmployee(p, "pm", { create: "Employee task" }), FLOOR);
+        await page.waitForSelector(`.board .card[data-task="${newId}"]`);
+        check("a task that an employee made shows up", (await page.locator(`.board .card[data-task="${newId}"] .c-who`).innerText()) === "Unassigned");
+        // The open detail refreshes too.
+        await page.locator('.board .card[data-task="2"]').click();
+        await page.waitForSelector('.board [aria-label="Task detail"] .events li');
+        const eventsBefore = await page.locator(".board .events li").count();
+        await page.evaluate((p) => window.__towerMock.taskByEmployee(p, "pm", { id: 2, status: "blocked", note: "waits for the logo" }), FLOOR);
+        await page.waitForFunction((n) => document.querySelectorAll(".board .events li").length > n, eventsBefore);
+        check("the open detail shows the new event and status",
+            (await page.locator('[data-testid="detail-status"]').innerText()) === "Blocked" && (await page.locator(".board .events li").last().innerText()).includes("waits for the logo"));
+        await page.screenshot({ path: join(boardShots, "3-refreshed.png") });
+        // An event for another floor does not change this board.
+        const before2 = (await calls("task_list")).length;
+        await page.evaluate(() => window.__towerMock.taskByEmployee("/home/demo/second", "ceo", { create: "Other floor" }));
+        await page.waitForTimeout(200);
+        check("an event of another floor does not read this floor again", (await calls("task_list")).length === before2);
+        await page.getByRole("button", { name: /Back/ }).click();
+
+        // 19g. The resize handle, like the other panes.
+        check("the board handle is a vertical separator with a label and 260 as its value",
+            (await page.locator(H_BOARD).getAttribute("aria-orientation")) === "vertical" && (await page.locator(H_BOARD).getAttribute("aria-valuenow")) === "260");
+        await drag(H_BOARD, -60, 0);
+        check("a drag to the left makes the board 60 px wider", (await boardW()) === 320, String(await boardW()));
+        check("the terminal area shrinks by the same amount", (await workW()) === 640, String(await workW()));
+        await drag(H_BOARD, -900, 0);
+        check("a drag far to the left stops where the terminal keeps 480 px", (await boardW()) === 480 && (await workW()) === 480, `${await boardW()} ${await workW()}`);
+        await drag(H_BOARD, 900, 0);
+        check("a drag far to the right stops at 200 px", (await boardW()) === 200, String(await boardW()));
+        await key(H_BOARD, "ArrowLeft");
+        check("the Left key widens the board by 16 px", (await boardW()) === 216, String(await boardW()));
+        await key(H_BOARD, "ArrowRight");
+        check("the Right key narrows it by 16 px", (await boardW()) === 200, String(await boardW()));
+        await drag(H_BOARD, -40, 0);
+        const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("agent-tower:layout")));
+        check("the width is in localStorage like the other sizes", stored.board === 240 && stored.col === null, JSON.stringify(stored));
+        await page.reload();
+        await page.waitForSelector(".storey.on");
+        await page.waitForSelector(".board .card");
+        check("the width is the same after a reload", (await boardW()) === 240, String(await boardW()));
+        await page.locator(H_BOARD).dblclick();
+        check("a double click resets the board to 260 px", (await boardW()) === 260, String(await boardW()));
+
+        // 19h. Collapse: a narrow strip with the number of open tasks.
+        const openNow = (await page.locator(".board .open-count").innerText()).replace(" open", "");
+        await page.getByRole("button", { name: "Collapse the task board" }).click();
+        await page.waitForSelector(".board.collapsed");
+        check("the collapsed board is a strip of 36 px", (await boardW()) === 36, String(await boardW()));
+        check("the strip shows the count of open tasks", (await page.locator('[data-testid="board-count"]').innerText()) === openNow, `${await page.locator('[data-testid="board-count"]').innerText()} vs ${openNow}`);
+        check("the terminal gets the room", (await workW()) === 1280 - 320 - 36, String(await workW()));
+        check("the strip has no handle and no cards", (await page.locator(H_BOARD).count()) === 0 && (await page.locator(".board .card").count()) === 0);
+        await page.screenshot({ path: join(boardShots, "4-collapsed.png") });
+        // The count follows the events while the board is collapsed.
+        await page.evaluate((p) => window.__towerMock.taskByEmployee(p, "pm", { create: "While collapsed" }), FLOOR);
+        await page.waitForFunction((n) => Number(document.querySelector('[data-testid="board-count"]').textContent) === n + 1, Number(openNow));
+        check("the count of the strip goes up when a task is made", true);
+        await page.reload();
+        await page.waitForSelector(".board.collapsed");
+        check("the collapsed state is the same after a reload", (await boardW()) === 36);
+        await page.getByRole("button", { name: /Open the task board/ }).click();
+        await page.waitForSelector(".board .card");
+        check("a click on the strip opens the board again, with its width", (await boardW()) === 260, String(await boardW()));
+
+        // 19i. A narrow window: the board is collapsed at the start, and the terminal keeps 480 px.
+        await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+        await page.setViewportSize({ width: 980, height: 700 });
+        await page.reload();
+        await page.waitForSelector(".storey.on");
+        await page.waitForTimeout(300);
+        check("below the room for a 260 px board the board starts collapsed", (await page.locator(".board.collapsed").count()) === 1 && (await workW()) >= 480, String(await workW()));
+        await page.getByRole("button", { name: /Open the task board/ }).click();
+        await page.waitForTimeout(200);
+        const narrowOpen = { board: await boardW(), work: await workW() };
+        check("an open board in a narrow window is not narrower than 200 px", narrowOpen.board >= 200, JSON.stringify(narrowOpen));
+        await page.screenshot({ path: join(boardShots, "5-narrow.png") });
+        await page.evaluate(() => localStorage.removeItem("agent-tower:layout"));
+        await page.setViewportSize({ width: 1280, height: 800 });
+        await page.reload();
+        await page.waitForSelector(".storey.on");
+        await page.waitForSelector(".board .card");
+        check("at 1280 x 800 again the board is open by default", (await boardW()) === 260);
     }
 
     await page.screenshot({ path: shot });

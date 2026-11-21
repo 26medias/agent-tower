@@ -8,6 +8,8 @@ use tower_core::model::{
     CliKind, Employee as CoreEmployee, FloorDefaults as CoreDefaults, PermissionPolicy,
 };
 use tower_core::status::Status;
+pub use tower_core::store::TaskStatus;
+use tower_core::store::{TaskEventRecord, TaskRecord};
 
 fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
@@ -408,6 +410,90 @@ pub struct FloorChanged {
     pub path: String,
 }
 
+/// Payload of the event `tasks-changed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasksChanged {
+    pub path: String,
+}
+
+/// `TaskView` (`docs/ipc-m2.md`). The status words are `todo`, `in_progress`, `blocked`, `review`
+/// and `done`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskView {
+    /// The number of the task in its floor. It is shown as `T-<id>`.
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub parent: Option<i64>,
+    /// An employee slug, or `operator`.
+    pub creator: String,
+    pub assignee: Option<String>,
+    /// Who gave the task to the assignee: an employee slug, or `operator`.
+    pub assigner: Option<String>,
+    pub status: TaskStatus,
+    /// The report file, relative to the floor folder (`.swarm/reports/T-12.md`).
+    pub report: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl From<TaskRecord> for TaskView {
+    fn from(task: TaskRecord) -> TaskView {
+        TaskView {
+            id: task.id,
+            title: task.title,
+            description: task.description,
+            parent: task.parent,
+            creator: task.creator,
+            assignee: task.assignee,
+            assigner: task.assigner,
+            status: task.status,
+            report: task.report,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        }
+    }
+}
+
+/// `TaskEvent` (`docs/ipc-m2.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEvent {
+    pub id: i64,
+    pub at: i64,
+    /// An employee slug, or `operator`.
+    pub author: String,
+    /// `created`, `assigned`, `status`, `comment` or `report`.
+    pub kind: String,
+    /// The new status, the assignee, or the report path.
+    pub value: Option<String>,
+    /// The note or the comment.
+    pub text: Option<String>,
+}
+
+impl From<TaskEventRecord> for TaskEvent {
+    fn from(event: TaskEventRecord) -> TaskEvent {
+        TaskEvent {
+            id: event.id,
+            at: event.at,
+            author: event.author,
+            kind: event.kind,
+            value: event.value,
+            text: event.text,
+        }
+    }
+}
+
+/// `TaskDetail`: the result of `task_get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub task: TaskView,
+    pub events: Vec<TaskEvent>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +742,10 @@ mod tests {
             json!({"path": "/p"})
         );
         assert_eq!(
+            to_json(&TasksChanged { path: "/p".into() }),
+            json!({"path": "/p"})
+        );
+        assert_eq!(
             to_json(&EmployeeStarted {
                 path: "/p".into(),
                 session_id: "s2".into(),
@@ -666,6 +756,60 @@ mod tests {
                 resumed: false,
             }),
             json!({"path": "/p", "sessionId": "s2", "slug": "eng", "name": "Kenji", "bySlug": "pm", "byName": "Tomas", "resumed": false})
+        );
+    }
+
+    #[test]
+    fn task_views_have_the_contract_fields_and_status_words() {
+        let record = TaskRecord {
+            id: 12,
+            title: "Add hello".into(),
+            description: "Write hello.txt".into(),
+            parent: Some(3),
+            creator: "pm".into(),
+            assignee: Some("eng".into()),
+            assigner: Some("operator".into()),
+            status: TaskStatus::InProgress,
+            report: Some(".swarm/reports/T-12.md".into()),
+            created_at: 1000,
+            updated_at: 2000,
+        };
+        assert_eq!(
+            to_json(&TaskView::from(record.clone())),
+            json!({
+                "id": 12, "title": "Add hello", "description": "Write hello.txt",
+                "parent": 3, "creator": "pm", "assignee": "eng", "assigner": "operator",
+                "status": "in_progress", "report": ".swarm/reports/T-12.md",
+                "createdAt": 1000, "updatedAt": 2000
+            })
+        );
+        for (status, word) in [
+            (TaskStatus::Todo, "todo"),
+            (TaskStatus::InProgress, "in_progress"),
+            (TaskStatus::Blocked, "blocked"),
+            (TaskStatus::Review, "review"),
+            (TaskStatus::Done, "done"),
+        ] {
+            assert_eq!(to_json(&status), json!(word));
+            let back: TaskStatus = serde_json::from_value(json!(word)).unwrap();
+            assert_eq!(back, status);
+        }
+        let event = TaskEvent::from(TaskEventRecord {
+            id: 5,
+            task_id: 12,
+            at: 1500,
+            author: "eng".into(),
+            kind: "status".into(),
+            value: Some("review".into()),
+            text: None,
+        });
+        assert_eq!(
+            to_json(&TaskDetail {
+                task: record.into(),
+                events: vec![event]
+            })["events"],
+            json!([{"id": 5, "at": 1500, "author": "eng", "kind": "status",
+                "value": "review", "text": null}])
         );
     }
 }

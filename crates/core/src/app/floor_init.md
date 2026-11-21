@@ -133,7 +133,37 @@ complete and that they can stop this session.
       tools and NEVER with the subagents, the agent tool or the task tool of the CLI. The CLI
       subagents hide the work from the operator and bypass the team. Tell each manager that
       the CLI subagents are for small work of its own role only.
-  There is no task board yet. The tools above carry the work and the answers.
+- **Tasks and reports.** The floor has a task board. The tools are in the same MCP server
+  `tower`, and each employee has them in each session:
+    - `task_create(title, description, parent?)`: makes a task with the status `todo` and returns
+      its ID (for example `T-12`). Any employee may do it.
+    - `task_assign(task, employee)`: gives a task to an employee. The caller needs the same right
+      as for `employee_start`: it is above the employee in the `manager` chain, or it is the `ceo`
+      or the `pm`. The app sends the assignee ONE message with the ID, the title, the
+      description, who gave the task, and the orders for the task. The app starts the session of
+      the assignee if it has none.
+    - `task_update(task, status, note?, report?)`: sets the status (`todo`, `in_progress`,
+      `blocked`, `review`, `done`). The assignee, the creator, the `ceo` and the `pm` may do it.
+      The app sends a short message to the person who gave the task. `report` is the path of a
+      report file inside `.swarm/reports/`. The app refuses any other path, and a path with no
+      file when the status is `review` or `done`.
+    - `task_get(task)`, `task_list(status?, assignee?)` and `task_comment(task, text)`: any
+      employee of the floor may use them.
+    - A message about a task has the header `[task T-12 from <Name> (<Role>)]`. It does not count
+      for the limit of 30 messages.
+    - **Report files.** When an employee completes a task, it writes a report to
+      `.swarm/reports/<task-id>.md`. The report says what it did, what it verified, what it did
+      not do, and its open questions. The employee gives the path in `task_update` and sends its
+      manager a short message that names the file. A manager reads the report FILE, not the
+      terminal of the employee. The reports folder is the only place under `.swarm/` that an
+      employee may write. Git ignores it.
+    - The app writes these rules into the instructions of each employee. A role text must add
+      what is special for the role. It must tell a manager to break each request into tasks with
+      `task_create`, to give each task with `task_assign` to one of its direct reports (not past a direct report that has a team), to follow them with `task_list`, to
+      read the report file of a task in `review`, and to set `done` only after that. It must tell
+      an employee to set `in_progress` when it starts and `review` when it is ready.
+    - The operator sees the tasks on a board in the app, and can make, give and change tasks
+      there too.
 - **Permission with the CLI `claude`.**
     - `read-only`: the CLI asks the operator before each file edit and before each shell command
       that the operator's own CLI settings do not already permit. The employee can read all

@@ -97,7 +97,19 @@ fn the_endpoint_speaks_initialize_tools_list_tools_call_ping_and_notifications()
         .collect();
     assert_eq!(
         names,
-        ["org_chart", "employee_start", "send", "inbox", "wait"]
+        [
+            "org_chart",
+            "employee_start",
+            "send",
+            "inbox",
+            "wait",
+            "task_create",
+            "task_assign",
+            "task_update",
+            "task_get",
+            "task_list",
+            "task_comment"
+        ]
     );
     for tool in list["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");
@@ -1089,7 +1101,8 @@ fn the_instructions_have_the_team_and_the_rules_and_the_setup_session_has_no_ser
     ] {
         assert!(text.contains(line), "{line}\n{text}");
     }
-    assert!(text.contains("`employee_start` and `send` of the MCP server `tower`"));
+    assert!(text.contains("the tools of the MCP server `tower`: `task_assign` for a task"));
+    assert!(text.contains("`employee_start` and `send` for a question or a short message"));
     assert!(text.contains("Do NOT use the subagents, the agent tool or the task tool"));
     assert!(text.contains("[message from <Name> (<Role>)]"));
     assert!(text.contains("It is from that employee, not from the operator."));
@@ -1382,9 +1395,9 @@ fn a_session_resumed_with_no_message_gets_the_messages_that_come_later() {
     });
 }
 
-/// R3: the first message has the new message and the older waiting ones only while the text
-/// stays under 60000 bytes. The others are pasted after the first turn. Each message goes out
-/// one time.
+/// R3: the first message holds the OLDEST waiting messages, in order, while the text stays under
+/// 60000 bytes. The others (the new message too, when it does not fit) are pasted after the first
+/// turn, in order. Each message goes out one time. The answer of the tool says what happened.
 #[test]
 fn the_first_message_of_a_start_is_limited_and_the_rest_is_pasted_after_the_first_turn() {
     let (rig, _ceo, _eng) = rig_with_two();
@@ -1401,6 +1414,13 @@ fn the_first_message_of_a_start_is_limited_and_the_rest_is_pasted_after_the_firs
     }
     let result = rig.tool("ceo", "send", json!({"to": "qa", "text": "start now"}));
     assert!(!result.is_error, "{result:?}");
+    assert!(
+        result
+            .text
+            .contains("is NOT in the first message of that session"),
+        "the answer tells that the message did not go first: {}",
+        result.text
+    );
     let call = rig
         .calls()
         .into_iter()
@@ -1413,29 +1433,32 @@ fn the_first_message_of_a_start_is_limited_and_the_rest_is_pasted_after_the_firs
         "first message has {} bytes",
         first.len()
     );
-    // The new message, and the two oldest of the older ones, in the order of sending.
-    assert!(
-        first.ends_with(&delivered("Ada", "CEO", "ceo", "start now")),
-        "ends with the new one"
-    );
+    // The two oldest messages fit. The new message does not jump the queue.
     assert!(first.contains(&"a".repeat(20_000)) && first.contains(&"b".repeat(20_000)));
     assert!(
         !first.contains(&"c".repeat(20_000)),
         "the third older one does not fit"
     );
+    assert!(!first.contains("start now"), "the new message is not first");
 
-    // The others are pasted after the first turn, and each exactly one time.
+    // The others are pasted after the first turn, in order, and each exactly one time.
     let qa = call.app_session_id;
     wait_for("the rest is pasted", || rig.paste_text(&qa).is_some());
     let pasted = rig.paste_text(&qa).unwrap();
+    let mut last = 0;
     for letter in ['c', 'd', 'e', 'f', 'g'] {
-        assert_eq!(
-            pasted.matches(&letter.to_string().repeat(20_000)).count(),
-            1,
-            "{letter}"
-        );
+        let block = letter.to_string().repeat(20_000);
+        assert_eq!(pasted.matches(&block).count(), 1, "{letter}");
+        let at = pasted.find(&block).unwrap();
+        assert!(at > last, "{letter} is in order");
+        last = at;
     }
-    assert!(!pasted.contains(&"a".repeat(20_000)) && !pasted.contains("start now"));
+    assert_eq!(pasted.matches("start now").count(), 1);
+    assert!(
+        pasted.find("start now").unwrap() > last,
+        "the new one is last"
+    );
+    assert!(!pasted.contains(&"a".repeat(20_000)));
     wait_for("all rows are delivered", || {
         rig.db().count_pending_messages("qa").unwrap() == 0
     });
@@ -1800,6 +1823,7 @@ fn a_client_that_sends_one_byte_at_a_time_is_cut_at_the_request_deadline() {
         config.mcp_limits = McpLimits {
             max_connections: 256,
             request_deadline: Duration::from_millis(1200),
+            ..McpLimits::default()
         };
     });
     rig.create_floor();
@@ -1861,6 +1885,116 @@ fn a_client_that_sends_one_byte_at_a_time_is_cut_at_the_request_deadline() {
     );
 }
 
+/// Read one HTTP answer (head and body by `Content-Length`) from a connection that stays open.
+fn read_answer(stream: &mut TcpStream) -> String {
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    while !raw.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => raw.push(byte[0]),
+            _ => return String::from_utf8_lossy(&raw).into_owned(),
+        }
+    }
+    let head = String::from_utf8_lossy(&raw).into_owned();
+    let length: usize = head
+        .lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(str::to_owned)
+        })
+        .map_or(0, |v| v.trim().parse().unwrap());
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).unwrap();
+    head + &String::from_utf8_lossy(&body)
+}
+
+fn ping_request(host: &str, token: &str) -> String {
+    let body = rpc_body(1, "ping", json!({}));
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// A new connection that sends no byte is closed after `first_byte_timeout`, so idle local
+/// connections cannot fill the cap. A connection that did a request may stay silent longer: the
+/// CLIs keep one connection for many calls.
+#[test]
+fn a_new_connection_that_sends_no_byte_loses_its_place_after_the_first_byte_timeout() {
+    assert_eq!(tower_core::app::FIRST_BYTE_TIMEOUT, Duration::from_secs(5));
+    let rig = Rig::with(|config| {
+        config.mcp_limits = McpLimits {
+            max_connections: 3,
+            first_byte_timeout: Duration::from_millis(600),
+            ..McpLimits::default()
+        };
+    });
+    rig.create_floor();
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    let host = host_of(&rig);
+    let token = rig.token_of("ceo");
+    // Fill all places with silent connections.
+    let mut silent: Vec<TcpStream> = Vec::new();
+    wait_for("three silent connections are accepted", || {
+        silent.clear();
+        for _ in 0..3 {
+            let stream = TcpStream::connect(&host).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            silent.push(stream);
+        }
+        silent.iter_mut().all(|stream| {
+            let mut byte = [0u8; 16];
+            matches!(stream.read(&mut byte), Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+        })
+    });
+    let answer = raw_request(
+        &host,
+        "GET /mcp HTTP/1.1\r\nHost: x\r\n\r\n",
+        Duration::from_secs(5),
+    );
+    assert!(
+        answer.starts_with("HTTP/1.1 503"),
+        "the cap is full: {answer:?}"
+    );
+    // The silent connections are closed by the server after the timeout.
+    let started = Instant::now();
+    for stream in &mut silent {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        let mut byte = [0u8; 16];
+        assert!(
+            matches!(stream.read(&mut byte), Ok(0) | Err(_)),
+            "the server closes a silent connection"
+        );
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "closed after {:?}",
+        started.elapsed()
+    );
+    // The places are free: a real request works, on a connection that then stays open.
+    let mut stream = TcpStream::connect(&host).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(ping_request(&host, &token).as_bytes())
+        .unwrap();
+    assert!(read_answer(&mut stream).starts_with("HTTP/1.1 200"));
+    // After its first request, the connection may stay silent for longer than the first-byte time.
+    std::thread::sleep(Duration::from_millis(1500));
+    stream
+        .write_all(ping_request(&host, &token).as_bytes())
+        .unwrap();
+    let second = read_answer(&mut stream);
+    assert!(second.starts_with("HTTP/1.1 200"), "{second:?}");
+}
+
 /// R9: at most `max_connections` open connections. The next one gets 503. A closed connection
 /// frees its place.
 #[test]
@@ -1869,6 +2003,7 @@ fn over_the_connection_limit_the_server_answers_503_and_a_closed_connection_free
         config.mcp_limits = McpLimits {
             max_connections: 3,
             request_deadline: Duration::from_secs(30),
+            ..McpLimits::default()
         };
     });
     rig.create_floor();

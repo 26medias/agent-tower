@@ -9,6 +9,14 @@ export const OFFICE_MIN = 120;
 /** The terminal area keeps at least this height. */
 export const TERMINAL_MIN = 160;
 export const INFO_MIN = 200;
+/** The task board column is never narrower than this while it is open. */
+export const BOARD_MIN = 200;
+/** The task board column width that the operator never changed. */
+export const BOARD_DEFAULT = 260;
+/** The terminal (the work area) keeps at least this width. The board gives way. */
+export const WORK_MIN = 480;
+/** The width of the strip that is left of a collapsed board. */
+export const BOARD_STRIP = 36;
 /** The room keeps at least this width. */
 export const ROOM_MIN = 120;
 /** One arrow key press moves a handle by this many pixels. */
@@ -25,6 +33,10 @@ export interface StoredSizes {
     col: number | null;
     office: number | null;
     info: number | null;
+    /** Width of the task board column. */
+    board: number | null;
+    /** `null`: follow the window (collapsed when the terminal would be narrower than `WORK_MIN`). */
+    boardCollapsed: boolean | null;
 }
 
 export function clamp(value: number, min: number, max: number): number {
@@ -70,6 +82,19 @@ export function defaultInfo(officeW: number, officeH: number): number {
     return Math.max(INFO_DEFAULT_MIN, Math.round(officeW - officeH * 1.5));
 }
 
+/**
+ * The width range of the open task board. The terminal keeps `WORK_MIN`: the board is at most
+ * what is left of the window after the building column and `WORK_MIN`.
+ */
+export function boardRange(winW: number, colW: number): Range {
+    return { min: BOARD_MIN, max: Math.max(BOARD_MIN, Math.floor(winW - colW - WORK_MIN)) };
+}
+
+/** True when an open board of the default width would leave the terminal narrower than `WORK_MIN`. */
+export function boardCollapsedByDefault(winW: number, colW: number): boolean {
+    return winW - colW - BOARD_DEFAULT < WORK_MIN;
+}
+
 /** The size to use: the custom value when there is one, else the default. Always inside the range. */
 export function resolveSize(custom: number | null, fallback: number, range: Range): number {
     const raw = custom !== null && Number.isFinite(custom) ? custom : fallback;
@@ -80,15 +105,21 @@ function numberOrNull(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : null;
 }
 
-/** Read the stored text. Anything that is not a clean object gives three nulls (all defaults). */
+/** Read the stored text. Anything that is not a clean object gives only nulls (all defaults). */
 export function parseStored(text: string | null): StoredSizes {
-    const none: StoredSizes = { col: null, office: null, info: null };
+    const none: StoredSizes = { col: null, office: null, info: null, board: null, boardCollapsed: null };
     if (!text) return none;
     try {
         const data: unknown = JSON.parse(text);
         if (typeof data !== "object" || data === null) return none;
         const o = data as Record<string, unknown>;
-        return { col: numberOrNull(o.col), office: numberOrNull(o.office), info: numberOrNull(o.info) };
+        return {
+            col: numberOrNull(o.col),
+            office: numberOrNull(o.office),
+            info: numberOrNull(o.info),
+            board: numberOrNull(o.board),
+            boardCollapsed: typeof o.boardCollapsed === "boolean" ? o.boardCollapsed : null,
+        };
     } catch {
         return none;
     }

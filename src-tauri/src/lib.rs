@@ -38,9 +38,16 @@ impl<R: Runtime> Observer for TauriObserver<R> {
         };
         let _ = self.app.emit("floor-changed", payload);
     }
+
+    fn tasks_changed(&self, path: &Path) {
+        let payload = views::TasksChanged {
+            path: path.to_string_lossy().into_owned(),
+        };
+        let _ = self.app.emit("tasks-changed", payload);
+    }
 }
 
-/// Register the commands of `docs/ipc-m1.md`, `docs/ipc-visuals-init.md` and `docs/ipc-settings.md` on a builder. Public for the tests of the shell.
+/// Register the commands of `docs/ipc-m1.md`, `docs/ipc-visuals-init.md`, `docs/ipc-settings.md` and `docs/ipc-m2.md` on a builder. Public for the tests of the shell.
 #[doc(hidden)]
 pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
@@ -68,6 +75,12 @@ pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         commands::models_get,
         commands::models_set_custom,
         commands::floor_defaults_set,
+        commands::task_list,
+        commands::task_get,
+        commands::task_create,
+        commands::task_assign,
+        commands::task_update,
+        commands::task_report,
     ])
 }
 

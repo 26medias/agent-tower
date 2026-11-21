@@ -67,6 +67,10 @@ pub enum StoreError {
         found: i64,
         known: i64,
     },
+    #[error("there is no task T-{0}")]
+    UnknownTask(i64),
+    #[error("{0}")]
+    Rule(String),
     #[error("\"{0}\" is not a valid slug (use a-z, 0-9 and '-', start with a letter or digit)")]
     InvalidSlug(String),
     #[error("there is no employee with the slug \"{0}\"")]
@@ -315,6 +319,34 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX messages_by_target ON messages (to_slug, delivered_at, id);
     CREATE INDEX messages_by_pair ON messages (from_slug, to_slug, created_at);",
+    // 2 -> 3: the task board (spec 4.4 and 4.9). A message can belong to a task. `kind` is
+    // `message` (an employee wrote it), `task_assign` or `task_status` (the app wrote it).
+    "ALTER TABLE messages ADD COLUMN task_id INTEGER;
+    ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
+    CREATE TABLE tasks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        title       TEXT NOT NULL,
+        description TEXT NOT NULL,
+        parent_id   INTEGER REFERENCES tasks (id),
+        creator     TEXT NOT NULL,
+        assignee    TEXT,
+        assigner    TEXT,
+        status      TEXT NOT NULL DEFAULT 'todo',
+        report      TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
+    CREATE INDEX tasks_by_status ON tasks (status, id);
+    CREATE TABLE task_events (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL REFERENCES tasks (id),
+        at      INTEGER NOT NULL,
+        author  TEXT NOT NULL,
+        kind    TEXT NOT NULL,
+        value   TEXT,
+        text    TEXT
+    );
+    CREATE INDEX task_events_by_task ON task_events (task_id, id);",
 ];
 
 /// Schema version that this build writes and reads.
@@ -505,7 +537,18 @@ pub struct MessageRecord {
     pub text: String,
     pub created_at: i64,
     pub delivered_at: Option<i64>,
+    /// The task that the message is about (`task_assign` and `task_status` messages).
+    pub task_id: Option<i64>,
+    /// `message`, `task_assign` or `task_status` (the constants `KIND_*`).
+    pub kind: String,
 }
+
+/// An ordinary message from one employee to another.
+pub const KIND_MESSAGE: &str = "message";
+/// The message that the app sends to the assignee of a task.
+pub const KIND_TASK_ASSIGN: &str = "task_assign";
+/// The message that the app sends to the assigner of a task when its status changes.
+pub const KIND_TASK_STATUS: &str = "task_status";
 
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
     Ok(MessageRecord {
@@ -515,10 +558,13 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> 
         text: row.get(3)?,
         created_at: row.get(4)?,
         delivered_at: row.get(5)?,
+        task_id: row.get(6)?,
+        kind: row.get(7)?,
     })
 }
 
-const MESSAGE_COLUMNS: &str = "id, from_slug, to_slug, text, created_at, delivered_at";
+const MESSAGE_COLUMNS: &str =
+    "id, from_slug, to_slug, text, created_at, delivered_at, task_id, kind";
 
 impl Database {
     /// Store a message. `delivered_at` is `Some` for a message that goes out at once (the first
@@ -607,7 +653,8 @@ impl Database {
         Ok(messages)
     }
 
-    /// How many messages `from_slug` sent to `to_slug` at `since` or later (the loop limit).
+    /// How many messages `from_slug` sent to `to_slug` at `since` or later (the loop limit). The
+    /// messages that the app sends for a task do not count.
     pub fn count_messages_since(
         &self,
         from_slug: &str,
@@ -615,7 +662,8 @@ impl Database {
         since: i64,
     ) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE from_slug = ?1 AND to_slug = ?2 AND created_at >= ?3",
+            "SELECT COUNT(*) FROM messages
+             WHERE from_slug = ?1 AND to_slug = ?2 AND created_at >= ?3 AND kind = 'message'",
             params![from_slug, to_slug, since],
             |row| row.get(0),
         )?)
@@ -628,6 +676,347 @@ impl Database {
         ))?;
         let rows = statement.query_map([], message_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------------------------
+
+/// The status of a task (spec 4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Todo,
+    InProgress,
+    Blocked,
+    Review,
+    Done,
+}
+
+impl TaskStatus {
+    pub const ALL: [TaskStatus; 5] = [
+        TaskStatus::Todo,
+        TaskStatus::InProgress,
+        TaskStatus::Blocked,
+        TaskStatus::Review,
+        TaskStatus::Done,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskStatus::Todo => "todo",
+            TaskStatus::InProgress => "in_progress",
+            TaskStatus::Blocked => "blocked",
+            TaskStatus::Review => "review",
+            TaskStatus::Done => "done",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<TaskStatus> {
+        TaskStatus::ALL.into_iter().find(|s| s.as_str() == text)
+    }
+}
+
+/// One row of the `tasks` table. Times are Unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub parent: Option<i64>,
+    /// An employee slug, or `operator`.
+    pub creator: String,
+    pub assignee: Option<String>,
+    /// Who gave the task to the assignee: an employee slug, or `operator`.
+    pub assigner: Option<String>,
+    pub status: TaskStatus,
+    /// The report file, relative to the floor folder (`.swarm/reports/T-12.md`).
+    pub report: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One row of the `task_events` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEventRecord {
+    pub id: i64,
+    pub task_id: i64,
+    pub at: i64,
+    /// An employee slug, or `operator`.
+    pub author: String,
+    /// `created`, `assigned`, `status`, `comment` or `report`.
+    pub kind: String,
+    /// The new status, the assignee, or the report path.
+    pub value: Option<String>,
+    /// The note or the comment.
+    pub text: Option<String>,
+}
+
+/// A message that a task change stores in the same transaction as the change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTaskMessage {
+    pub from_slug: String,
+    pub to_slug: String,
+    pub text: String,
+    pub kind: &'static str,
+}
+
+/// What `Database::update_task` changes.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskChange<'a> {
+    pub status: TaskStatus,
+    pub note: Option<&'a str>,
+    pub report: Option<&'a str>,
+    pub author: &'a str,
+}
+
+/// The result of `Database::update_task`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutcome {
+    pub before: TaskRecord,
+    pub after: TaskRecord,
+    /// The ID of the message that the change stored, if there is one.
+    pub message_id: Option<i64>,
+}
+
+const TASK_COLUMNS: &str = "id, title, description, parent_id, creator, assignee, assigner, status, report, created_at, updated_at";
+
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
+    let status: String = row.get(7)?;
+    Ok(TaskRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        parent: row.get(3)?,
+        creator: row.get(4)?,
+        assignee: row.get(5)?,
+        assigner: row.get(6)?,
+        // A value that this build does not know (a newer app wrote it) shows as `todo`.
+        status: TaskStatus::parse(&status).unwrap_or(TaskStatus::Todo),
+        report: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEventRecord> {
+    Ok(TaskEventRecord {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        at: row.get(2)?,
+        author: row.get(3)?,
+        kind: row.get(4)?,
+        value: row.get(5)?,
+        text: row.get(6)?,
+    })
+}
+
+fn task_in(tx: &Transaction<'_>, id: i64) -> Result<TaskRecord, StoreError> {
+    tx.query_row(
+        &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+        params![id],
+        task_from_row,
+    )
+    .optional()?
+    .ok_or(StoreError::UnknownTask(id))
+}
+
+fn event_in(
+    tx: &Transaction<'_>,
+    task_id: i64,
+    at: i64,
+    author: &str,
+    kind: &str,
+    value: Option<&str>,
+    text: Option<&str>,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO task_events (task_id, at, author, kind, value, text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![task_id, at, author, kind, value, text],
+    )?;
+    Ok(())
+}
+
+fn message_in(
+    tx: &Transaction<'_>,
+    message: &NewTaskMessage,
+    task_id: i64,
+    at: i64,
+) -> Result<i64, StoreError> {
+    tx.execute(
+        "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at, task_id, kind)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+        params![
+            message.from_slug,
+            message.to_slug,
+            message.text,
+            at,
+            task_id,
+            message.kind
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+impl Database {
+    /// Make a task with the status `todo`. A parent that does not exist is refused.
+    pub fn create_task(
+        &self,
+        title: &str,
+        description: &str,
+        parent: Option<i64>,
+        creator: &str,
+        now: i64,
+    ) -> Result<TaskRecord, StoreError> {
+        let tx = self.write_transaction()?;
+        if let Some(parent) = parent {
+            task_in(&tx, parent)?;
+        }
+        tx.execute(
+            "INSERT INTO tasks (title, description, parent_id, creator, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'todo', ?5, ?5)",
+            params![title, description, parent, creator, now],
+        )?;
+        let id = tx.last_insert_rowid();
+        event_in(&tx, id, now, creator, "created", None, None)?;
+        let task = task_in(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    pub fn get_task(&self, id: i64) -> Result<Option<TaskRecord>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+                params![id],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The tasks, oldest first. A filter that is `None` is not applied.
+    pub fn list_tasks(
+        &self,
+        status: Option<TaskStatus>,
+        assignee: Option<&str>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks
+             WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR assignee = ?2) ORDER BY id"
+        ))?;
+        let rows = statement.query_map(
+            params![status.map(TaskStatus::as_str), assignee],
+            task_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The events of a task, oldest first.
+    pub fn task_events(&self, id: i64) -> Result<Vec<TaskEventRecord>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, task_id, at, author, kind, value, text FROM task_events
+             WHERE task_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![id], event_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Give the task to `assignee`. The change, its event and the message that `message` builds
+    /// are one transaction, so a task is never assigned without its message.
+    pub fn assign_task(
+        &self,
+        id: i64,
+        assignee: &str,
+        author: &str,
+        now: i64,
+        message: impl FnOnce(&TaskRecord) -> NewTaskMessage,
+    ) -> Result<(TaskRecord, i64), StoreError> {
+        let tx = self.write_transaction()?;
+        task_in(&tx, id)?;
+        tx.execute(
+            "UPDATE tasks SET assignee = ?2, assigner = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, assignee, author, now],
+        )?;
+        event_in(&tx, id, now, author, "assigned", Some(assignee), None)?;
+        let after = task_in(&tx, id)?;
+        let message_id = message_in(&tx, &message(&after), id, now)?;
+        tx.commit()?;
+        Ok((after, message_id))
+    }
+
+    /// Change the status, and add the note and the report path. `guard` reads the task inside the
+    /// transaction and can refuse (`StoreError::Rule`). `message` can add one message. Nothing
+    /// is written when `guard` refuses.
+    pub fn update_task(
+        &self,
+        id: i64,
+        change: &TaskChange<'_>,
+        now: i64,
+        guard: impl FnOnce(&TaskRecord) -> Result<(), String>,
+        message: impl FnOnce(&TaskRecord, &TaskRecord) -> Option<NewTaskMessage>,
+    ) -> Result<TaskOutcome, StoreError> {
+        let tx = self.write_transaction()?;
+        let before = task_in(&tx, id)?;
+        guard(&before).map_err(StoreError::Rule)?;
+        tx.execute(
+            "UPDATE tasks SET status = ?2, report = coalesce(?3, report), updated_at = ?4 WHERE id = ?1",
+            params![id, change.status.as_str(), change.report, now],
+        )?;
+        let note = change.note.filter(|n| !n.trim().is_empty());
+        if change.status != before.status {
+            // A status change, with the note if there is one.
+            event_in(
+                &tx,
+                id,
+                now,
+                change.author,
+                "status",
+                Some(change.status.as_str()),
+                note,
+            )?;
+        } else if note.is_some() {
+            // The same status and a note: it is a comment.
+            event_in(&tx, id, now, change.author, "comment", None, note)?;
+        }
+        if let Some(report) = change.report
+            && before.report.as_deref() != Some(report)
+        {
+            event_in(&tx, id, now, change.author, "report", Some(report), None)?;
+        }
+        let after = task_in(&tx, id)?;
+        let message_id = match message(&before, &after) {
+            Some(message) => Some(message_in(&tx, &message, id, now)?),
+            None => None,
+        };
+        tx.commit()?;
+        Ok(TaskOutcome {
+            before,
+            after,
+            message_id,
+        })
+    }
+
+    /// Add a comment to the events of a task.
+    pub fn comment_task(
+        &self,
+        id: i64,
+        author: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<TaskRecord, StoreError> {
+        let tx = self.write_transaction()?;
+        task_in(&tx, id)?;
+        tx.execute(
+            "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        event_in(&tx, id, now, author, "comment", None, Some(text))?;
+        let task = task_in(&tx, id)?;
+        tx.commit()?;
+        Ok(task)
     }
 }
 
@@ -1412,8 +1801,8 @@ mod tests {
         let tables: Vec<_> = schema.iter().filter(|s| s.starts_with("table:")).collect();
         assert_eq!(
             tables.len(),
-            4,
-            "sessions, status_events, messages, sqlite_sequence: {tables:?}"
+            6,
+            "sessions, status_events, messages, tasks, task_events, sqlite_sequence: {tables:?}"
         );
         drop(first);
 
@@ -1423,6 +1812,158 @@ mod tests {
         let kept = second.last_session("ceo").unwrap().unwrap();
         assert_eq!(kept.cli_session_id.as_deref(), Some("cli"));
         assert_eq!(second.status_events("s1").unwrap().len(), 1);
+    }
+
+    /// A database at version 2 (as the build of M2 slice 1 wrote it) with a message in it.
+    fn version_2_database(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        for step in &MIGRATIONS[..2] {
+            conn.execute_batch(step).unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 2").unwrap();
+        conn.execute(
+            "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at)
+             VALUES ('ceo', 'pm', 'old message', 10, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (from_slug, to_slug, text, created_at, delivered_at)
+             VALUES ('pm', 'ceo', 'old answer', 11, 12)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_version_2_database_migrates_to_the_task_schema_and_keeps_its_messages() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("floor.db");
+        version_2_database(&path);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(SCHEMA_VERSION, 3);
+        let old = db.all_messages().unwrap();
+        assert_eq!(old.len(), 2);
+        assert_eq!(
+            (old[0].text.as_str(), old[0].kind.as_str(), old[0].task_id),
+            ("old message", KIND_MESSAGE, None)
+        );
+        assert_eq!(old[1].delivered_at, Some(12));
+        assert_eq!(db.count_pending_messages("pm").unwrap(), 1);
+        // The old messages count for the loop limit (their kind is `message`).
+        assert_eq!(db.count_messages_since("ceo", "pm", 0).unwrap(), 1);
+        // The new tables work, and the first task is T-1.
+        let task = db.create_task("Title", "Text", None, "ceo", 20).unwrap();
+        assert_eq!(task.id, 1);
+        assert_eq!(task.status, TaskStatus::Todo);
+        // A second open changes nothing.
+        drop(db);
+        let again = Database::open(&path).unwrap();
+        assert_eq!(again.schema_version().unwrap(), 3);
+        assert_eq!(again.list_tasks(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn task_changes_write_events_and_a_refused_change_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("floor.db")).unwrap();
+        let task = db.create_task("Title", "Text", None, "ceo", 1).unwrap();
+        let child = db
+            .create_task("Child", "", Some(task.id), "ceo", 2)
+            .unwrap();
+        assert_eq!((child.id, child.parent), (2, Some(1)));
+        assert!(matches!(
+            db.create_task("Orphan", "", Some(99), "ceo", 3),
+            Err(StoreError::UnknownTask(99))
+        ));
+        let (assigned, message) = db
+            .assign_task(1, "eng", "ceo", 4, |after| NewTaskMessage {
+                from_slug: "ceo".into(),
+                to_slug: "eng".into(),
+                text: after.title.clone(),
+                kind: KIND_TASK_ASSIGN,
+            })
+            .unwrap();
+        assert_eq!(assigned.assignee.as_deref(), Some("eng"));
+        assert_eq!(assigned.assigner.as_deref(), Some("ceo"));
+        let stored = db.all_messages().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, message);
+        assert_eq!(
+            (stored[0].task_id, stored[0].kind.as_str()),
+            (Some(1), KIND_TASK_ASSIGN)
+        );
+        // The message of a task does not count for the loop limit.
+        assert_eq!(db.count_messages_since("ceo", "eng", 0).unwrap(), 0);
+
+        let change = TaskChange {
+            status: TaskStatus::Review,
+            note: Some("ready"),
+            report: Some(".swarm/reports/T-1.md"),
+            author: "eng",
+        };
+        // A guard that refuses: nothing is written.
+        let refused = db.update_task(1, &change, 5, |_| Err("no".to_owned()), |_, _| None);
+        assert!(matches!(refused, Err(StoreError::Rule(ref text)) if text == "no"));
+        assert_eq!(db.get_task(1).unwrap().unwrap().status, TaskStatus::Todo);
+        assert_eq!(db.task_events(1).unwrap().len(), 2, "created, assigned");
+        // A change with a note and a report: a status event and a report event.
+        let outcome = db
+            .update_task(1, &change, 6, |_| Ok(()), |_, _| None)
+            .unwrap();
+        assert_eq!(outcome.message_id, None);
+        assert_eq!(outcome.after.status, TaskStatus::Review);
+        let kinds: Vec<(String, Option<String>, Option<String>)> = db
+            .task_events(1)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.kind, e.value, e.text))
+            .collect();
+        assert_eq!(
+            kinds[2..],
+            [
+                ("status".into(), Some("review".into()), Some("ready".into())),
+                ("report".into(), Some(".swarm/reports/T-1.md".into()), None),
+            ]
+        );
+        // The same status with a note is a comment. A change with no report keeps the report.
+        let same = TaskChange {
+            status: TaskStatus::Review,
+            note: Some("more"),
+            report: None,
+            author: "ceo",
+        };
+        let outcome = db
+            .update_task(1, &same, 7, |_| Ok(()), |_, _| None)
+            .unwrap();
+        assert_eq!(
+            outcome.after.report.as_deref(),
+            Some(".swarm/reports/T-1.md")
+        );
+        let last = db.task_events(1).unwrap().pop().unwrap();
+        assert_eq!(
+            (
+                last.kind.as_str(),
+                last.author.as_str(),
+                last.text.as_deref()
+            ),
+            ("comment", "ceo", Some("more"))
+        );
+        // Filters.
+        assert_eq!(
+            db.list_tasks(Some(TaskStatus::Review), None).unwrap().len(),
+            1
+        );
+        assert_eq!(db.list_tasks(None, Some("eng")).unwrap().len(), 1);
+        assert_eq!(
+            db.list_tasks(Some(TaskStatus::Done), None).unwrap().len(),
+            0
+        );
+        assert!(matches!(
+            db.comment_task(77, "ceo", "x", 8),
+            Err(StoreError::UnknownTask(77))
+        ));
     }
 
     #[test]

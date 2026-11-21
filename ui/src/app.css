@@ -146,3 +146,12 @@ summary:focus-visible {
 ::-webkit-scrollbar-track {
     background: transparent;
 }
+
+/* Task status colours. The same values are in src/lib/tasks.ts (TASK_COLOR). */
+:root {
+    --tk-todo: #93a2c2;
+    --tk-in_progress: #5aa9f2;
+    --tk-blocked: #ff7a90;
+    --tk-review: #ffc56b;
+    --tk-done: #6fd08c;
+}

@@ -40,6 +40,7 @@ mod mcp;
 mod models;
 mod settings;
 mod setup;
+mod tasks;
 mod tools;
 
 use crate::adapter::{
@@ -71,7 +72,7 @@ use uuid::Uuid;
 
 pub use bus::{START_LIMIT, START_WINDOW, TestHooks};
 pub use live::SCROLLBACK_LIMIT;
-pub use mcp::{MAX_CONNECTIONS, McpLimits, REQUEST_DEADLINE};
+pub use mcp::{FIRST_BYTE_TIMEOUT, MAX_CONNECTIONS, McpLimits, REQUEST_DEADLINE};
 pub use models::{
     CodexSource, ModelCatalog, ModelKind, ModelOption, STANDARD_EFFORTS, is_valid_effort,
     is_valid_model_name,
@@ -84,6 +85,12 @@ pub const LOG_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The reserved slug of the setup session. No employee can have it.
 pub const SETUP_SLUG: &str = "setup";
+
+/// The name of the operator in task events and in messages. No employee can have this slug.
+pub const OPERATOR: &str = "operator";
+
+/// The report files of a floor, relative to the floor folder (spec 4.10).
+pub const REPORTS_DIR: &str = ".swarm/reports";
 
 /// The instructions of the setup agent (the "floor-init skill"). They go in through the same path
 /// as the role text of an employee.
@@ -227,6 +234,9 @@ pub trait Observer: Send + Sync {
     /// An employee started the session of another employee. It comes after the `session_changed`
     /// of the new session. The default does nothing.
     fn employee_started(&self, _path: &Path, _event: &EmployeeStarted) {}
+    /// A task was made or changed, or an event was added (by a tool of an employee or by a
+    /// command of the operator). `path` is the key of the floor. The default does nothing.
+    fn tasks_changed(&self, _path: &Path) {}
 }
 
 /// Receives the output of the attached session, in order (see `live.rs`).
@@ -626,6 +636,11 @@ impl TowerCore {
         if employee.slug == SETUP_SLUG {
             return Err(other(format!(
                 "the slug \"{SETUP_SLUG}\" is reserved for the setup agent. Use another slug."
+            )));
+        }
+        if employee.slug == OPERATOR {
+            return Err(other(format!(
+                "the slug \"{OPERATOR}\" is reserved for the operator. Use another slug."
             )));
         }
         // The model goes to the CLI as an argument. A bad name is refused before it is stored.
@@ -1081,9 +1096,9 @@ impl TowerCore {
                 token,
             }),
             instructions: Some(if setup_cli.is_some() {
-                instructions(&employee, None)
+                instructions(&employee, None, &floor.path)
             } else {
-                instructions(&employee, Some(&team))
+                instructions(&employee, Some(&team), &floor.path)
             }),
             employee: employee.clone(),
             cwd: floor.path.clone(),
@@ -1510,14 +1525,14 @@ fn default_first_message(employee: &Employee) -> String {
 /// The instructions of a session (spec 4.6). `team` is `None` for the setup session: it gets
 /// the short text and its role text only. An employee also gets the team, and the rules for the
 /// tools of the app (`bus.rs`, `employee_start` and `send`).
-fn instructions(employee: &Employee, team: Option<&[Employee]>) -> String {
+fn instructions(employee: &Employee, team: Option<&[Employee]>, floor: &Path) -> String {
     let mut text = format!(
         "You are {}, the {} on this floor. The operator can type in your terminal at any time.",
         employee.name, employee.role
     );
     if let Some(team) = team {
         text.push_str("\n\n");
-        text.push_str(&bus::team_instructions(employee, team));
+        text.push_str(&bus::team_instructions(employee, team, floor));
     }
     let role_text = employee.role_text.trim();
     if !role_text.is_empty() {
@@ -1559,7 +1574,7 @@ fn default_employees() -> Vec<Employee> {
             model: None,
             effort: None,
             permission: PermissionPolicy::ReadOnly,
-            role_text: "You lead this floor. You talk to the operator. You pass each request to the right employee. You do not write code yourself.\n".to_owned(),
+            role_text: "You lead this floor. You talk to the operator. You pass each request to the right employee. You do not write code yourself. For a feature request, give the work to the pm. When the pm reports that the work is done, tell the operator the result.\n".to_owned(),
         },
         Employee {
             name: "Maya".to_owned(),
@@ -1570,7 +1585,7 @@ fn default_employees() -> Vec<Employee> {
             model: None,
             effort: None,
             permission: PermissionPolicy::ReadOnly,
-            role_text: "You plan the work. You break each request into small tasks, and you follow the tasks until they are done.\n".to_owned(),
+            role_text: "You plan the work. You break each request into small tasks with task_create, you give each task to an employee with task_assign, and you follow the tasks until they are done. You do not write code yourself.\n".to_owned(),
         },
     ]
 }

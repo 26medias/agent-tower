@@ -1,6 +1,6 @@
 // In-memory mock of the Rust side, for `pnpm dev` in a normal browser and for the e2e check.
-// It follows docs/ipc-m1.md and docs/ipc-visuals-init.md: same command names, same argument names,
-// same error texts.
+// It follows docs/ipc-m1.md, docs/ipc-visuals-init.md and docs/ipc-m2.md: same command names, same
+// argument names, same error texts.
 import { base64ToBytes, bytesToBase64, concatBytes } from "./codec";
 import type { Backend, Unlisten } from "./ipc";
 import { STANDARD_EFFORTS, isValidEffort, isValidModelName } from "./models";
@@ -19,6 +19,10 @@ import type {
     SessionView,
     Settings,
     Status,
+    TaskDetail,
+    TaskEvent,
+    TaskStatus,
+    TaskView,
 } from "./types";
 import { SETUP_SLUG } from "./types";
 
@@ -35,6 +39,14 @@ interface MockFloor {
     logoBusy: boolean;
     logoError: string | null;
     defaults: FloorDefaults;
+    tasks: MockTask[];
+}
+
+interface MockTask {
+    view: TaskView;
+    events: TaskEvent[];
+    /** The text of the report file (`task_report`), when the task has one. */
+    reportText: string | null;
 }
 
 interface MockSession {
@@ -73,6 +85,18 @@ export interface MockControl {
      * session ID.
      */
     employeeStart(path: string, bySlug: string, slug: string): string;
+    /**
+     * An employee changes a task, as the tools `task_create`, `task_assign` and `task_update` do in
+     * the real app. `tasks-changed` follows. `create` makes a task (the creator is `bySlug`).
+     */
+    taskByEmployee(
+        path: string,
+        bySlug: string,
+        change:
+            | { create: string; description?: string }
+            | { id: number; assign: string }
+            | { id: number; status: TaskStatus; note?: string; report?: string },
+    ): number;
 }
 
 const config = (): MockConfig => ((globalThis as Record<string, unknown>).__towerMockConfig ?? {}) as MockConfig;
@@ -236,10 +260,47 @@ export function createMockBackend(): Backend {
             logoBusy: false,
             logoError: null,
             defaults: noDefaults(),
+            tasks: [],
         };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
         return floor;
+    }
+
+    function seedTask(
+        floor: MockFloor,
+        id: number,
+        title: string,
+        description: string,
+        status: TaskStatus,
+        creator: string,
+        assignee: string | null,
+        assigner: string | null,
+        extra: { report?: string; reportText?: string } = {},
+    ): void {
+        const at = 1_700_000_000_000 + id * 60_000;
+        const events: TaskEvent[] = [{ id: 1, at, author: creator, kind: "created", value: null, text: null }];
+        if (assignee) events.push({ id: 2, at: at + 1000, author: assigner ?? creator, kind: "assigned", value: assignee, text: null });
+        if (status !== "todo") {
+            events.push({ id: events.length + 1, at: at + 2000, author: assignee ?? creator, kind: "status", value: status, text: null });
+        }
+        floor.tasks.push({
+            view: {
+                id,
+                title,
+                description,
+                parent: null,
+                creator,
+                assignee,
+                assigner,
+                status,
+                report: extra.report ?? null,
+                createdAt: at,
+                updatedAt: at + 2000,
+            },
+            events,
+            reportText: extra.reportText ?? null,
+        });
     }
 
     const tower = addFloor("/home/demo/tower", "Demo Tower", [
@@ -253,6 +314,18 @@ export function createMockBackend(): Backend {
     tower.logoPrompt = "A tall tower with a golden crown.";
     tower.logo = makeLogo("D", 165);
     tower.logoVersion = 1_700_000_000_000;
+    // The task board has one task in each group.
+    seedTask(tower, 1, "Add a hello page", "Make a page that says hello.", "done", "operator", "eng-lin", "pm", {
+        report: ".swarm/reports/T-1.md",
+        reportText: "# T-1 report\n\nWhat I did: added hello.html.\nWhat I verified: opened it.\nWhat I did not do: styling.\nOpen questions: none.\n",
+    });
+    seedTask(tower, 2, "Write the login form", "A form with a name and a password.", "in_progress", "pm", "eng-lin", "pm");
+    seedTask(tower, 3, "Check the build on Linux", "Run the build and report.", "review", "pm", "eng-sam", "pm", {
+        report: ".swarm/reports/T-3.md",
+        reportText: "# T-3 report\n\nThe build passes.\n",
+    });
+    seedTask(tower, 4, "Pick the colours", "Wait for the logo.", "blocked", "ceo", "pm", "ceo");
+    seedTask(tower, 5, "Plan the release", "List the steps.", "todo", "operator", null, null);
     // Lin has a stopped session from "an earlier run" that can resume.
     tower.sessions.push({
         sessionId: "s-old-lin",
@@ -288,6 +361,77 @@ export function createMockBackend(): Backend {
     big.logoVersion = 1_700_000_100_000;
     // A path in the list that does not exist any more.
     known.push("/home/demo/gone");
+
+    // ---- tasks (docs/ipc-m2.md) ----
+
+    const TASK_STATUSES: TaskStatus[] = ["todo", "in_progress", "blocked", "review", "done"];
+
+    function taskOf(floor: MockFloor, id: number): MockTask {
+        const t = floor.tasks.find((x) => x.view.id === id);
+        if (!t) throw `there is no task T-${id}`;
+        return t;
+    }
+
+    function addEvent(t: MockTask, author: string, kind: TaskEvent["kind"], value: string | null, text: string | null): void {
+        const at = Date.now();
+        t.events.push({ id: t.events.length + 1, at, author, kind, value, text });
+        t.view.updatedAt = at;
+    }
+
+    /** The rules of `task_create`: a one-line title of 1 to 200 characters, a description of 20000 at most. */
+    function makeTask(floor: MockFloor, creator: string, title: string, description: string): MockTask {
+        const line = title.replace(/[\n\t\r]/g, " ").trim();
+        if (line === "") throw "The title is empty.";
+        if ([...title].length > 200) throw `The title is too long: ${[...title].length} characters. The limit is 200.`;
+        if ([...description].length > 20_000) {
+            throw `The description is too long: ${[...description].length} characters. The limit is 20000. Write a shorter text, or put the details in a file.`;
+        }
+        const id = floor.tasks.reduce((m, t) => Math.max(m, t.view.id), 0) + 1;
+        const now = Date.now();
+        const t: MockTask = {
+            view: {
+                id,
+                title: line,
+                description,
+                parent: null,
+                creator,
+                assignee: null,
+                assigner: null,
+                status: "todo",
+                report: null,
+                createdAt: now,
+                updatedAt: now,
+            },
+            events: [],
+            reportText: null,
+        };
+        floor.tasks.push(t);
+        addEvent(t, creator, "created", null, null);
+        return t;
+    }
+
+    function assignTask(t: MockTask, by: string, slug: string): void {
+        t.view.assignee = slug;
+        t.view.assigner = by;
+        addEvent(t, by, "assigned", slug, null);
+    }
+
+    /** A status change is an event of the kind `status`. The same status with a note is a `comment`. */
+    function updateTask(t: MockTask, by: string, status: TaskStatus, note: string | null, report: string | null): void {
+        const text = note !== null && note.trim() !== "" ? note : null;
+        if (status !== t.view.status) {
+            t.view.status = status;
+            addEvent(t, by, "status", status, text);
+        } else if (text !== null) {
+            addEvent(t, by, "comment", null, text);
+        }
+        if (report !== null && report !== t.view.report) {
+            t.view.report = report;
+            t.reportText = `# ${report}\n\nReport text of the mock.\n`;
+            addEvent(t, by, "report", report, null);
+        }
+        t.view.updatedAt = Date.now();
+    }
 
     // ---- helpers ----
 
@@ -799,6 +943,57 @@ export function createMockBackend(): Backend {
                 programs[name] = path.trim();
                 return { ...programs };
             }
+            case "task_list": {
+                const a = args<{ path: string }>(raw, ["path"]);
+                return floorOf(a.path).tasks.map((t) => ({ ...t.view }));
+            }
+            case "task_get": {
+                const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
+                const t = taskOf(floorOf(a.path), a.id);
+                return { task: { ...t.view }, events: t.events.map((e) => ({ ...e })) } satisfies TaskDetail;
+            }
+            case "task_create": {
+                const a = args<{ path: string; title: string; description: string }>(raw, ["path", "title", "description"]);
+                const floor = floorOf(a.path);
+                const t = makeTask(floor, "operator", a.title, a.description);
+                emit("tasks-changed", { path: a.path });
+                return { ...t.view };
+            }
+            case "task_assign": {
+                const a = args<{ path: string; id: number; slug: string }>(raw, ["path", "id", "slug"]);
+                const floor = floorOf(a.path);
+                const t = taskOf(floor, a.id);
+                if (a.slug === SETUP_SLUG || !floor.employees.some((e) => e.slug === a.slug)) {
+                    throw `There is no employee with the slug "${a.slug}" on this floor. Use the tool org_chart to see the team.`;
+                }
+                assignTask(t, "operator", a.slug);
+                emit("tasks-changed", { path: a.path });
+                return { ...t.view };
+            }
+            case "task_update": {
+                const a = args<{ path: string; id: number; status: TaskStatus; note: string | null }>(raw, [
+                    "path",
+                    "id",
+                    "status",
+                    "note",
+                ]);
+                const t = taskOf(floorOf(a.path), a.id);
+                if (!TASK_STATUSES.includes(a.status)) throw `unknown variant \`${a.status}\``;
+                const note = a.note ?? null;
+                if (note !== null && [...note].length > 20_000) {
+                    throw `The note is too long: ${[...note].length} characters. The limit is 20000. Write a shorter text, or put the details in a file.`;
+                }
+                updateTask(t, "operator", a.status, note, null);
+                emit("tasks-changed", { path: a.path });
+                return { ...t.view };
+            }
+            case "task_report": {
+                const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
+                const t = taskOf(floorOf(a.path), a.id);
+                if (t.view.report === null) return null;
+                if (t.reportText === null) throw `cannot read the report file ${t.view.report}: No such file or directory (os error 2)`;
+                return t.reportText;
+            }
             default:
                 throw `unknown command ${command}`;
         }
@@ -828,6 +1023,21 @@ export function createMockBackend(): Backend {
                 resumed: false,
             });
             return view.sessionId;
+        },
+        taskByEmployee(path, bySlug, change) {
+            const floor = floorOf(path);
+            let id: number;
+            if ("create" in change) {
+                id = makeTask(floor, bySlug, change.create, change.description ?? "").view.id;
+            } else if ("assign" in change) {
+                id = change.id;
+                assignTask(taskOf(floor, id), bySlug, change.assign);
+            } else {
+                id = change.id;
+                updateTask(taskOf(floor, id), bySlug, change.status, change.note ?? null, change.report ?? null);
+            }
+            emit("tasks-changed", { path });
+            return id;
         },
     } satisfies MockControl;
 

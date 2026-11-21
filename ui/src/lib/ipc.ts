@@ -20,6 +20,10 @@ import type {
     SessionChangedPayload,
     SessionView,
     Settings,
+    TaskDetail,
+    TaskStatus,
+    TaskView,
+    TasksChangedPayload,
 } from "./types";
 
 export type Unlisten = () => void;
@@ -166,6 +170,23 @@ export const modelsSetCustom = (kind: ModelKind, models: string[]) =>
 export const floorDefaultsSet = (path: string, defaults: FloorDefaults) =>
     call<FloorView>("floor_defaults_set", { path, defaults });
 
+// ---- Commands (docs/ipc-m2.md, the task board) ----
+
+export const taskList = (path: string) => call<TaskView[]>("task_list", { path });
+
+export const taskGet = (path: string, id: number) => call<TaskDetail>("task_get", { path, id });
+
+export const taskCreate = (path: string, title: string, description: string) =>
+    call<TaskView>("task_create", { path, title, description });
+
+export const taskAssign = (path: string, id: number, slug: string) => call<TaskView>("task_assign", { path, id, slug });
+
+export const taskUpdate = (path: string, id: number, status: TaskStatus, note: string | null) =>
+    call<TaskView>("task_update", { path, id, status, note });
+
+/** The text of the report file, or null when the task has no report. Rejects with a text. */
+export const taskReport = (path: string, id: number) => call<string | null>("task_report", { path, id });
+
 // ---- Events (docs/ipc-m1.md, "Events") ----
 
 export async function onSessionChanged(handler: (payload: SessionChangedPayload) => void): Promise<Unlisten> {
@@ -179,4 +200,9 @@ export async function onFloorChanged(handler: (payload: FloorChangedPayload) => 
 /** An employee started the session of another employee with the tools of the app. */
 export async function onEmployeeStarted(handler: (payload: EmployeeStartedPayload) => void): Promise<Unlisten> {
     return (await backend()).listen<EmployeeStartedPayload>("employee-started", handler);
+}
+
+/** A task of a floor was made or changed (by an employee or by the operator). */
+export async function onTasksChanged(handler: (payload: TasksChangedPayload) => void): Promise<Unlisten> {
+    return (await backend()).listen<TasksChangedPayload>("tasks-changed", handler);
 }
