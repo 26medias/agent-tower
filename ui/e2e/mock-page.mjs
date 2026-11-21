@@ -10,12 +10,15 @@
 //      E2E_LAST_SHOTS (folder for the screenshots of e2e/last-checks.mjs; default
 //      /tmp/agent-tower-review/final-b3),
 //      E2E_FOUR_SHOTS (folder for the screenshots of e2e/four-checks.mjs; default
-//      /tmp/agent-tower-review/four/shots).
+//      /tmp/agent-tower-review/four/shots),
+//      E2E_LAST3_SHOTS (folder for the screenshots of e2e/last3-checks.mjs; default
+//      /tmp/agent-tower-review/last3).
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fourChecks } from "./four-checks.mjs";
+import { last3Checks } from "./last3-checks.mjs";
 import { lastChecks } from "./last-checks.mjs";
 import { repairChecks } from "./repair-checks.mjs";
 
@@ -32,6 +35,9 @@ mkdirSync(lastShots, { recursive: true });
 // The screenshots of the checks of the four items of 2026-11-21 (e2e/four-checks.mjs).
 const fourShots = process.env.E2E_FOUR_SHOTS ?? "/tmp/agent-tower-review/four/shots";
 mkdirSync(fourShots, { recursive: true });
+// The screenshots of the last repairs of the review "final-b4" (e2e/last3-checks.mjs).
+const last3Shots = process.env.E2E_LAST3_SHOTS ?? "/tmp/agent-tower-review/last3";
+mkdirSync(last3Shots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -456,17 +462,21 @@ try {
     const toastBox = await page.locator(".toast").first().boundingBox();
     const officeBox = await page.locator(".office").boundingBox();
     const areaBoxT = await page.locator(".area").boundingBox();
-    // Changed on purpose (D10): a toast is an overlay at the top right. It does not move the office,
-    // and it stays above the terminal area (so it never covers the terminal input).
+    // Changed on purpose (last repair D-a): the toast stack is an overlay at the bottom right of the CENTRE column. It
+    // does not move the office, it lies over the terminal area, and it stays above the last two terminal lines (the input
+    // of the CLI). It never covers the task board, the top strip or the tabs.
+    const boardBoxT = await page.locator(".board").boundingBox();
     check(
-        "the toast is an overlay at the top right: the office has not moved, and the terminal area is free",
+        "the toast is an overlay at the bottom right of the centre column: the office has not moved, and the last two terminal lines are free",
         (await page.locator(".toast").first().evaluate((el) => getComputedStyle(el.parentElement).position)) === "fixed" &&
-            toastBox.x + toastBox.width > 1280 - 40 &&
-            toastBox.y + toastBox.height < areaBoxT.y &&
+            toastBox.x + toastBox.width <= boardBoxT.x &&
+            toastBox.x + toastBox.width > boardBoxT.x - 30 &&
+            toastBox.y >= areaBoxT.y &&
+            toastBox.y + toastBox.height <= areaBoxT.y + areaBoxT.height - 2 * 15 &&
             // Changed on purpose (N1): the top strip (30 px) is always there, so the office starts under it.
             officeBox.y === 30 &&
             Math.abs(officeBox.height - 336) <= 1,
-        `toast ${JSON.stringify(toastBox)}, office y=${officeBox.y} h=${officeBox.height}`,
+        JSON.stringify({ toastBox, areaBoxT, boardBoxT }),
     );
     check(
         "after a rejected start: no new tab, no new terminal, no session state on the bar",
@@ -506,7 +516,7 @@ try {
     check("resume of a stopped employee opens a tab", (await page.locator(".tab:has-text('Lin')").count()) === 1);
 
     // 9. Add employee form, edit and remove from the bar.
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     await page.fill('input[name="name"]', "Zed Zebra");
     // Changed on purpose (P19): the form says "File name: zed-zebra.md", not "slug".
     check("the file name is made from the name", (await page.locator(".slug code").innerText()) === "zed-zebra.md");
@@ -635,7 +645,7 @@ try {
     const startCall = (await calls("session_start")).pop();
     check("session_start used the canonical path", startCall.args.path === "/home/demo/second", startCall.args.path);
     const openCountBefore = (await calls("floor_open")).length;
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     await page.fill('input[name="name"]', "Cy");
     await page.click('form[aria-label="Add employee"] button.primary');
     await page.waitForSelector('.emp[data-slug="cy"]');
@@ -971,7 +981,7 @@ try {
     await closeSettings();
 
     // The saved default shows in the employee form: "floor default (X)" follows the CLI rule.
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     check(
         "the Claude form shows floor default (CLI default) when the floor default CLI is codex",
         (await page.locator('select[name="model"] option').first().innerText()) === "floor default (CLI default)",
@@ -1004,7 +1014,7 @@ try {
     await codexList.locator("button.add").click();
     await codexList.locator('li[data-model="my-custom-2"]').waitFor();
     await closeSettings();
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     await page.fill('input[name="name"]', "Temp Tmp");
     await page.selectOption('select[name="cli"]', "codex");
     check("a custom model is in the model select of the employee form", (await opts('select[name="model"]')).includes("my-custom-2"));
@@ -2119,6 +2129,9 @@ try {
 
     // 23. The four items of 2026-11-21: Browse..., the notification switch, test and reset of the programs.
     await fourChecks({ page, check, url, shots: fourShots });
+
+    // 24. The last repairs of the review "final-b4": the toast stack, the bar and the roster, the messages in Team activity.
+    await last3Checks({ page, check, url, shots: last3Shots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

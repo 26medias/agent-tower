@@ -51,8 +51,8 @@
         <div class="info" bind:this={infoEl} data-testid="info-panel">
             <div class="top" bind:this={topEl}>
                 <OfficeHeader />
-                <EmployeeBar {onedit} {onadd} />
-                <Roster />
+                <EmployeeBar {onedit} />
+                <Roster {onadd} />
             </div>
             {#if showActivity}
                 <TeamActivity />

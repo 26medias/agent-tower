@@ -282,3 +282,11 @@ export function mergeRules(list: string[], extra: readonly string[]): string[] {
 
 /** Rules that the operator can add with one click. Each one passes `checkAllowRule`. */
 export const EXAMPLE_RULES: readonly string[] = ["Bash(cargo test:*)", "Bash(npm test:*)", "Bash(ls:*)"];
+
+/**
+ * The examples that fit this machine. When the program `rtk` is found, a hook can rewrite `cargo test` to
+ * `rtk cargo test`, and a rule must match the command as the CLI sees it. So the cargo example then names `rtk`.
+ */
+export function exampleRules(rtkFound: boolean): string[] {
+    return EXAMPLE_RULES.map((rule) => (rtkFound && rule === "Bash(cargo test:*)" ? "Bash(rtk cargo test:*)" : rule));
+}

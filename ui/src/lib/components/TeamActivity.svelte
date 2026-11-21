@@ -1,7 +1,9 @@
 <script lang="ts">
     // The list "Team activity" of the open floor, newest first, at most 30 lines. It shows what the UI
-    // already knows: a status change of a session, "X started Y", a change of a task, a question.
-    // Each line has its time. A click on a line goes to the tab of the employee, or to the task.
+    // already knows: a status change of a session, "X started Y", a change of a task, a question, and a message
+    // that the app delivered ("Maya → Eli: ..."). Each employee has one current status line: a new status line
+    // replaces the old one (see `appendActivity`). Each line has its time. A click on a line goes to the tab of
+    // the employee (for a message: the receiver), or to the task.
     // It is calm: small text, no colour except the amber of a question.
     import { activityTime, lineText, visibleActivity, type ActivityEntry } from "$lib/activity";
     import { store } from "$lib/store.svelte";
@@ -12,7 +14,10 @@
     const text = (line: ActivityEntry): string => lineText(line, (path, slug) => store.sessionLabel({ path, slug }));
 
     function go(line: ActivityEntry): void {
-        if (line.taskId !== undefined) {
+        if (line.kind === "message" && line.slug !== undefined) {
+            // The receiver. Its session is live, because the message was delivered to it.
+            store.selectEmployee(line.slug);
+        } else if (line.taskId !== undefined) {
             store.openTask(line.taskId);
         } else if (line.sessionId !== undefined) {
             void store.openSession(line.sessionId);
@@ -30,7 +35,7 @@
         <ol>
             {#each lines as line (line.id)}
                 <li>
-                    <button type="button" class="line" class:question={line.kind === "question"} data-kind={line.kind} onclick={() => go(line)}>
+                    <button type="button" class="line" class:question={line.kind === "question"} data-kind={line.kind} title={text(line)} onclick={() => go(line)}>
                         <time datetime={new Date(line.at).toISOString()}>{activityTime(line.at)}</time>
                         <span class="text">{text(line)}</span>
                     </button>

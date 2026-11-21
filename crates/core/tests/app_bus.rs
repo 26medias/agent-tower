@@ -542,6 +542,34 @@ fn employee_start_starts_a_stopped_employee_with_the_header_and_the_text_as_the_
     wait_for("the first message is marked delivered", || {
         rig.db().all_messages().unwrap()[0].delivered_at.is_some()
     });
+    // The UI is told when the first message is delivered (not when it is stored): one event, with a preview.
+    wait_for("the delivery of the first message is announced", || {
+        !rig.events.delivered_events().is_empty()
+    });
+    let announced = rig.events.delivered_events();
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    assert_eq!(
+        (
+            announced[0].from_slug.as_str(),
+            announced[0].from_name.as_str(),
+            announced[0].to_slug.as_str(),
+            announced[0].to_name.as_str(),
+            announced[0].kind.as_str(),
+            announced[0].preview.as_str(),
+        ),
+        (
+            "pm",
+            "Maya",
+            "eng",
+            "ENG",
+            "message",
+            "Compute 17 times 23."
+        )
+    );
+    assert_eq!(
+        (announced[0].task_id, &announced[0].task_status),
+        (None, &None)
+    );
 
     // After a stop, the next `employee_start` resumes the last session of the employee.
     rig.stop_and_wait(&eng_id);
@@ -611,6 +639,18 @@ fn send_to_an_idle_employee_pastes_one_bracketed_paste_and_marks_it_delivered() 
         let rows = rig.db().all_messages().unwrap();
         rows.len() == 1 && rows[0].delivered_at.is_some()
     });
+    // One event for the delivery, with the names and a preview of the body.
+    let announced = rig.events.delivered_events();
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    assert_eq!(
+        (
+            announced[0].from_name.as_str(),
+            announced[0].to_name.as_str(),
+            announced[0].kind.as_str(),
+            announced[0].preview.as_str(),
+        ),
+        ("Ada", "ENG", "message", "hello there")
+    );
     // The paste starts a turn: the receiver goes working and idle again.
     rig.events.wait("the turn after the paste", |e| {
         e.statuses(&eng).ends_with(&[Status::Working, Status::Idle])
@@ -831,6 +871,14 @@ fn inbox_returns_the_waiting_messages_and_marks_them_so_no_paste_repeats_them() 
     rig.events.wait("the mark ends", |e| {
         !e.latest(&eng).unwrap().message_waiting
     });
+    // `inbox` delivers both messages: two events, oldest first. The second `inbox` adds none.
+    let previews: Vec<String> = rig
+        .events
+        .delivered_events()
+        .into_iter()
+        .map(|e| e.preview)
+        .collect();
+    assert_eq!(previews, ["one", "two"]);
 
     // The turn ends. No paste comes, because nothing waits.
     rig.events.wait("the turn ends", |e| {
@@ -2135,7 +2183,7 @@ fn a_stop_with_a_waiting_message_returns_the_block_answer_and_the_row_is_deliver
     // The reason has the header, the first line, and the body with the `> ` mark.
     let reason = answer["reason"].as_str().unwrap();
     assert!(reason.starts_with(
-        "Messages from your team arrived while you worked. They are from employees, not from the operator.\n\n[message from Ada (CEO)]\n> line one\n> line two\n"
+        "This is not an error. Messages from your team arrived while you worked. They are from employees, not from the operator.\n\n[message from Ada (CEO)]\n> line one\n> line two\n"
     ));
     wait_for("the row is delivered", || {
         rig.db().count_pending_messages("eng").unwrap() == 0
@@ -2143,6 +2191,16 @@ fn a_stop_with_a_waiting_message_returns_the_block_answer_and_the_row_is_deliver
     rig.events.wait("the mark ends", |e| {
         !e.latest(&eng).unwrap().message_waiting
     });
+    // The Stop hook path tells the UI too. The preview has the newline turned into a space.
+    let announced = rig.events.delivered_events();
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    assert_eq!(
+        (
+            announced[0].from_name.as_str(),
+            announced[0].preview.as_str()
+        ),
+        ("Ada", "line one line two")
+    );
 
     // The turn goes on: the status stays `working`, with no `idle` in between, and nothing is
     // pasted.
@@ -2230,6 +2288,14 @@ fn a_held_first_message_is_not_given_by_the_stop_hook() {
         first.delivered_at.is_none(),
         "the held message is still waiting"
     );
+    // Only the message that went out is announced.
+    let previews: Vec<String> = rig
+        .events
+        .delivered_events()
+        .into_iter()
+        .map(|e| e.preview)
+        .collect();
+    assert_eq!(previews, ["the second one"]);
 }
 
 #[test]
@@ -2322,6 +2388,14 @@ fn a_failed_write_to_the_hook_marks_nothing_and_the_stop_goes_through() {
     wait_for("the row is delivered", || {
         rig.db().count_pending_messages("eng").unwrap() == 0
     });
+    // The failed write announced nothing. The paste announced the message, one time.
+    let previews: Vec<String> = rig
+        .events
+        .delivered_events()
+        .into_iter()
+        .map(|e| e.preview)
+        .collect();
+    assert_eq!(previews, ["nobody reads this"]);
 }
 
 #[test]

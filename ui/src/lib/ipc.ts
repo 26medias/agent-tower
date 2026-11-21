@@ -12,6 +12,7 @@ import type {
     FloorEntry,
     FloorView,
     Employee,
+    MessageDeliveredPayload,
     ModelCatalog,
     ModelKind,
     OutputMessage,
@@ -269,4 +270,9 @@ export async function onNotice(handler: (payload: NoticePayload) => void): Promi
 /** A task of a floor was made or changed (by an employee or by the operator). */
 export async function onTasksChanged(handler: (payload: TasksChangedPayload) => void): Promise<Unlisten> {
     return (await backend()).listen<TasksChangedPayload>("tasks-changed", handler);
+}
+
+/** The app delivered a message to the session of an employee (a paste, the Stop hook, `inbox` or a first message). */
+export async function onMessageDelivered(handler: (payload: MessageDeliveredPayload) => void): Promise<Unlisten> {
+    return (await backend()).listen<MessageDeliveredPayload>("message-delivered", handler);
 }

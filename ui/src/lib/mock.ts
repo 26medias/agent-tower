@@ -95,6 +95,8 @@ export interface MockConfig {
     programTestMs?: number;
     /** Text that the CLI has already printed when a session is made (it shows in the scrollback of the attach). */
     startingText?: string;
+    /** `programs_get` finds the optional program `rtk` (the examples of the rules in Settings then use it). Default false. */
+    rtk?: boolean;
 }
 
 /** `globalThis.__towerMock`: a hand to the e2e check, to act on a session that is `starting`. */
@@ -137,6 +139,14 @@ export interface MockControl {
     startSession(path: string, slug: string): string;
     /** Add `count` employees (engineers of the Project Manager) to a floor, with no model. A floor event follows. */
     addEmployees(path: string, count: number): void;
+    /**
+     * The app delivers a message from one employee to another, as the real app does by a paste, the Stop hook,
+     * `inbox` or a first message: the event `message-delivered` follows. `text` is the body of the message (the
+     * mock makes the preview: 80 characters, one line). For a message about a task give `task`: with `status`
+     * it is a status message ("T-3 is now in review"), with no `status` it is an assignment. `fromSlug` can be
+     * "operator".
+     */
+    deliverMessage(path: string, fromSlug: string, toSlug: string, what: string | { task: number; status?: string }): void;
     /** Send the `notice` event. `kind` is `task_blocked` (a blocked merge, an error toast) when it is left out. */
     notice(path: string, text: string, kind?: string): void;
     /**
@@ -269,6 +279,7 @@ export function createMockBackend(): Backend {
     const programs: Programs = {
         ...FOUND,
         hook: "/opt/agent-tower/bin/tower-hook",
+        rtk: null,
         overrides: { claude: null, codex: null, node: null },
     };
     let counter = 0;
@@ -284,6 +295,7 @@ export function createMockBackend(): Backend {
         openaiKeySource: null,
         imageModel: "gpt-image-2.6-sunburst",
         notifyOnQuestion: true,
+        homeDir: "/home/demo",
     };
     // The custom models of the app config (`[models]`).
     const custom: Record<ModelKind, string[]> = { claude: [], codex: [], image: [] };
@@ -1117,6 +1129,8 @@ export function createMockBackend(): Backend {
             }
             case "programs_get": {
                 args(raw, []);
+                // `rtk` is optional. The e2e check sets `__towerMockConfig.rtk` to find it.
+                programs.rtk = config().rtk ? "/usr/local/bin/rtk" : null;
                 return { ...programs, overrides: { ...programs.overrides } };
             }
             case "programs_set": {
@@ -1401,6 +1415,28 @@ export function createMockBackend(): Backend {
                 floor.employees.push(e);
             }
             emit("floor-changed", { path });
+        },
+        deliverMessage(path, fromSlug, toSlug, what) {
+            const floor = floorOf(path);
+            const nameOf = (slug: string): string =>
+                slug === "operator" ? "Operator" : (floor.employees.find((e) => e.slug === slug)?.name ?? slug);
+            const body = typeof what === "string" ? what : what.status === undefined ? `Title: ${taskOf(floor, what.task).view.title}` : `Title: ${taskOf(floor, what.task).view.title}\nStatus: ${what.status}`;
+            // The same rule as the Rust side: remove control characters, turn a newline into a space, keep 80 characters.
+            // eslint-disable-next-line no-control-regex
+            const preview = [...body.replace(/\r\n/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\ufeff]/g, "").replace(/[\n\t]/g, " ")]
+                .slice(0, 80)
+                .join("");
+            emit("message-delivered", {
+                path,
+                fromSlug,
+                fromName: nameOf(fromSlug),
+                toSlug,
+                toName: nameOf(toSlug),
+                kind: typeof what === "string" ? "message" : "task",
+                taskId: typeof what === "string" ? null : what.task,
+                taskStatus: typeof what === "string" || what.status === undefined ? null : what.status,
+                preview,
+            });
         },
         notice(path, text, kind = "task_blocked") {
             emit("notice", { path, kind, text });

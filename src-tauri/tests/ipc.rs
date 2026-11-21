@@ -169,6 +169,7 @@ fn app_with(watch: Option<Duration>) -> App {
         "employee-started",
         "tasks-changed",
         "notice",
+        "message-delivered",
     ] {
         let events = Arc::clone(&events);
         app.listen(name, move |event| {
@@ -405,6 +406,11 @@ fn every_command_works_through_the_ipc_with_the_contract_names() {
     let programs = app.call("programs_get", json!({})).unwrap();
     assert_eq!(programs["claude"], json!(bin("fake-cli").to_str().unwrap()));
     assert_eq!(programs["hook"], json!(bin("tower-hook").to_str().unwrap()));
+    // `rtk` is optional: the field is there, and it is a path or null.
+    assert!(
+        programs["rtk"].is_null() || programs["rtk"].is_string(),
+        "{programs}"
+    );
     let error = app
         .call(
             "programs_set",
@@ -486,7 +492,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
     // Settings. The arguments are camelCase, and a null is "no change".
     assert_eq!(
         app.call("settings_get", json!({})).unwrap(),
-        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true })
+        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "homeDir": "/tmp" })
     );
     let set = app
         .call(
@@ -504,7 +510,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
         .unwrap();
     assert_eq!(
         set,
-        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true })
+        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "homeDir": "/tmp" })
     );
     assert!(!set.to_string().contains("sk-test-1"));
     let set = app
@@ -791,6 +797,38 @@ fn an_employee_start_comes_as_a_session_changed_and_an_employee_started_event() 
             "bySlug": "ceo",
             "byName": "Ada",
             "resumed": false,
+        })
+    );
+
+    // The message went out as the first message of the session of the pm. The UI hears about the delivery
+    // (`docs/ipc-final.md`): the contract fields, the names, the kind and a short preview.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        let found = app
+            .events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(name, _)| name == "message-delivered")
+            .map(|(_, payload)| payload.clone());
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(Instant::now() < deadline, "no message-delivered event");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        delivered,
+        json!({
+            "path": path,
+            "fromSlug": "ceo",
+            "fromName": "Ada",
+            "toSlug": "pm",
+            "toName": "Maya",
+            "kind": "message",
+            "taskId": null,
+            "taskStatus": null,
+            "preview": "Plan it.",
         })
     );
 }

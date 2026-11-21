@@ -119,6 +119,12 @@ impl Notifier {
             observer.question_asked(path, event);
         }
     }
+
+    pub fn message_delivered(&self, path: &Path, event: &super::MessageDelivered) {
+        if let Some(observer) = self.get() {
+            observer.message_delivered(path, event);
+        }
+    }
 }
 
 struct OutBuf {

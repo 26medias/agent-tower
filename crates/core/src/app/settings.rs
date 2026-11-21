@@ -57,6 +57,9 @@ pub struct SettingsView {
     /// `[interface] notify_on_question`: show a desktop notification when an agent asks a
     /// question and the window has no focus. The default is `true`.
     pub notify_on_question: bool,
+    /// The home folder of the app (`HOME` of its environment). The UI opens the folder dialog
+    /// there when no floor gives a better place. `None` when `HOME` is not set.
+    pub home_dir: Option<std::path::PathBuf>,
 }
 
 /// The table of a config file. A missing or unreadable file is an empty table.
@@ -125,6 +128,10 @@ pub(crate) fn view(file: &Path, env: &EnvMap) -> SettingsView {
         openai_key_source: key.map(|(_, source)| source),
         image_model: image_model(file),
         notify_on_question: notify_on_question(file),
+        home_dir: env
+            .get(std::ffi::OsStr::new("HOME"))
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from),
     }
 }
 

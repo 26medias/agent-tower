@@ -2,7 +2,7 @@
     // "Browse..." next to a folder field. It opens the system folder dialog and gives the chosen
     // path to `onpick`. It does not open the floor. In a browser (the mock) it is disabled, and
     // the title says why.
-    import { BROWSE_MOCK_TITLE, browseFolder, canBrowse } from "$lib/browse";
+    import { BROWSE_MOCK_TITLE, browseFolder, browseStart, canBrowse } from "$lib/browse";
     import { errorText } from "$lib/ipc";
     import { store } from "$lib/store.svelte";
 
@@ -15,7 +15,8 @@
         if (busy) return;
         busy = true;
         try {
-            const path = await browseFolder();
+            // The dialog opens where the operator keeps the projects, not in the working folder of the app.
+            const path = await browseFolder(undefined, browseStart(store.floors, store.settings?.homeDir ?? null));
             if (path !== null) onpick(path);
         } catch (e) {
             store.toast(errorText(e));

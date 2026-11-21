@@ -81,3 +81,12 @@ export function splitFileError(text: string): { file: string; folder: string; me
     if (!m) return { file: "", folder: "", message: text.trim() };
     return { file: m[2], folder: m[1].replace(/[/\\]+$/, ""), message: m[3].trim() };
 }
+
+/**
+ * The task of a `task_blocked` notice. The text is `Task T-12 is blocked: <reason>` (docs/ipc-m3.md).
+ * `null` when the text has another form.
+ */
+export function blockedTaskId(text: string): number | null {
+    const m = /^Task T-(\d+) is blocked\b/.exec(text.trim());
+    return m ? Number(m[1]) : null;
+}

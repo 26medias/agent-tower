@@ -624,6 +624,22 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The messages with these IDs, oldest first. An ID that does not exist gives no row.
+    pub fn messages_by_ids(&self, ids: &[i64]) -> Result<Vec<MessageRecord>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1"
+        ))?;
+        let mut out = Vec::new();
+        for id in ids {
+            let mut rows = statement.query_map(params![id], message_from_row)?;
+            if let Some(row) = rows.next() {
+                out.push(row?);
+            }
+        }
+        out.sort_by_key(|m| m.id);
+        Ok(out)
+    }
+
     /// How many messages for `to_slug` are not delivered.
     pub fn count_pending_messages(&self, to_slug: &str) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(

@@ -137,8 +137,8 @@ This is the wire between the hook program and the app. It is not a Tauri command
   socket. It always exits with code 0.
 - The app answers only for a Claude session of an employee. The setup session and each Codex
   session get no answer (the connection closes at once). Spec item N14 stays open for Codex.
-- The `reason` is the line `Messages from your team arrived while you worked. They are from
-  employees, not from the operator.`, an empty line, and the waiting messages. The messages have
+- The `reason` is the line `This is not an error. Messages from your team arrived while you
+  worked. They are from employees, not from the operator.`, an empty line, and the waiting messages. The messages have
   the same selection, order, text (header, the `> ` mark on each body line, the sanitize rule)
   and holds as the paste. At most 60000 bytes of messages go in one answer (the oldest message
   always goes in); the others go in a later answer or by the paste. A message is marked delivered
@@ -220,3 +220,64 @@ interface Programs { /* ... all the old fields ... */
   (`null` if it finds none). `programs_set` trims the path, so a path of spaces resets too.
   `overrides` in `programs_get` and `programs_set` tells which programs have an override of the
   operator; the UI shows "reset" only for them.
+
+# Changes of the last repairs (2026-11-21: the message event, `rtk`, the home folder)
+
+## The event `message-delivered`
+
+The app tells the UI when it DELIVERED a message to the session of an employee. The UI shows it as
+a row in "Team activity" and as a short mark on the tab of the receiver. A message that is only
+stored, or that waits, makes no event.
+
+```ts
+// Tauri event "message-delivered". The core calls Observer::message_delivered(path, event).
+interface MessageDelivered {
+    path: string;            // the key of the floor
+    fromSlug: string;        // "operator" for a task that the operator gave
+    fromName: string;        // "Operator" for the operator. A removed employee: its slug.
+    toSlug: string;
+    toName: string;
+    kind: "message" | "task";
+    taskId: number | null;   // the task of a "task" message, else null
+    /** A status message about a task: the status that it names ("review"). "" when the text has
+        no valid status line. null for an assignment and for each message that is not about a task. */
+    taskStatus: string | null;
+    preview: string;         // the first 80 characters of the body (see below). Never the full text.
+}
+```
+
+- The app sends one event for each message, oldest first, after it wrote the message to the
+  session. There are four ways of delivery, and each one makes the event: a paste, the Stop hook,
+  the tool `inbox`, and the first message of a session that starts.
+- The event comes after the write. A message that a failed write left waiting makes no event
+  (the paste path can deliver it later, and then it makes the event). A held first message makes
+  the event when its session reaches the first `working`.
+- `preview`: the body of the message (not the header, not the orders of the app), with each
+  control character and each hidden character removed (the sanitize rule of the paste), each
+  newline and tab turned into a space, and then cut to the first 80 characters (Unicode scalar
+  values). For a task message the body is `Title: ...` (and `Status: ...`).
+- The UI row is `Maya → Eli: <preview>` for `kind` = `message`. For `kind` = `task` it is
+  `Maya → Eli: task T-3 assigned` when `taskStatus` is `null`, and `Maya → Eli: T-3 is now in
+  review` when it has a status word. A click goes to the tab of the receiver.
+
+## `Programs.rtk`
+
+```ts
+interface Programs { /* ... all the old fields ... */ rtk: string | null }
+```
+
+`rtk` is the path of the optional program `rtk` (Rust Token Killer), or `null` when the app finds
+none. The app looks for it as for `claude` (the login shell, then the known folders). The app
+needs it for nothing. It has no override: `programs_set` and `program_test` still accept only
+`claude`, `codex` and `node`. The UI uses it to show the examples of the rules in Settings that
+fit this machine (`Bash(rtk cargo test:*)` when `rtk` is found).
+
+## `Settings.homeDir`
+
+```ts
+interface Settings { /* ... all the old fields ... */ homeDir: string | null }
+```
+
+`homeDir` is `HOME` of the environment of the app (`null` if it is not set). The UI opens the
+"Browse..." dialog in the parent folder of the last floor of the list that is not missing. With
+no such floor it opens the dialog in `homeDir`. With no `homeDir` it gives no start folder.

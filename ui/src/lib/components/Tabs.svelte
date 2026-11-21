@@ -47,6 +47,10 @@
                 {:else if store.isUnread(tab.sessionId)}
                     <span class="unread" data-testid="tab-unread" title="This session finished a turn. Open the tab to read it." role="img" aria-label="Finished a turn, not read yet"></span>
                 {/if}
+                {#if !tab.messageWaiting && store.hasMsgMark(tab.sessionId)}
+                    <!-- A message was delivered to this session while its tab was not in view. It shows for 10 s. -->
+                    <span class="got" data-testid="tab-msg" title="A message from the team arrived in this session." role="img" aria-label="A message arrived">MSG</span>
+                {/if}
             </button>
             {#if tab.messageWaiting}
                 <button
@@ -157,6 +161,25 @@
         border-radius: 50%;
         background: var(--accent);
         box-shadow: 0 0 0 2px rgba(94, 224, 192, 0.25);
+    }
+
+    /* The look of the unread mark (the accent colour and its soft ring), as a small word. No new strong colour. */
+    .got {
+        padding: 0 4px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        box-shadow: 0 0 0 2px rgba(94, 224, 192, 0.25);
+    }
+
+    /* On the amber tab of a question the word is dark, like "asks". */
+    .tab.asking .got {
+        border-color: #1a1400;
+        color: #1a1400;
+        box-shadow: none;
     }
 
     @media (prefers-reduced-motion: no-preference) {

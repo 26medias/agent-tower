@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tower_core::adapter::{CliAdapter, McpAccess, SpawnPlan, StartContext};
 use tower_core::app::{
-    EmployeeStarted, FloorView, Observer, OutputSink, QuestionAsked, SessionView, Tower,
-    TowerConfig, TowerError,
+    EmployeeStarted, FloorView, MessageDelivered, Observer, OutputSink, QuestionAsked, SessionView,
+    Tower, TowerConfig, TowerError,
 };
 use tower_core::env::{EnvMap, build_env};
 use tower_core::login_env::LoginEnvSource;
@@ -84,6 +84,8 @@ pub struct Events {
     pub notices: Mutex<Vec<(PathBuf, String, String)>>,
     /// The `question_asked` events, oldest first.
     pub questions: Mutex<Vec<(PathBuf, QuestionAsked)>>,
+    /// The `message_delivered` events, oldest first.
+    pub delivered: Mutex<Vec<(PathBuf, MessageDelivered)>>,
 }
 
 impl Observer for Events {
@@ -115,6 +117,20 @@ impl Observer for Events {
     fn question_asked(&self, path: &Path, event: &QuestionAsked) {
         lock(&self.questions).push((path.to_path_buf(), event.clone()));
         self.changed.notify_all();
+    }
+    fn message_delivered(&self, path: &Path, event: &MessageDelivered) {
+        lock(&self.delivered).push((path.to_path_buf(), event.clone()));
+        self.changed.notify_all();
+    }
+}
+
+impl Events {
+    /// The `message_delivered` events, oldest first (without the floor path).
+    pub fn delivered_events(&self) -> Vec<MessageDelivered> {
+        lock(&self.delivered)
+            .iter()
+            .map(|(_, e)| e.clone())
+            .collect()
     }
 }
 

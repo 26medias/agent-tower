@@ -75,6 +75,8 @@ export interface Settings {
     imageModel: string;
     /** `[interface] notify_on_question` of the app config. The default is true. */
     notifyOnQuestion: boolean;
+    /** The home folder of the app. The "Browse..." dialog opens there when no floor gives a better place. Null when unknown. */
+    homeDir: string | null;
 }
 
 export interface ModelOption {
@@ -100,6 +102,8 @@ export interface Programs {
     codex: string | null;
     node: string | null;
     hook: string;
+    /** The optional program `rtk`. Null when the app finds none. It has no override. */
+    rtk: string | null;
     /** The path that the operator set for each program. Null: no override (the app searches). */
     overrides: Record<ProgramName, string | null>;
 }
@@ -143,6 +147,20 @@ export interface EmployeeStartedPayload {
     bySlug: string; // the employee that started it
     byName: string;
     resumed: boolean; // the last CLI session was resumed (not a fresh start)
+}
+
+/** Payload of the `message-delivered` event (docs/ipc-final.md): the app delivered a message to a session. */
+export interface MessageDeliveredPayload {
+    path: string;
+    fromSlug: string; // "operator" for a task that the operator gave
+    fromName: string;
+    toSlug: string;
+    toName: string;
+    kind: "message" | "task";
+    taskId: number | null; // the task of a "task" message
+    /** A task status message: the status it names ("review"). "" when unknown. null: an assignment, or not a task message. */
+    taskStatus: string | null;
+    preview: string; // the first 80 characters of the body, one line. Never the full text
 }
 
 /** Payload of the `tasks-changed` event (docs/ipc-m2.md). */

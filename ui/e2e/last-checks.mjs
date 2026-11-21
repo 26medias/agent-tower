@@ -314,7 +314,7 @@ export async function lastChecks({ page, check, url, shots }) {
     await M("taskByEmployee", FLOOR, "pm", { create: "Plan the demo" });
     await pause();
     await M("employeeStart", FLOOR, "ceo", "eng-lin");
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-activity"] li').length >= 6 && /made T-6/.test(document.querySelector('[data-testid="team-activity"]').textContent) && /Ada started Lin/.test(document.querySelector('[data-testid="team-activity"]').textContent));
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="team-activity"] li').length >= 4 && /made T-6/.test(document.querySelector('[data-testid="team-activity"]').textContent) && /Ada started Lin/.test(document.querySelector('[data-testid="team-activity"]').textContent));
     const texts = await lineTexts();
     check("N3 activity: the list is there at 2560 x 1400: started, a new task, a question and an answer; the newest first",
         texts.slice(0, 2).includes("Ada started Lin") && texts.slice(0, 2).includes("Maya made T-6: Plan the demo") &&
@@ -349,10 +349,13 @@ export async function lastChecks({ page, check, url, shots }) {
     await page.waitForFunction((id) => document.querySelector(`.tab[data-session="${id}"].active`), pmId);
     check("N3 activity: a click on a session line goes to the tab of that employee", (await page.locator(".bar").getAttribute("data-slug")) === "pm");
     // At most 30 lines.
-    for (let i = 0; i < 20; i++) {
-        await M("setStatus", ceoId, "working");
-        await M("setStatus", ceoId, "idle");
+    // Changed on purpose (last repair): a new status row of an employee replaces its old one, so status changes cannot fill
+    // the list. Each new task makes a row that is never folded away.
+    for (let i = 0; i < 32; i++) {
+        await M("taskByEmployee", FLOOR, "pm", { create: `Filler task ${i}` });
+        await page.waitForTimeout(40);
     }
+    await page.waitForFunction(() => /made T-38/.test(document.querySelector('[data-testid="team-activity"]').textContent));
     await page.waitForTimeout(150);
     check("N3 activity: at most 30 lines", (await activity.locator("li").count()) === 30);
     // A small window hides the list.

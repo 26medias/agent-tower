@@ -34,6 +34,18 @@ export function modalOpen(): boolean {
     return stack.length > 0;
 }
 
+const listeners = new Set<(open: boolean) => void>();
+
+/** Call `listener` each time a modal opens or the last one closes. Returns the function that stops it. */
+export function onModalChange(listener: (open: boolean) => void): () => void {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+}
+
+function tell(): void {
+    for (const listener of listeners) listener(stack.length > 0);
+}
+
 /** True when this browser has the `inert` attribute (WebKitGTK 2.38 and later has it). */
 export function supportsInert(): boolean {
     return typeof HTMLElement !== "undefined" && "inert" in HTMLElement.prototype;
@@ -133,6 +145,7 @@ export function modal(node: HTMLElement, options: ModalOptions) {
     const marked = isolate(node);
     const entry: Entry = { node, onclose: () => current.onclose() };
     stack.push(entry);
+    tell();
     const isTop = () => stack[stack.length - 1] === entry;
 
     if (!node.hasAttribute("tabindex")) node.setAttribute("tabindex", "-1");
@@ -198,6 +211,7 @@ export function modal(node: HTMLElement, options: ModalOptions) {
             document.removeEventListener("focusin", onFocusIn, true);
             const at = stack.indexOf(entry);
             if (at >= 0) stack.splice(at, 1);
+            tell();
             for (const el of marked) unmark(el);
             // Give the focus back, unless another modal is open or the element is gone.
             if (stack.length === 0 && opener && opener.isConnected && opener !== document.body && !opener.hasAttribute("disabled")) {

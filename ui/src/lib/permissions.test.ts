@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALLOW_RULES_MAX, EXAMPLE_RULES, GIT_WILDCARD_REFUSAL, PATH_WILDCARD_WARNING_TEXT, WARNING_TEXT, WEB_FETCH_WARNING_TEXT, WILDCARD_WARNING_TEXT, addRule, checkAllowRule, mergeRules, removeRule, ruleWarning } from "./permissions";
+import { ALLOW_RULES_MAX, EXAMPLE_RULES, exampleRules, GIT_WILDCARD_REFUSAL, PATH_WILDCARD_WARNING_TEXT, WARNING_TEXT, WEB_FETCH_WARNING_TEXT, WILDCARD_WARNING_TEXT, addRule, checkAllowRule, mergeRules, removeRule, ruleWarning } from "./permissions";
 
 describe("checkAllowRule", () => {
     it("accepts the good forms", () => {
@@ -94,6 +94,18 @@ describe("checkAllowRule", () => {
 
     it("accepts every example rule", () => {
         for (const rule of EXAMPLE_RULES) expect(checkAllowRule(rule), rule).toBeNull();
+    });
+
+    it("shows the cargo example with rtk only when rtk is found, and each example with * has the warning", () => {
+        expect(exampleRules(false)).toEqual(["Bash(cargo test:*)", "Bash(npm test:*)", "Bash(ls:*)"]);
+        expect(exampleRules(true)).toEqual(["Bash(rtk cargo test:*)", "Bash(npm test:*)", "Bash(ls:*)"]);
+        for (const rtk of [false, true]) {
+            for (const rule of exampleRules(rtk)) {
+                expect(checkAllowRule(rule), rule).toBeNull();
+                // The line under the examples says: "Each example with * gets the warning above." It must be true.
+                if (rule.includes("*")) expect(ruleWarning(rule), rule).not.toBeNull();
+            }
+        }
     });
 });
 

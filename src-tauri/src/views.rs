@@ -358,6 +358,9 @@ pub struct Settings {
     pub image_model: String,
     /// `[interface] notify_on_question` of the app config (default `true`).
     pub notify_on_question: bool,
+    /// The home folder of the app, or `null` when it is not known. The UI opens the "Browse..."
+    /// dialog there when no floor gives a better place.
+    pub home_dir: Option<String>,
 }
 
 impl From<app::SettingsView> for Settings {
@@ -370,6 +373,7 @@ impl From<app::SettingsView> for Settings {
             }),
             image_model: view.image_model,
             notify_on_question: view.notify_on_question,
+            home_dir: view.home_dir.map(|home| text(&home)),
         }
     }
 }
@@ -383,6 +387,8 @@ pub struct Programs {
     pub codex: Option<String>,
     pub node: Option<String>,
     pub hook: String,
+    /// The program `rtk`, or `null` when the app finds none. It is optional.
+    pub rtk: Option<String>,
     /// The path that the operator set for each program. `null`: no override.
     pub overrides: ProgramOverrides,
 }
@@ -422,6 +428,7 @@ impl From<app::ProgramsView> for Programs {
             codex: opt(view.codex),
             node: opt(view.node),
             hook: view.hook.map(|p| text(&p)).unwrap_or_default(),
+            rtk: opt(view.rtk),
             overrides: {
                 let [claude, codex, node] = view.overrides;
                 ProgramOverrides {
@@ -485,6 +492,40 @@ impl EmployeeStarted {
             by_slug: event.by_slug.clone(),
             by_name: event.by_name.clone(),
             resumed: event.resumed,
+        }
+    }
+}
+
+/// Payload of the event `message-delivered`: the app delivered a message to the session of an
+/// employee. `kind` is `message` or `task`. `task_status` is the status that a task status
+/// message names (empty when the text has none), and `null` for all other messages. `preview` is
+/// at most 80 characters of the body, never the full text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageDelivered {
+    pub path: String,
+    pub from_slug: String,
+    pub from_name: String,
+    pub to_slug: String,
+    pub to_name: String,
+    pub kind: String,
+    pub task_id: Option<i64>,
+    pub task_status: Option<String>,
+    pub preview: String,
+}
+
+impl MessageDelivered {
+    pub fn new(path: &Path, event: &app::MessageDelivered) -> MessageDelivered {
+        MessageDelivered {
+            path: text(path),
+            from_slug: event.from_slug.clone(),
+            from_name: event.from_name.clone(),
+            to_slug: event.to_slug.clone(),
+            to_name: event.to_name.clone(),
+            kind: event.kind.clone(),
+            task_id: event.task_id,
+            task_status: event.task_status.clone(),
+            preview: event.preview.clone(),
         }
     }
 }
@@ -795,20 +836,22 @@ mod tests {
             openai_key_source: Some(KeySource::Env),
             image_model: "m".into(),
             notify_on_question: false,
+            home_dir: Some("/home/a".into()),
         };
         assert_eq!(
             to_json(&settings),
-            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false})
+            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "homeDir": "/home/a"})
         );
         let none = Settings {
             openai_key_set: false,
             openai_key_source: None,
             image_model: "m".into(),
             notify_on_question: true,
+            home_dir: None,
         };
         assert_eq!(
             to_json(&none),
-            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true})
+            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "homeDir": null})
         );
         assert_eq!(to_json(&KeySource::Config), json!("config"));
     }
@@ -872,6 +915,7 @@ mod tests {
             codex: None,
             node: Some("/n".into()),
             hook: "/h".into(),
+            rtk: Some("/r".into()),
             overrides: ProgramOverrides {
                 claude: Some("/mine/c".into()),
                 codex: None,
@@ -880,7 +924,7 @@ mod tests {
         };
         assert_eq!(
             to_json(&programs),
-            json!({"claude": "/c", "codex": null, "node": "/n", "hook": "/h",
+            json!({"claude": "/c", "codex": null, "node": "/n", "hook": "/h", "rtk": "/r",
                 "overrides": {"claude": "/mine/c", "codex": null, "node": null}})
         );
         assert_eq!(
@@ -949,6 +993,23 @@ mod tests {
                 resumed: false,
             }),
             json!({"path": "/p", "sessionId": "s2", "slug": "eng", "name": "Kenji", "bySlug": "pm", "byName": "Tomas", "resumed": false})
+        );
+        assert_eq!(
+            to_json(&MessageDelivered::new(
+                Path::new("/p"),
+                &app::MessageDelivered {
+                    from_slug: "pm".into(),
+                    from_name: "Maya".into(),
+                    to_slug: "eng".into(),
+                    to_name: "Eli".into(),
+                    kind: "task".into(),
+                    task_id: Some(3),
+                    task_status: Some("review".into()),
+                    preview: "Title: x".into(),
+                }
+            )),
+            json!({"path": "/p", "fromSlug": "pm", "fromName": "Maya", "toSlug": "eng", "toName": "Eli",
+                "kind": "task", "taskId": 3, "taskStatus": "review", "preview": "Title: x"})
         );
     }
 

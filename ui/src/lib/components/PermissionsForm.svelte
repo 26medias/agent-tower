@@ -7,7 +7,7 @@
     // security boundary. It tells the operator what each rule gives. An old `[permissions]` table in the project is only
     // proposed (an agent can have written it): the operator reads it and clicks "Use these rules".
     import { onMount } from "svelte";
-    import { EXAMPLE_RULES, addRule, mergeRules, removeRule, ruleWarning } from "$lib/permissions";
+    import { addRule, exampleRules, mergeRules, removeRule, ruleWarning } from "$lib/permissions";
     import { store } from "$lib/store.svelte";
 
     let draft = $state("");
@@ -17,7 +17,9 @@
 
     const rules = $derived(store.permissions);
     // The examples that are not in the list yet. A click adds one.
-    const examples = $derived(EXAMPLE_RULES.filter((r) => !(rules ?? []).includes(r)));
+    // They fit this machine: with `rtk` found, the cargo example names it (see `exampleRules`).
+    const candidates = $derived(exampleRules(!!store.programs?.rtk));
+    const examples = $derived(candidates.filter((r) => !(rules ?? []).includes(r)));
     const proposed = $derived(store.proposedRules);
 
     /**
@@ -69,8 +71,8 @@
 
 <div class="permissions">
     <p class="hint">
-        A rule lets a Claude employee run a command with no question. For example, <code>Bash(cargo test:*)</code> lets it run
-        <code>cargo test</code> with any arguments.
+        A rule lets a Claude employee run a command with no question. For example, <code>{candidates[0]}</code> lets it run
+        <code>{candidates[0].slice("Bash(".length, -":*)".length)}</code> with any arguments.
         <button type="button" class="link" aria-expanded={more} data-testid="rules-more" onclick={() => (more = !more)}>
             {more ? "Less" : "More..."}
         </button>
@@ -147,7 +149,7 @@
             <input
                 type="text"
                 name="rule"
-                placeholder="Bash(cargo test:*)"
+                placeholder={candidates[0]}
                 aria-label="New rule"
                 autocomplete="off"
                 spellcheck="false"
@@ -169,6 +171,7 @@
                     <button type="button" class="chip" data-example={rule} disabled={busy || store.gone} title={store.goneTitle()} onclick={() => void add(rule)}>{rule}</button>
                 {/each}
             </div>
+            <p class="hint" data-testid="examples-warning">Each example with * gets the warning above.</p>
         {/if}
     {/if}
 </div>

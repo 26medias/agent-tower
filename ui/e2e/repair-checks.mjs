@@ -307,7 +307,7 @@ export async function repairChecks({ page, check, url, shots }) {
 
     // The duplicate name warns and does not block.
     await fresh();
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     const form = page.locator('form[aria-label="Add employee"]');
     await form.locator('input[name="name"]').fill("Ada");
     check("D8: a name that another employee has shows a warning", (await form.locator('[data-testid="name-duplicate"]').count()) === 1 && /Ada \(CEO\) has this name already/.test(await form.locator('[data-testid="name-duplicate"]').innerText()));
@@ -397,8 +397,11 @@ export async function repairChecks({ page, check, url, shots }) {
     const box3 = { office: await page.locator(".office").boundingBox(), area: await page.locator(".area").boundingBox(), tabs: await page.locator(".tabs").boundingBox() };
     check("D10: with 3 toasts the office, the tabs and the terminal area are exactly where they were", JSON.stringify(box0) === JSON.stringify(box3), JSON.stringify({ box0, box3 }));
     const toastBoxes = await page.$$eval(".toast", (els) => els.map((e) => ({ ...e.getBoundingClientRect().toJSON(), text: e.querySelector(".text").textContent })));
-    check("D10: the newest toast is on top", toastBoxes[0].text === "Third notice." && toastBoxes[2].text === "First notice." && toastBoxes[0].y < toastBoxes[1].y, JSON.stringify(toastBoxes.map((b) => [b.text, b.y])));
-    check("D10: the toasts are at the top right, above the board and not above the terminal", toastBoxes.every((b) => b.x + b.width >= 1280 - 12 && b.y >= 40 && b.y + b.height < box3.tabs.y + 60) && toastBoxes[2].y + toastBoxes[2].height < box3.area.y + 200, JSON.stringify(toastBoxes[2]));
+    // Changed on purpose (last repair D-a): the stack is at the bottom of the centre column, so the NEWEST toast is the lowest, nearest to the corner.
+    check("D10: the newest toast is the lowest, nearest to the corner", toastBoxes[2].text === "Third notice." && toastBoxes[0].text === "First notice." && toastBoxes[2].y > toastBoxes[1].y && toastBoxes[1].y > toastBoxes[0].y, JSON.stringify(toastBoxes.map((b) => [b.text, b.y])));
+    // Changed on purpose (last repair D-a): the toasts are at the bottom right of the centre column, over the terminal area, not over the board and not over the tabs.
+    const boardLeft = (await page.locator(".board").boundingBox()).x;
+    check("D10: the toasts are at the bottom right of the centre column: left of the board, under the tabs, over the terminal area", toastBoxes.every((b) => b.x + b.width <= boardLeft && b.x + b.width >= boardLeft - 30 && b.y >= box3.area.y && b.y + b.height <= box3.area.y + box3.area.height), JSON.stringify(toastBoxes[2]));
     check("D10: a toast does not take the focus", (await page.evaluate(() => document.activeElement?.className)) === focusBefore);
     await M("notice", FLOOR, "Fourth notice");
     await M("notice", FLOOR, "Fifth notice");
@@ -475,7 +478,7 @@ export async function repairChecks({ page, check, url, shots }) {
         check(`D1 ${name}: the page is no longer inert`, !after.inert && !after.hidden);
     }
 
-    await modalChecks("employee form", () => page.click(".bar button.add"), 'form[aria-label="Add employee"]', "button.add", (f) => f.name === "name");
+    await modalChecks("employee form", () => page.click('[data-testid="add-employee"]'), 'form[aria-label="Add employee"]', "button.add", (f) => f.name === "name");
     await modalChecks("settings", () => page.click("button.settings"), '[role="dialog"][aria-label="Settings"]', "button.settings", (f) => f.tag === "INPUT" || f.tag === "SELECT");
     await page.locator('.board .card[data-task="3"]').click();
     await page.waitForSelector('[data-testid="open-report"]');
@@ -493,7 +496,7 @@ export async function repairChecks({ page, check, url, shots }) {
     await page.keyboard.press("Escape");
     await page.locator('form[aria-label="Edit employee"]').waitFor({ state: "detached" });
     check("D1: the edit form closes with Escape and the focus is back on edit", await page.evaluate(() => !!document.activeElement?.matches("button.edit")));
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     await page.locator('form[aria-label="Add employee"]').waitFor();
     await page.mouse.click(4, 400);
     await page.locator('form[aria-label="Add employee"]').waitFor({ state: "detached" });
@@ -505,7 +508,7 @@ export async function repairChecks({ page, check, url, shots }) {
         delete HTMLElement.prototype.inert;
     });
     check("D1: the test browser now has no inert attribute", await page.evaluate(() => !("inert" in HTMLElement.prototype)));
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     await page.locator('form[aria-label="Add employee"]').waitFor();
     const fb = await page.evaluate(() => {
         const app = document.querySelector(".app");
@@ -629,7 +632,7 @@ export async function repairChecks({ page, check, url, shots }) {
 
     // ================= The employee form: P18 to P25 =================
     await fresh();
-    await page.click(".bar button.add");
+    await page.click('[data-testid="add-employee"]');
     const f = page.locator('form[aria-label="Add employee"]');
     check("P18: the name placeholder is not the name of an employee", (await f.locator('input[name="name"]').getAttribute("placeholder")) === "Name, for example Lena");
     check("P19: no slug word: the form says File name", /File name:/.test(await f.locator(".slug").innerText()) && !/slug/i.test(await f.innerText()));
@@ -862,7 +865,7 @@ export async function repairChecks({ page, check, url, shots }) {
         await page.waitForTimeout(300);
         await shot(`${tag}-3-unread.png`);
         // 3. The employee form with its warnings.
-        await page.click(".bar button.add");
+        await page.click('[data-testid="add-employee"]');
         await page.fill('input[name="name"]', "Ada");
         await page.waitForTimeout(150);
         await shot(`${tag}-4-employee-form.png`);
@@ -901,7 +904,9 @@ export async function repairChecks({ page, check, url, shots }) {
         await page.waitForTimeout(400);
         if (wide) {
             const cols = await page.evaluate(() => getComputedStyle(document.querySelector(".roster")).gridTemplateColumns.split(" ").length);
-            check("P8: at 2560 the roster of a big floor uses columns (3 or more)", cols >= 3, String(cols));
+            // Changed on purpose (last repair): fewer and wider columns. A column is at least 240 px wide when the panel has the room.
+            const widths = await page.evaluate(() => [...document.querySelectorAll(".roster li")].map((li) => Math.round(li.getBoundingClientRect().width)));
+            check("P8: at 2560 the roster of a big floor uses columns, each at least 240 px wide", cols >= 2 && Math.min(...widths) >= 240, JSON.stringify({ cols, min: Math.min(...widths) }));
         }
         await shot(`${tag}-9-crowded.png`);
         await openFloorByStorey(FLOOR);
@@ -995,7 +1000,7 @@ export async function repairChecks({ page, check, url, shots }) {
         ["start", ".bar button.start"],
         ["edit", ".bar button.edit"],
         ["remove", ".bar button.remove"],
-        ["+ employee", ".bar button.add"],
+        ["+ employee", '[data-testid="add-employee"]'],
         ["Run the setup agent", ".office .buttons button.setup"],
         ["New logo", ".office .buttons button.newlogo"],
     ]) {

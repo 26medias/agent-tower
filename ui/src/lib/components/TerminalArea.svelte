@@ -3,7 +3,7 @@
     import TerminalPane from "./TerminalPane.svelte";
 </script>
 
-<div class="area">
+<div class="area" data-testid="terminal-area">
     <div class="stack">
         {#each store.allTabSessions as s (s.sessionId)}
             {@const who = store.describeSession(s)}

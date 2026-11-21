@@ -12,7 +12,9 @@ use commands::{Shared, WriteQueues};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
-use tower_core::app::{EmployeeStarted, Observer, QuestionAsked, SessionView, Tower, TowerConfig};
+use tower_core::app::{
+    EmployeeStarted, MessageDelivered, Observer, QuestionAsked, SessionView, Tower, TowerConfig,
+};
 
 /// Sends the changes of the Tower to all windows as Tauri events.
 struct TauriObserver<R: Runtime> {
@@ -59,6 +61,13 @@ impl<R: Runtime> Observer for TauriObserver<R> {
 
     fn question_asked(&self, _path: &Path, event: &QuestionAsked) {
         notifications::on_question(&self.app, event);
+    }
+
+    fn message_delivered(&self, path: &Path, event: &MessageDelivered) {
+        let _ = self.app.emit(
+            "message-delivered",
+            views::MessageDelivered::new(path, event),
+        );
     }
 }
 

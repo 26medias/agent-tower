@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeError, isFloorGone, isPathError, noticePlan, programProblem, splitFileError, tidyError } from "./messages";
+import { blockedTaskId, describeError, isFloorGone, isPathError, noticePlan, programProblem, splitFileError, tidyError } from "./messages";
 
 describe("tidyError", () => {
     it("removes the code prefix and starts with a capital letter", () => {
@@ -93,5 +93,18 @@ describe("noticePlan", () => {
         expect(noticePlan("something_new")).toEqual({ tone: "info", stay: false });
         // The app removed this kind (docs/ipc-m3.md): it is not an error any more.
         expect(noticePlan("permissions_restored")).toEqual({ tone: "info", stay: false });
+    });
+});
+
+describe("blockedTaskId", () => {
+    it("reads the task of a blocked-merge notice", () => {
+        expect(blockedTaskId("Task T-3 is blocked: The main checkout has uncommitted changes.")).toBe(3);
+        expect(blockedTaskId("Task T-12 is blocked: a conflict")).toBe(12);
+    });
+
+    it("gives null for another text", () => {
+        expect(blockedTaskId("Some notice.")).toBeNull();
+        expect(blockedTaskId("Could not resume eng: T-3 is blocked")).toBeNull();
+        expect(blockedTaskId("Task T-3 is blockedness")).toBeNull();
     });
 });

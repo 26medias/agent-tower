@@ -2,6 +2,8 @@
     // The bar for the selected employee: name, role, CLI, model, and the buttons of the old cards.
     // The selected employee and the active tab are the same: a click on a tab selects its employee.
     // For the tab of the setup agent, the bar shows the setup session and its own "Stop the setup".
+    // The bar has only actions on the selected employee. "+ employee" is not one: it is at the end of the roster.
+    // The buttons wrap to a second row when the info panel is narrow, so nothing goes past the panel edge.
     import { modelDisplay } from "$lib/models";
     import { store } from "$lib/store.svelte";
     import type { Employee } from "$lib/types";
@@ -9,7 +11,7 @@
     import Spinner from "./Spinner.svelte";
     import StatusDot from "./StatusDot.svelte";
 
-    let { onedit, onadd }: { onedit: (employee: Employee) => void; onadd: () => void } = $props();
+    let { onedit }: { onedit: (employee: Employee) => void } = $props();
 
     const emp = $derived(store.selectedEmployee);
     const session = $derived(emp ? store.sessionOfEmployee(emp.slug) : undefined);
@@ -46,7 +48,6 @@
             {:else}
                 <span class="state">The setup is stopped.</span>
             {/if}
-            {@render addButton()}
         </div>
     {:else if emp}
         <div class="who">
@@ -117,24 +118,14 @@
                 title={store.goneTitle(`Remove ${emp.name}`) ?? ""}
                 onconfirm={() => store.removeEmployee(emp.slug)}
             />
-            {@render addButton()}
         </div>
     {:else}
-        <div class="idle">
-            <p class="hint">{store.floorView ? "Click a character or a tab to select an employee." : "Open a floor to see its employees."}</p>
-            {@render addButton()}
-        </div>
+        <p class="hint">{store.floorView ? "Click a character or a tab to select an employee." : "Open a floor to see its employees."}</p>
     {/if}
 </div>
 
-{#snippet addButton()}
-    {#if store.floorView}
-        <button type="button" class="add" disabled={store.gone} title={store.goneTitle()} onclick={onadd}>+ employee</button>
-    {/if}
-{/snippet}
-
 <style>
-    /* Three rows at most: who, the CLI and the model, and the buttons (with "+ employee" at the end). */
+    /* Three rows: who, the CLI and the model, and the buttons (they wrap when the panel is narrow). */
     .bar {
         display: flex;
         flex-direction: column;
@@ -211,9 +202,14 @@
 
     .actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 4px;
         align-items: center;
         min-width: 0;
+    }
+
+    .actions :global(button) {
+        max-width: 100%;
     }
 
     /* The "stop" buttons stay above the dim of a gone floor (see Office.svelte), and they stay enabled. */
@@ -227,24 +223,6 @@
         display: inline-flex;
         align-items: center;
         gap: 5px;
-    }
-
-    .add {
-        margin-left: auto;
-        border-style: dashed;
-        color: var(--dim);
-    }
-
-    .idle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-width: 0;
-    }
-
-    .idle .hint {
-        flex: 1;
-        min-width: 0;
     }
 
     .hint {

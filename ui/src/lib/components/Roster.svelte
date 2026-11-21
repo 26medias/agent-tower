@@ -1,15 +1,20 @@
 <script lang="ts">
     // The list of all employees of the open floor: status, name and job title. A click selects the
     // employee, the same as a click on the character. The text is readable at each office size.
+    // The columns are at least 240 px wide when the panel has the room, so a job title is not cut.
+    // A row that asks a question keeps the whole name and hides the job title: the amber "ASKS" says what matters.
+    // "+ employee" is the last item of the list (it is not an action on the selected employee).
     import { roleColor } from "$lib/office-layout";
     import { store } from "$lib/store.svelte";
     import StatusDot from "./StatusDot.svelte";
+
+    let { onadd }: { onadd: () => void } = $props();
 
     const employees = $derived(store.orderedEmployees);
     const selectedSlug = $derived(store.selectedEmployee?.slug ?? null);
 </script>
 
-{#if employees.length > 0}
+{#if store.floorView}
     <ul class="roster" aria-label="Employees">
         {#each employees as emp (emp.slug)}
             {@const status = store.sessionOfEmployee(emp.slug)?.status ?? "stopped"}
@@ -27,19 +32,27 @@
                 >
                     <StatusDot {status} />
                     <span class="r-name">{emp.name}</span>
-                    <span class="r-role" style:color={status === "question" ? "inherit" : roleColor(emp.role)}>{emp.role}</span>
-                    {#if status === "question"}<span class="r-asks" data-testid="roster-asks">asks</span>{/if}
+                    {#if status === "question"}
+                        <span class="r-asks" data-testid="roster-asks">asks</span>
+                    {:else}
+                        <span class="r-role" style:color={roleColor(emp.role)}>{emp.role}</span>
+                    {/if}
                 </button>
             </li>
         {/each}
+        <li class="add-item">
+            <button type="button" class="add" data-testid="add-employee" disabled={store.gone} title={store.goneTitle("Add an employee to this floor")} onclick={onadd}>+ employee</button>
+        </li>
     </ul>
 {/if}
 
 <style>
     .roster {
         display: grid;
-        /* Two columns in the info panel at 1280 px, more in a wide panel. The role is cut with an ellipsis. */
-        grid-template-columns: repeat(auto-fill, minmax(min(100%, 128px), 1fr));
+        /* The columns are wide, so a job title is not cut: at least 240 px when the panel is wide enough for two of them
+           (at 486 px and more). A narrower panel keeps two compact columns (half the width), and a very narrow one
+           (under about 230 px) keeps one. Fewer and wider columns, not many narrow ones. */
+        grid-template-columns: repeat(auto-fill, minmax(max(110px, min(240px, calc(50% - 3px))), 1fr));
         gap: 3px 6px;
         margin: 0;
         padding: 0;
@@ -90,6 +103,13 @@
         animation: none;
     }
 
+    /* A row that asks: the whole name. It shrinks (with an ellipsis) only when the row is really too narrow. */
+    .row.asking .r-name {
+        flex: 0 1 auto;
+        max-width: none;
+        min-width: 0;
+    }
+
     .r-asks {
         flex: none;
         margin-left: auto;
@@ -111,6 +131,18 @@
         white-space: nowrap;
         color: var(--text);
         font-weight: 700;
+    }
+
+    .add-item {
+        display: flex;
+        align-items: center;
+    }
+
+    .add {
+        padding: 1px 8px;
+        border-style: dashed;
+        color: var(--dim);
+        font-size: 12px;
     }
 
     .r-role {

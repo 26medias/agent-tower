@@ -215,6 +215,27 @@ pub struct EmployeeStarted {
     pub resumed: bool,
 }
 
+/// One message between employees (or from the operator) that the app DELIVERED to the session of
+/// the receiver: by a paste, by the Stop hook, by `inbox`, or as the first message of a start.
+/// It carries a short preview, never the full text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageDelivered {
+    pub from_slug: String,
+    /// The name of the sender. For the operator it is `Operator`. For a removed employee it is the slug.
+    pub from_name: String,
+    pub to_slug: String,
+    pub to_name: String,
+    /// `message` for a message of `send`, `task` for a message that the app wrote about a task.
+    pub kind: String,
+    pub task_id: Option<i64>,
+    /// For a status message about a task: the status that it names (`review`). `None` for an
+    /// assignment and for a message that is not about a task.
+    pub task_status: Option<String>,
+    /// The first 80 characters of the body, with control characters removed and each newline
+    /// turned into a space.
+    pub preview: String,
+}
+
 /// `FloorView` of the contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloorView {
@@ -267,6 +288,9 @@ pub struct ProgramsView {
     pub codex: Option<PathBuf>,
     pub node: Option<PathBuf>,
     pub hook: Option<PathBuf>,
+    /// The program `rtk` (Rust Token Killer), found like the others. It is optional: the app
+    /// needs it for nothing. The UI uses it to show examples that fit this machine.
+    pub rtk: Option<PathBuf>,
     /// The override of the operator for each program, in the order `claude`, `codex`, `node`.
     /// `None`: no override (the app searches).
     pub overrides: [Option<PathBuf>; 3],
@@ -293,6 +317,10 @@ pub trait Observer: Send + Sync {
     /// notification (`notify::should_notify`). It comes after the `session_changed` of the same
     /// change. The default does nothing.
     fn question_asked(&self, _path: &Path, _event: &QuestionAsked) {}
+    /// The app delivered a message to the session of an employee (a paste, the Stop hook, `inbox`
+    /// or the first message of a start). One call for each message, oldest first. The default
+    /// does nothing.
+    fn message_delivered(&self, _path: &Path, _event: &MessageDelivered) {}
 }
 
 /// Receives the output of the attached session, in order (see `live.rs`).
@@ -1697,12 +1725,13 @@ impl TowerCore {
     /// The resolved programs. It resolves what is not yet cached; this can take some seconds
     /// the first time (a login shell).
     pub fn programs_get(&self) -> ProgramsView {
-        let (claude, codex, node, overrides) = {
+        let (claude, codex, node, rtk, overrides) = {
             let mut book = locked(&self.programs);
             (
                 book.resolve("claude").ok(),
                 book.resolve("codex").ok(),
                 book.resolve("node").ok(),
+                book.resolve("rtk").ok(),
                 tools::PROGRAM_NAMES.map(|name| book.override_of(name)),
             )
         };
@@ -1711,6 +1740,7 @@ impl TowerCore {
             codex,
             node,
             hook: self.hook_program().ok(),
+            rtk,
             overrides,
         }
     }

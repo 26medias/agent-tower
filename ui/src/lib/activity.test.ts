@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_SHOWN, activityTime, lineText, sessionDrafts, startedDraft, taskDrafts, visibleActivity, type ActivityEntry } from "./activity";
+import {
+    ACTIVITY_SHOWN,
+    FOLD_MS,
+    activityTime,
+    appendActivity,
+    lineText,
+    messageDraft,
+    sessionDrafts,
+    startedDraft,
+    statusPhrase,
+    taskDrafts,
+    visibleActivity,
+    type ActivityDraft,
+    type ActivityEntry,
+} from "./activity";
 import { employeeLabel, emptySessionState, type SessionState } from "./reducers";
-import type { Employee, Status, TaskView } from "./types";
+import type { Employee, MessageDeliveredPayload, Status, TaskView } from "./types";
 
 function state(...rows: [string, string, Status][]): SessionState {
     const byId: SessionState["byId"] = {};
@@ -94,6 +108,9 @@ describe("started and task lines", () => {
         ];
         const texts = taskDrafts("/f", before, after, who).map((d) => d.text);
         expect(texts).toEqual(["T-1 is now in progress", "T-2 has no owner now", "You made T-3: Plan"]);
+        // The board calls the status "Review". After "is now" it reads "in review".
+        const review = taskDrafts("/f", [task(2)], [task(2, { status: "review" })], who).map((d) => d.text);
+        expect(review).toEqual(["T-2 is now in review"]);
         const [first] = taskDrafts("/f", before, after, who);
         expect(first.taskId).toBe(1);
         expect(taskDrafts("/f", after, after, who)).toEqual([]);
@@ -127,5 +144,147 @@ describe("the label of an employee", () => {
     it("falls back to the slug when the floor or the employee is not known", () => {
         expect(employeeLabel(undefined, "eng")).toBe("eng");
         expect(employeeLabel(emps, "ghost")).toBe("ghost");
+    });
+});
+
+describe("the words after \"is now\"", () => {
+    it("reads in review, in progress, done, blocked and to do", () => {
+        expect(statusPhrase("review")).toBe("in review");
+        expect(statusPhrase("in_progress")).toBe("in progress");
+        expect(statusPhrase("done")).toBe("done");
+        expect(statusPhrase("blocked")).toBe("blocked");
+        expect(statusPhrase("todo")).toBe("to do");
+    });
+});
+
+function delivered(over: Partial<MessageDeliveredPayload> = {}): MessageDeliveredPayload {
+    return {
+        path: "/f",
+        fromSlug: "pm",
+        fromName: "Maya",
+        toSlug: "eng",
+        toName: "Eli",
+        kind: "message",
+        taskId: null,
+        taskStatus: null,
+        preview: "Also, at the end of your work, say the word BANANA.",
+        ...over,
+    };
+}
+
+describe("a delivered message", () => {
+    it("ends with an ellipsis when the preview has the full 80 characters (it is probably cut)", () => {
+        const full = "x".repeat(80);
+        expect(messageDraft(delivered({ preview: full })).text).toBe(`Maya \u2192 Eli: ${full}\u2026`);
+        expect(messageDraft(delivered({ preview: "x".repeat(79) })).text).toBe(`Maya \u2192 Eli: ${"x".repeat(79)}`);
+    });
+
+    it("is a row \"Maya \u2192 Eli: <preview>\" that points at the receiver", () => {
+        expect(messageDraft(delivered())).toEqual({
+            path: "/f",
+            kind: "message",
+            text: "Maya \u2192 Eli: Also, at the end of your work, say the word BANANA.",
+            slug: "eng",
+            fromSlug: "pm",
+        });
+    });
+
+    it("says that a task was assigned, or that its status changed", () => {
+        expect(messageDraft(delivered({ kind: "task", taskId: 3 })).text).toBe("Maya \u2192 Eli: task T-3 assigned");
+        expect(messageDraft(delivered({ kind: "task", taskId: 3, taskStatus: "review" })).text).toBe("Maya \u2192 Eli: T-3 is now in review");
+        expect(messageDraft(delivered({ kind: "task", taskId: 3, taskStatus: "in_progress" })).text).toBe("Maya \u2192 Eli: T-3 is now in progress");
+        expect(messageDraft(delivered({ kind: "task", taskId: 3, taskStatus: "" })).text).toBe("Maya \u2192 Eli: T-3 changed");
+    });
+});
+
+describe("the fold of the status rows", () => {
+    const status = (slug: string, words: string, path = "/f"): ActivityDraft => ({ path, kind: "session", text: `${slug} ${words}`, slug, words });
+    const other = (kind: ActivityDraft["kind"], slug: string, extra: Partial<ActivityDraft> = {}): ActivityDraft => ({ path: "/f", kind, text: `${kind} ${slug}`, slug, ...extra });
+    const T0 = 1_000_000;
+    let id = 0;
+    const next = () => ++id;
+    const texts = (list: ActivityEntry[]) => list.map((l) => l.text);
+    const run = (steps: [number, ActivityDraft][]): ActivityEntry[] => {
+        let list: ActivityEntry[] = [];
+        for (const [at, draft] of steps) list = appendActivity(list, [draft], T0 + at, next);
+        return list;
+    };
+
+    it("keeps one status row for an employee, not a history of each turn", () => {
+        const list = run([
+            [0, status("eng", "is working")],
+            [1000, status("eng", "answered")],
+            [2000, status("eng", "is working")],
+            [3000, status("eng", "answered")],
+        ]);
+        expect(texts(list)).toEqual(["eng answered"]);
+        expect(list[0].at).toBe(T0 + 3000);
+    });
+
+    it("folds each employee on its own", () => {
+        const list = run([
+            [0, status("eng", "is working")],
+            [10, status("pm", "is working")],
+            [20, status("eng", "answered")],
+        ]);
+        expect(texts(list)).toEqual(["pm is working", "eng answered"]);
+    });
+
+    it("never removes a question, a start, a task row or a message row", () => {
+        const list = run([
+            [0, other("question", "eng", { text: "eng asks a question" })],
+            [1, other("started", "eng", { text: "Ada started eng" })],
+            [2, other("task", "eng", { taskId: 1, text: "T-1 goes to eng" })],
+            [3, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: hi" })],
+            [4, status("eng", "is working")],
+            [5, status("eng", "answered")],
+        ]);
+        expect(texts(list)).toEqual(["eng asks a question", "Ada started eng", "T-1 goes to eng", "Maya \u2192 Eli: hi", "eng answered"]);
+    });
+
+    it("does not fold across a row of another kind for the same employee", () => {
+        const list = run([
+            [0, status("eng", "is working")],
+            [1, other("question", "eng", { text: "eng asks a question" })],
+            [2, status("eng", "is working")],
+        ]);
+        expect(texts(list)).toEqual(["eng is working", "eng asks a question", "eng is working"]);
+        // A message that is FROM the employee also lies between.
+        const sent = run([
+            [0, status("pm", "is working")],
+            [1, other("message", "eng", { fromSlug: "pm", text: "Maya \u2192 Eli: hi" })],
+            [2, status("pm", "answered")],
+        ]);
+        expect(texts(sent)).toEqual(["pm is working", "Maya \u2192 Eli: hi", "pm answered"]);
+    });
+
+    it("folds across a row that is about another employee", () => {
+        const list = run([
+            [0, status("eng", "is working")],
+            [1, other("question", "pm", { text: "pm asks a question" })],
+            [2, status("eng", "answered")],
+        ]);
+        expect(texts(list)).toEqual(["pm asks a question", "eng answered"]);
+    });
+
+    it("does not fold a status row that is 5 minutes old or older", () => {
+        const young = run([
+            [0, status("eng", "is working")],
+            [FOLD_MS - 1, status("eng", "answered")],
+        ]);
+        expect(texts(young)).toEqual(["eng answered"]);
+        const old = run([
+            [0, status("eng", "is working")],
+            [FOLD_MS, status("eng", "answered")],
+        ]);
+        expect(texts(old)).toEqual(["eng is working", "eng answered"]);
+    });
+
+    it("keeps the floors apart", () => {
+        const list = run([
+            [0, status("eng", "is working", "/a")],
+            [1, status("eng", "answered", "/b")],
+        ]);
+        expect(texts(list)).toEqual(["eng is working", "eng answered"]);
     });
 });

@@ -4,6 +4,8 @@
 import { tick } from "svelte";
 import {
     ACTIVITY_KEPT,
+    appendActivity,
+    messageDraft,
     sessionDrafts,
     startedDraft,
     taskDrafts,
@@ -11,7 +13,7 @@ import {
     type ActivityEntry,
 } from "./activity";
 import * as ipc from "./ipc";
-import { describeError, isPathError, noticePlan, tidyError, type ErrorAction } from "./messages";
+import { blockedTaskId, describeError, isPathError, noticePlan, tidyError, type ErrorAction } from "./messages";
 import { modalOpen } from "./modal";
 import { orderEmployees } from "./order";
 import { focusTerminal } from "./terminal";
@@ -42,6 +44,7 @@ import {
     type FloorDefaults,
     type FloorEntry,
     type FloorView,
+    type MessageDeliveredPayload,
     type ModelCatalog,
     type ModelKind,
     type NoticePayload,
@@ -65,6 +68,8 @@ export interface Toast {
     kind?: "info";
     /** A button that the toast offers, for an error that the operator can fix in the UI. */
     action?: { label: string; run: () => void };
+    /** The task that this toast is about (a blocked merge). It closes by itself while the detail of that task is open. */
+    task?: { path: string; id: number };
 }
 
 /** A session that waits for an answer, with the words that the attention bar shows. */
@@ -95,6 +100,10 @@ const LAST_FLOOR_KEY = "agent-tower:last-floor";
 const DEBUG_KEY = "agent-tower:debug";
 /** An information toast closes by itself after this time. An error toast stays until the operator closes it. */
 export const TOAST_INFO_MS = 6000;
+/** The toast of a blocked merge closes by itself after this time while the detail of its task is open (the detail shows the reason). */
+export const TOAST_TASK_MS = 8000;
+/** The "MSG" mark on the tab of the receiver of a message shows this long, when the tab is not in view. */
+export const MSG_MARK_MS = 10_000;
 /** The overlay shows this many toasts, the newest first. */
 export const TOASTS_VISIBLE = 4;
 /** The store keeps this many toasts. The oldest go first. */
@@ -287,6 +296,8 @@ class Store {
                     // The tasks of another floor load when the operator opens that floor.
                     if (payload.path === this.openPath) void this.loadTasks(payload.path);
                 }),
+                // A message that the app delivered: a row in "Team activity", and a short mark on the tab of the receiver.
+                await ipc.onMessageDelivered((payload) => this.onMessageDelivered(payload)),
                 // A merge that is blocked, or a start that the team resume could not do.
                 await ipc.onNotice((payload) => this.onNotice(payload)),
                 await ipc.onFloorChanged((payload) => {
@@ -321,7 +332,7 @@ class Store {
      * messages.ts), and a problem with a program path offers a button for Settings. The same text
      * twice shows once. `buttons` is a button that the toast offers (an information toast can have one).
      */
-    toast(text: string, kind?: "info", stay = false, buttons?: Toast["action"]): void {
+    toast(text: string, kind?: "info", stay = false, buttons?: Toast["action"], task?: Toast["task"]): number {
         const id = ++this.toastId;
         let shown = text;
         let action: Toast["action"] = buttons;
@@ -331,8 +342,31 @@ class Store {
             action = this.actionFor(described.action);
         }
         const same = this.toasts.filter((t) => !(t.text === shown && t.kind === kind));
-        this.toasts = [...same, { id, text: shown, kind, action }].slice(-TOASTS_KEPT);
+        this.toasts = [...same, { id, text: shown, kind, action, task }].slice(-TOASTS_KEPT);
         if (kind === "info" && !stay) setTimeout(() => this.dismissToast(id), TOAST_INFO_MS);
+        if (task) this.closeTaskToastLater(id);
+        return id;
+    }
+
+    /** Toasts that already have a timer for the detail of their task. */
+    private taskTimers = new Set<number>();
+
+    /**
+     * A toast about a task closes after `TOAST_TASK_MS` when the detail of that task is open then. The
+     * detail already shows the reason, so the toast would only stay in the way. The check runs when the
+     * timer ends, so a detail that the operator closes in the meantime keeps the toast.
+     */
+    private closeTaskToastLater(id: number): void {
+        const toast = this.toasts.find((t) => t.id === id);
+        if (!toast?.task || this.taskTimers.has(id)) return;
+        const { path, id: taskId } = toast.task;
+        if (this.openTaskByPath[path] !== taskId) return;
+        this.taskTimers.add(id);
+        setTimeout(() => {
+            this.taskTimers.delete(id);
+            const now = this.toasts.find((t) => t.id === id);
+            if (now?.task && this.openTaskByPath[path] === taskId) this.dismissToast(id);
+        }, TOAST_TASK_MS);
     }
 
     /**
@@ -347,8 +381,10 @@ class Store {
         const bannerSaysIt = payload.kind === "floor_gone" && payload.path === this.openPath;
         if (bannerSaysIt) {
             // No toast.
-        } else if (plan.tone === "error") this.toast(payload.text);
-        else this.toast(payload.text, "info", plan.stay);
+        } else if (plan.tone === "error") {
+            const taskId = payload.kind === "task_blocked" ? blockedTaskId(payload.text) : null;
+            this.toast(payload.text, undefined, false, undefined, taskId === null ? undefined : { path: payload.path, id: taskId });
+        } else this.toast(payload.text, "info", plan.stay);
         if (payload.kind === "floor_gone" || payload.kind === "floor_back") {
             void this.loadFloors();
             if (payload.path === this.openPath) void this.reloadFloor();
@@ -424,9 +460,43 @@ class Store {
     /** Add lines to the "Team activity" list. Each line gets an ID and the time of now. */
     private addActivity(drafts: ActivityDraft[]): void {
         if (drafts.length === 0) return;
-        const at = Date.now();
-        const lines = drafts.map((d): ActivityEntry => ({ ...d, id: ++this.activitySeq, at }));
-        this.activity = [...this.activity, ...lines].slice(-ACTIVITY_KEPT);
+        // A status row replaces the older status row of the same employee (see `appendActivity`).
+        this.activity = appendActivity(this.activity, drafts, Date.now(), () => ++this.activitySeq).slice(-ACTIVITY_KEPT);
+    }
+
+    /** The sessions whose tab shows the "MSG" mark now (a message was delivered while the tab was not in view). */
+    private msgMarks = $state.raw<Record<string, true>>({});
+    private msgTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+    /** A `message-delivered` event: add the row, and mark the tab of the receiver for `MSG_MARK_MS` when it is not in view. */
+    private onMessageDelivered(payload: MessageDeliveredPayload): void {
+        this.addActivity([messageDraft(payload)]);
+        const session = sessionOf(this.sessionState, payload.path, payload.toSlug);
+        if (!session || this.inView(session)) return;
+        const id = session.sessionId;
+        this.msgMarks = { ...this.msgMarks, [id]: true };
+        const old = this.msgTimers.get(id);
+        if (old) clearTimeout(old);
+        this.msgTimers.set(
+            id,
+            setTimeout(() => this.clearMsgMark(id), MSG_MARK_MS),
+        );
+    }
+
+    private clearMsgMark(id: string): void {
+        const timer = this.msgTimers.get(id);
+        if (timer) clearTimeout(timer);
+        this.msgTimers.delete(id);
+        if (!this.msgMarks[id]) return;
+        const next = { ...this.msgMarks };
+        delete next[id];
+        this.msgMarks = next;
+    }
+
+    /** True for `MSG_MARK_MS` after a message was delivered to this session, while its tab is not in view. */
+    hasMsgMark(sessionId: string): boolean {
+        const s = this.sessionState.byId[sessionId];
+        return !!this.msgMarks[sessionId] && !!s && !this.inView(s);
     }
 
     private employeeLoads = new Set<string>();
@@ -470,6 +540,8 @@ class Store {
     /** Clear the unread mark of the tab that is in view. */
     private markRead(): void {
         const id = this.activeId;
+        // The operator looks at the tab: the mark "a message arrived here" is read too.
+        if (id && this.msgMarks[id] && this.openPath && this.sessionState.byId[id]?.path === this.openPath) this.clearMsgMark(id);
         if (id && this.unread[id]) {
             const next = { ...this.unread };
             delete next[id];
@@ -767,6 +839,8 @@ class Store {
         this.taskDiff = null;
         this.reader = null;
         void this.loadTaskDetail(path, id);
+        // A toast of a blocked merge of this task is old news now: the detail shows the reason.
+        for (const t of this.toasts) if (t.task?.path === path && t.task.id === id) this.closeTaskToastLater(t.id);
     }
 
     closeTask(): void {

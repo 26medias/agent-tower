@@ -2,12 +2,14 @@
 // has. Pure logic: no Svelte, no Tauri.
 //   - a session changed its status (`session-changed`, `floor_open`),
 //   - an employee started another employee (`employee-started`),
-//   - a task changed (a `tasks-changed` reload compared with the tasks before it).
+//   - a task changed (a `tasks-changed` reload compared with the tasks before it),
+//   - a message between employees was delivered (`message-delivered`).
+// A status row of an employee replaces its own older status row (see `appendActivity`).
 import type { SessionState } from "./reducers";
 import { statusLabel, taskLabel } from "./tasks";
-import type { Status, TaskView, TrackedSession } from "./types";
+import type { MessageDeliveredPayload, Status, TaskView, TrackedSession } from "./types";
 
-export type ActivityKind = "session" | "question" | "started" | "task";
+export type ActivityKind = "session" | "question" | "started" | "task" | "message";
 
 export interface ActivityEntry {
     id: number;
@@ -21,6 +23,8 @@ export interface ActivityEntry {
     /** A click goes to the tab of this session (or the employee). */
     sessionId?: string;
     slug?: string;
+    /** A message line: the sender. `slug` is the receiver. */
+    fromSlug?: string;
     /** A session line: what happened ("asks a question"). The page puts the name of the employee before it. */
     words?: string;
     /** A click goes to this task. */
@@ -90,6 +94,14 @@ export function startedDraft(path: string, byName: string, name: string, session
 }
 
 /**
+ * The status as it reads after "is now": "in review", "in progress", "done", "blocked", "to do". The label of the
+ * board is "Review", and "T-2 is now review" reads wrong.
+ */
+export function statusPhrase(status: string): string {
+    return status === "review" ? "in review" : statusLabel(status).toLowerCase();
+}
+
+/**
  * The lines for the tasks that changed between two loads of a floor: a new task, a new assignee and
  * a new status. `before` is `undefined` for the first load of a floor: that load is not news.
  * `who` turns an employee slug (or "operator") into a name.
@@ -113,7 +125,73 @@ export function taskDrafts(
         if (was.assignee !== t.assignee) {
             out.push(line(t.assignee ? `${taskLabel(t.id)} goes to ${who(t.assignee)}` : `${taskLabel(t.id)} has no owner now`));
         }
-        if (was.status !== t.status) out.push(line(`${taskLabel(t.id)} is now ${statusLabel(t.status).toLowerCase()}`));
+        if (was.status !== t.status) out.push(line(`${taskLabel(t.id)} is now ${statusPhrase(t.status)}`));
+    }
+    return out;
+}
+
+/**
+ * The line for a message that the app delivered. The text is "Maya → Eli: <preview>". For a message about a
+ * task it is "Maya → Eli: task T-3 assigned" (an assignment) or "Maya → Eli: T-3 is now in review" (a status
+ * message). A click goes to the tab of the receiver.
+ */
+export function messageDraft(p: MessageDeliveredPayload): ActivityDraft {
+    // The preview has 80 characters at most. A text of that length is probably cut: the row ends with "…".
+    let what = p.preview.length >= PREVIEW_CHARS ? `${p.preview}\u2026` : p.preview;
+    if (p.kind === "task" && p.taskId !== null) {
+        if (p.taskStatus === null || p.taskStatus === undefined) what = `task ${taskLabel(p.taskId)} assigned`;
+        else if (p.taskStatus === "") what = `${taskLabel(p.taskId)} changed`;
+        else what = `${taskLabel(p.taskId)} is now ${statusPhrase(p.taskStatus)}`;
+    }
+    return {
+        path: p.path,
+        kind: "message",
+        text: `${p.fromName} → ${p.toName}: ${what}`,
+        slug: p.toSlug,
+        fromSlug: p.fromSlug,
+    };
+}
+
+/** The most characters of the preview of a delivered message (docs/ipc-final.md). */
+export const PREVIEW_CHARS = 80;
+
+/** A status row of an employee replaces its own older status row only when that row is younger than this. */
+export const FOLD_MS = 5 * 60 * 1000;
+
+/** The row concerns this employee: its status, its question, its start, or a message to it or from it. */
+function concerns(line: ActivityEntry, slug: string): boolean {
+    return line.slug === slug || line.fromSlug === slug;
+}
+
+/**
+ * Add lines at the end of the list (the newest). A status row (`session`) of an employee takes the place of
+ * the previous status row of the SAME employee, when no row of another kind that concerns this employee lies
+ * between them and the old row is less than `FOLD_MS` old. One employee then has one current status row, and
+ * not a history of each turn. Rows for questions, starts, tasks and messages are never removed by this rule.
+ * `nextId` gives the ID of a new line.
+ */
+export function appendActivity(
+    list: readonly ActivityEntry[],
+    drafts: readonly ActivityDraft[],
+    at: number,
+    nextId: () => number,
+): ActivityEntry[] {
+    let out = [...list];
+    for (const draft of drafts) {
+        if (draft.kind === "session" && draft.slug !== undefined) {
+            const slug = draft.slug;
+            let last = -1;
+            for (let i = out.length - 1; i >= 0; i--) {
+                if (out[i].path === draft.path && concerns(out[i], slug)) {
+                    last = i;
+                    break;
+                }
+            }
+            if (last >= 0 && out[last].kind === "session" && out[last].slug === slug && at - out[last].at < FOLD_MS) {
+                out.splice(last, 1);
+            }
+        }
+        out.push({ ...draft, id: nextId(), at });
     }
     return out;
 }

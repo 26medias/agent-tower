@@ -171,3 +171,34 @@ fn the_hook_program_is_found_next_to_the_workspace_build_when_not_given() {
         std::fs::canonicalize(hook).unwrap()
     );
 }
+
+#[test]
+fn programs_get_reports_the_optional_program_rtk_and_settings_get_the_home_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    // No `rtk` anywhere: the field is empty. The tests give `HOME=/tmp` to the Tower.
+    let rig = Rig::new();
+    assert_eq!(rig.tower.programs_get().rtk, None);
+    assert_eq!(
+        rig.tower.settings_get().home_dir.as_deref(),
+        Some(Path::new("/tmp"))
+    );
+
+    // An executable `rtk` in a known folder is found, like `claude`. `programs_set` still refuses the name.
+    let tools = tempfile::tempdir().unwrap();
+    let rtk = tools.path().join("rtk");
+    std::fs::write(&rtk, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&rtk, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = tools.path().to_path_buf();
+    let with = Rig::with(move |cfg| {
+        cfg.resolver = tower_core::programs::Resolver {
+            shell: None,
+            known_dirs: vec![dir],
+            shell_timeout: std::time::Duration::from_secs(1),
+        };
+    });
+    assert_eq!(
+        with.tower.programs_get().rtk.as_deref(),
+        Some(rtk.as_path())
+    );
+    assert!(with.tower.programs_set("rtk", "/bin/true").is_err());
+}
