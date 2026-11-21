@@ -3,13 +3,14 @@
 //   - a session changed its status (`session-changed`, `floor_open`),
 //   - an employee started another employee (`employee-started`),
 //   - a task changed (a `tasks-changed` reload compared with the tasks before it),
-//   - a message between employees was delivered (`message-delivered`).
+//   - a message between employees was delivered (`message-delivered`),
+//   - the app stopped an exchange between two employees (the `notice` of the kind `exchange_stopped`).
 // An employee has one current status row: see the rule at `appendActivity`.
 import type { SessionState } from "./reducers";
 import { statusLabel, taskLabel } from "./tasks";
 import type { MessageDeliveredPayload, Status, TaskView, TrackedSession } from "./types";
 
-export type ActivityKind = "session" | "question" | "started" | "task" | "message";
+export type ActivityKind = "session" | "question" | "started" | "task" | "message" | "exchange";
 
 export interface ActivityEntry {
     id: number;
@@ -150,6 +151,14 @@ export function messageDraft(p: MessageDeliveredPayload): ActivityDraft {
         slug: p.toSlug,
         fromSlug: p.fromSlug,
     };
+}
+
+/**
+ * The line for the notice `exchange_stopped`: the text of the notice. A click goes to the tab of the employee that
+ * the app refused (`slug`).
+ */
+export function exchangeDraft(path: string, text: string, slug: string | undefined): ActivityDraft {
+    return { path, kind: "exchange", text, slug };
 }
 
 /** The most characters of the preview of a delivered message (docs/ipc-final.md). */

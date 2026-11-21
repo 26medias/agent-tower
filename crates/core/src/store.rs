@@ -714,6 +714,20 @@ impl Database {
         )?)
     }
 
+    /// How many plain messages (kind `message`) the two employees `a` and `b` sent to each other,
+    /// in both directions together, after `since` (the exchange limit). A message at `since` does
+    /// not count, so a window of zero length counts nothing. The messages that the app sends for a
+    /// task, and the messages of the operator, do not count.
+    pub fn count_exchange_since(&self, a: &str, b: &str, since: i64) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE kind = 'message' AND created_at > ?3
+               AND ((from_slug = ?1 AND to_slug = ?2) OR (from_slug = ?2 AND to_slug = ?1))",
+            params![a, b, since],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The messages of a floor, oldest first (for tests and later views).
     pub fn all_messages(&self) -> Result<Vec<MessageRecord>, StoreError> {
         let mut statement = self.conn.prepare(&format!(
@@ -1967,6 +1981,34 @@ mod tests {
             assert!(matches!(error, StoreError::UnknownSession(_)), "{error}");
         }
         assert!(db.status_events("nope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_exchange_count_is_for_both_directions_and_plain_messages_only() {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("floor.db")).unwrap();
+        db.insert_message("pm", "eng", "a", 100, None).unwrap();
+        db.insert_message("eng", "pm", "b", 110, None).unwrap();
+        db.insert_message("pm", "eng", "c", 120, None).unwrap();
+        // Another pair, and the operator, do not count.
+        db.insert_message("pm", "qa", "d", 130, None).unwrap();
+        db.insert_message("operator", "eng", "e", 140, None)
+            .unwrap();
+        db.insert_message("eng", "operator", "f", 150, None)
+            .unwrap();
+        assert_eq!(db.count_exchange_since("pm", "eng", 0).unwrap(), 3);
+        assert_eq!(db.count_exchange_since("eng", "pm", 0).unwrap(), 3);
+        // A message at `since` is out: the window is open at its start.
+        assert_eq!(db.count_exchange_since("pm", "eng", 110).unwrap(), 1);
+        assert_eq!(db.count_exchange_since("pm", "eng", 120).unwrap(), 0);
+        // The messages that the app writes for a task do not count.
+        db.conn
+            .execute(
+                "INSERT INTO messages (from_slug, to_slug, text, created_at, kind) VALUES ('pm', 'eng', 'x', 300, 'task_status')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(db.count_exchange_since("pm", "eng", 0).unwrap(), 3);
     }
 
     #[test]

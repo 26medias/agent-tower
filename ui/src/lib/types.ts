@@ -205,6 +205,7 @@ export type NoticeKind =
     | "sandbox_down"
     | "sandbox_auto_off"
     | "task_done_unmerged"
+    | "exchange_stopped"
     | "floor_gone"
     | "floor_back";
 
@@ -213,6 +214,8 @@ export interface NoticePayload {
     path: string;
     kind: NoticeKind | string;
     text: string;
+    /** The employee that the notice is about. Only `exchange_stopped` has it: the employee that the app refused. */
+    slug?: string;
 }
 
 /**

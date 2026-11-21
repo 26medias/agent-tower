@@ -55,6 +55,17 @@ impl<R: Runtime> Observer for TauriObserver<R> {
             path: path.to_string_lossy().into_owned(),
             kind: kind.to_owned(),
             text: text.to_owned(),
+            slug: None,
+        };
+        let _ = self.app.emit("notice", payload);
+    }
+
+    fn notice_for(&self, path: &Path, kind: &str, text: &str, slug: &str) {
+        let payload = views::Notice {
+            path: path.to_string_lossy().into_owned(),
+            kind: kind.to_owned(),
+            text: text.to_owned(),
+            slug: Some(slug.to_owned()),
         };
         let _ = self.app.emit("notice", payload);
     }

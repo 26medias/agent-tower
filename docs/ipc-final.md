@@ -82,6 +82,26 @@ change, not for each check.
 
 The app sends `floor-changed` first and then the notice.
 
+### The notice `exchange_stopped` (2026-11-21)
+
+The app refused a plain message (`send`, or `employee_start` with a message) because two employees
+sent each other 8 messages in 5 minutes, in both directions together (`docs/spec.md` 4.5,
+"Answers and exchanges"). The `notice` payload has one new optional field: `slug`, the slug of the
+employee that the app refused. Only this kind has it. The payload of every other notice is the same
+as before.
+
+```ts
+interface NoticePayload { path: string; kind: string; text: string; slug?: string }
+```
+
+| Kind | When | Text | UI |
+|---|---|---|---|
+| `exchange_stopped` | The FIRST refusal of a window for a pair of employees. ONE for each pair (the order of the two does not matter) and window, not one for each refused call. A later refusal in the same window sends none. After the window, a new refusal sends a new notice. | `The app stopped an exchange between <Name of the refused employee> and <Name of the other employee>: 8 messages in 5 minutes.` | Error toast that stays until the operator closes it, with the button "Open" for the tab of `slug`. One row in "Team activity" (kind `exchange`) with the same text. A click on the row goes to the same tab. |
+
+The messages of the operator and the task messages (`task_assign`, `task_status`) do not count and
+are never refused. The window is 5 minutes (`EXCHANGE_WINDOW`) and the limit is 8
+(`EXCHANGE_LIMIT`), both in `crates/core/src/app/bus.rs`.
+
 ## Rules for commands with no question (changed 2026-11-21)
 
 The rules moved from `[permissions]` of `floor.toml` to the app config (see `docs/ipc-m3.md`,

@@ -4,6 +4,7 @@ import {
     FOLD_MS,
     activityTime,
     appendActivity,
+    exchangeDraft,
     lineText,
     messageDraft,
     sessionDrafts,
@@ -194,6 +195,23 @@ describe("a delivered message", () => {
         expect(messageDraft(delivered({ kind: "task", taskId: 3, taskStatus: "review" })).text).toBe("Maya \u2192 Eli: T-3 is now in review");
         expect(messageDraft(delivered({ kind: "task", taskId: 3, taskStatus: "in_progress" })).text).toBe("Maya \u2192 Eli: T-3 is now in progress");
         expect(messageDraft(delivered({ kind: "task", taskId: 3, taskStatus: "" })).text).toBe("Maya \u2192 Eli: T-3 changed");
+    });
+});
+
+describe("a stopped exchange", () => {
+    it("is one row with the text of the notice that points at the refused employee", () => {
+        const text = "The app stopped an exchange between Maya and Eli: 8 messages in 5 minutes.";
+        expect(exchangeDraft("/f", text, "pm")).toEqual({ path: "/f", kind: "exchange", text, slug: "pm" });
+    });
+
+    it("is never folded away, and it keeps its text", () => {
+        const text = "The app stopped an exchange between Maya and Eli: 8 messages in 5 minutes.";
+        let id = 0;
+        let list = appendActivity([], [{ path: "/f", kind: "session", text: "Maya is working", slug: "pm", words: "is working" }], 1000, () => ++id);
+        list = appendActivity(list, [exchangeDraft("/f", text, "pm")], 2000, () => ++id);
+        list = appendActivity(list, [{ path: "/f", kind: "session", text: "Maya answered", slug: "pm", words: "answered" }], 3000, () => ++id);
+        expect(list.map((l) => l.kind)).toEqual(["exchange", "session"]);
+        expect(lineText(list[0], () => "X")).toBe(text);
     });
 });
 

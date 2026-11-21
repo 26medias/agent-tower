@@ -82,7 +82,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-pub use bus::{START_LIMIT, START_WINDOW, STOP_HOOK_HEADER, TestHooks};
+pub use bus::{
+    EXCHANGE_LIMIT, EXCHANGE_NOTE_AT, EXCHANGE_WINDOW, START_LIMIT, START_WINDOW, STOP_HOOK_HEADER,
+    TestHooks,
+};
 pub use live::{SCROLLBACK_LIMIT, STOP_BLOCK_LIMIT};
 pub use mcp::{FIRST_BYTE_TIMEOUT, MAX_CONNECTIONS, McpLimits, REQUEST_DEADLINE};
 pub use merge::{MergeReport, TaskDiffView};
@@ -344,6 +347,12 @@ pub trait Observer: Send + Sync {
     /// merge that was blocked, or a session that the resume of the team could not start. `kind`
     /// is `task_blocked`, `resume_failed` or `sandbox_down`. `text` is the message. The default does nothing.
     fn notice(&self, _path: &Path, _kind: &str, _text: &str) {}
+    /// A notice that is about one employee (`slug`), so the UI can go to its tab. The kind is
+    /// `exchange_stopped`. The default calls `notice`, so an observer that does not know `slug`
+    /// still gets the notice.
+    fn notice_for(&self, path: &Path, kind: &str, text: &str, _slug: &str) {
+        self.notice(path, kind, text);
+    }
     /// A session changed to `question`. The shell decides if the operator needs a desktop
     /// notification (`notify::should_notify`). It comes after the `session_changed` of the same
     /// change. The default does nothing.
@@ -424,6 +433,10 @@ pub struct TowerConfig {
     /// How long a `works` result of the sandbox probe counts, and the time between two
     /// `sandbox_down` notices. `TowerConfig::new` gives 60 seconds. Tests give a short time.
     pub sandbox_window: Duration,
+    /// The window of `EXCHANGE_LIMIT` (the plain messages between two employees), and the time
+    /// between two `exchange_stopped` notices of one pair. `TowerConfig::new` gives
+    /// `EXCHANGE_WINDOW` (5 minutes). Tests give a short time. `Duration::ZERO` turns the limit off.
+    pub exchange_window: Duration,
     /// The pause between two checks of the open floors for a folder that is gone or back. `None`
     /// turns the watcher off. `TowerConfig::new` gives 3 seconds. Tests give a short pause, or
     /// `None`.
@@ -449,6 +462,7 @@ impl TowerConfig {
             test_hooks: Arc::new(TestHooks::default()),
             resume_pause: resume::RESUME_PAUSE,
             sandbox_window: SANDBOX_WINDOW,
+            exchange_window: EXCHANGE_WINDOW,
             floor_watch: Some(FLOOR_WATCH_PAUSE),
         }
     }
@@ -593,6 +607,7 @@ pub struct TowerCore {
     closed: Arc<AtomicBool>,
     resume_pause: Duration,
     sandbox_window: Duration,
+    exchange_window: Duration,
     sandbox_gate: Mutex<SandboxGate>,
     /// The home folder, for `~` in a typed path. From `HOME` of the parent environment.
     home: Option<PathBuf>,
@@ -695,6 +710,7 @@ impl Tower {
             closed: Arc::new(AtomicBool::new(false)),
             resume_pause: config.resume_pause,
             sandbox_window: config.sandbox_window,
+            exchange_window: config.exchange_window,
             sandbox_gate: Mutex::new(SandboxGate::default()),
             home,
             watcher: Mutex::new(None),

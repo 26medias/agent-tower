@@ -108,6 +108,10 @@ describe("noticePlan", () => {
         }
     });
 
+    it("shows exchange_stopped as an error toast that stays", () => {
+        expect(noticePlan("exchange_stopped")).toEqual({ tone: "error", stay: true });
+    });
+
     it("shows floor_back as an information toast that closes by itself", () => {
         expect(noticePlan("floor_back")).toEqual({ tone: "info", stay: false });
     });

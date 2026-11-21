@@ -569,13 +569,18 @@ pub struct FloorChanged {
 }
 
 /// Payload of the event `notice` (`docs/ipc-m3.md`): something that the operator must see.
-/// `kind` is `task_blocked`, `resume_failed` or `sandbox_down` (and the kinds of `docs/ipc-final.md`).
+/// `kind` is `task_blocked`, `resume_failed` or `sandbox_down` (and the kinds of `docs/ipc-final.md`,
+/// for example `exchange_stopped`, which has `slug`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Notice {
     pub path: String,
     pub kind: String,
     pub text: String,
+    /// The slug of the employee that the notice is about (kind `exchange_stopped`: the employee
+    /// that was refused). The field is not in the payload of a notice that has no employee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 
 /// Payload of the event `tasks-changed`.
@@ -1003,9 +1008,20 @@ mod tests {
             to_json(&Notice {
                 path: "/p".into(),
                 kind: "task_blocked".into(),
-                text: "T-1 is blocked".into()
+                text: "T-1 is blocked".into(),
+                slug: None
             }),
             json!({"path": "/p", "kind": "task_blocked", "text": "T-1 is blocked"})
+        );
+        assert_eq!(
+            to_json(&Notice {
+                path: "/p".into(),
+                kind: "exchange_stopped".into(),
+                text: "The app stopped an exchange between Maya and Eli: 8 messages in 5 minutes."
+                    .into(),
+                slug: Some("pm".into())
+            }),
+            json!({"path": "/p", "kind": "exchange_stopped", "text": "The app stopped an exchange between Maya and Eli: 8 messages in 5 minutes.", "slug": "pm"})
         );
         assert_eq!(
             to_json(&TaskDiff {

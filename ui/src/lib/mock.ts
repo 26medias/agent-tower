@@ -162,8 +162,11 @@ export interface MockControl {
      * "Automatic" and the probe said `works` at that start, false for "Never" and for "Automatic" with a failing probe.
      */
     readonly codexStarts: { path: string; slug: string; sandbox: boolean }[];
-    /** Send the `notice` event. `kind` is `task_blocked` (a blocked merge, an error toast) when it is left out. */
-    notice(path: string, text: string, kind?: string): void;
+    /**
+     * Send the `notice` event. `kind` is `task_blocked` (a blocked merge, an error toast) when it is left out. `slug` is
+     * the employee that the notice is about: the real app sends it for `exchange_stopped` (the employee that was refused).
+     */
+    notice(path: string, text: string, kind?: string, slug?: string): void;
     /**
      * The folder of the floor is gone, as the app finds it: `gone` is true, then `floor-changed`,
      * then the notice `floor_gone` (the text of docs/ipc-final.md). Commands on the floor give `FLOOR_GONE:`.
@@ -1549,8 +1552,8 @@ export function createMockBackend(): Backend {
                 preview,
             });
         },
-        notice(path, text, kind = "task_blocked") {
-            emit("notice", { path, kind, text });
+        notice(path, text, kind = "task_blocked", slug) {
+            emit("notice", slug === undefined ? { path, kind, text } : { path, kind, text, slug });
         },
         goneFloor(path) {
             const floor = floorOf(path);

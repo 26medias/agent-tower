@@ -37,6 +37,9 @@ export function noticePlan(kind: string): NoticePlan {
         case "resume_failed":
         case "floor_gone":
         case "sandbox_down":
+        case "exchange_stopped":
+            // `exchange_stopped`: the app refused a message of an employee (8 messages between two employees in
+            // 5 minutes). The toast has the button "Open" for the tab of that employee (the store adds it).
             return { tone: "error", stay: true };
         case "sandbox_auto_off":
             // An information toast that stays: with "Automatic" the app started Codex with full access, and the

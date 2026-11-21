@@ -5,6 +5,7 @@ import { tick } from "svelte";
 import {
     ACTIVITY_KEPT,
     appendActivity,
+    exchangeDraft,
     messageDraft,
     sessionDrafts,
     startedDraft,
@@ -350,7 +351,8 @@ class Store {
         if (kind !== "info") {
             const described = describeError(text);
             shown = described.text;
-            action = this.actionFor(described.action);
+            // A button that the caller gives is used when the error has no button of its own.
+            action = this.actionFor(described.action) ?? buttons;
         }
         const same = this.toasts.filter((t) => !(t.text === shown && t.kind === kind));
         for (const t of this.toasts) if (!same.includes(t)) this.stopInfoTimer(t.id);
@@ -436,12 +438,17 @@ class Store {
             // No toast.
         } else if (plan.tone === "error") {
             const taskId = payload.kind === "task_blocked" ? blockedTaskId(payload.text) : null;
-            this.toast(payload.text, undefined, false, undefined, taskId === null ? undefined : { path: payload.path, id: taskId });
+            // The notice of a stopped exchange has the button "Open": the tab of the employee that the app refused.
+            const slug = payload.kind === "exchange_stopped" ? payload.slug : undefined;
+            const button = slug === undefined ? undefined : { label: "Open", run: () => void this.openEmployeeTab(payload.path, slug) };
+            this.toast(payload.text, undefined, false, button, taskId === null ? undefined : { path: payload.path, id: taskId });
         } else {
             // The notice of "Automatic" with a sandbox that does not work has a button for the section in Settings.
             const button = payload.kind === "sandbox_auto_off" ? this.actionFor("settings-sandbox") : undefined;
             this.toast(payload.text, "info", plan.stay, button);
         }
+        // The Team activity list gets one row for it. A click on the row goes to the same tab.
+        if (payload.kind === "exchange_stopped") this.addActivity([exchangeDraft(payload.path, payload.text, payload.slug)]);
         if (payload.kind === "floor_gone" || payload.kind === "floor_back") {
             void this.loadFloors();
             if (payload.path === this.openPath) void this.reloadFloor();
@@ -1184,6 +1191,12 @@ class Store {
         this.selectedByPath = { ...this.selectedByPath, [path]: slug };
         const session = this.sessionOfEmployee(slug);
         if (session && isLive(session)) this.selectTab(session.sessionId);
+    }
+
+    /** Go to the tab of an employee, also on another floor (the button "Open" of the notice `exchange_stopped`). */
+    async openEmployeeTab(path: string, slug: string): Promise<void> {
+        if (path !== this.openPath && !(await this.openFloor(path))) return;
+        this.selectEmployee(slug);
     }
 
     sessionOfEmployee(slug: string): TrackedSession | undefined {

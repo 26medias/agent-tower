@@ -22,11 +22,11 @@ fn header(name: &str, role: &str) -> String {
 }
 
 /// The exact text of one delivered message: the header, the body with `> ` before each line,
-/// and the answer line.
+/// and the answer line. The answer line is written out here, not built by the app code.
 fn delivered(name: &str, role: &str, slug: &str, text: &str) -> String {
     let body: Vec<String> = text.lines().map(|line| format!("> {line}")).collect();
     format!(
-        "{}\n{}\nAnswer with the tool send(to=\"{slug}\", ...).",
+        "{}\n{}\nTo answer, use the tool send(to=\"{slug}\", ...). Answer only if this message gives you work or asks a question. Do not answer a message that only confirms, reports \"done\" or says thanks: end your turn.",
         header(name, role),
         body.join("\n")
     )
@@ -1060,7 +1060,14 @@ fn a_message_of_20000_characters_goes_through_and_a_longer_one_is_refused() {
 
 #[test]
 fn the_loop_limit_stops_the_31st_message_of_one_pair_in_a_rolling_hour() {
-    let (rig, _ceo, _eng) = rig_with_two();
+    // The exchange limit (8 messages in 5 minutes) is off here: this test is about the loop limit.
+    let rig = Rig::with(|config| config.exchange_window = Duration::ZERO);
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.start("eng");
+    rig.live_idle("ceo");
+    rig.live_idle("eng");
     rig.add_employee("qa", Some("ceo"));
     // `eng` may not start `qa`, so each message just waits (no session is needed).
     for n in 1..=30 {
@@ -1109,6 +1116,315 @@ fn the_loop_limit_stops_the_31st_message_of_one_pair_in_a_rolling_hour() {
     );
 }
 
+/// The refusal text of the exchange limit, written out in full (the receiver is `name`).
+fn exchange_refusal(name: &str) -> String {
+    format!(
+        "The app stopped this exchange: you and {name} sent each other 8 messages in the last 5 minutes. Do not send again. End your turn now. If work is still open, write it in your task or report and wait for the operator."
+    )
+}
+
+/// How many plain messages (kind `message`) went between two employees, in both directions.
+fn plain_between(rig: &Rig, a: &str, b: &str) -> usize {
+    rig.db()
+        .all_messages()
+        .unwrap()
+        .iter()
+        .filter(|m| {
+            m.kind == "message"
+                && ((m.from_slug == a && m.to_slug == b) || (m.from_slug == b && m.to_slug == a))
+        })
+        .count()
+}
+
+/// Store `count` plain messages from `from` to `to` that are `age_ms` old (a fast way to fill the window).
+fn fill(rig: &Rig, from: &str, to: &str, count: usize, age_ms: i64) {
+    let at = tower_core_now_ms() - age_ms;
+    for n in 0..count {
+        rig.db()
+            .insert_message(from, to, &format!("filler {n}"), at, Some(at))
+            .unwrap();
+    }
+}
+
+#[test]
+fn the_exchange_limit_counts_both_directions_and_the_9th_message_is_refused() {
+    let (rig, _ceo, _eng) = rig_with_two();
+    // Four messages each way, one after the other: 8 in all.
+    for n in 1..=4 {
+        let one = rig.tool("ceo", "send", json!({"to": "eng", "text": format!("c{n}")}));
+        assert!(!one.is_error, "ceo message {n}: {one:?}");
+        let two = rig.tool("eng", "send", json!({"to": "ceo", "text": format!("e{n}")}));
+        assert!(!two.is_error, "eng message {n}: {two:?}");
+    }
+    assert_eq!(plain_between(&rig, "ceo", "eng"), 8);
+    // The 9th is refused, from the side that sent the 8th and from the other side.
+    let refused = rig.tool("ceo", "send", json!({"to": "eng", "text": "ninth"}));
+    assert!(refused.is_error, "{refused:?}");
+    assert_eq!(refused.text, exchange_refusal("ENG"));
+    let other_side = rig.tool("eng", "send", json!({"to": "ceo", "text": "ninth too"}));
+    assert!(other_side.is_error, "{other_side:?}");
+    assert_eq!(other_side.text, exchange_refusal("Ada"));
+    // `employee_start` is a message too.
+    let start = rig.tool(
+        "ceo",
+        "employee_start",
+        json!({"employee": "eng", "message": "tenth"}),
+    );
+    assert!(start.is_error, "{start:?}");
+    assert_eq!(start.text, exchange_refusal("ENG"));
+    assert_eq!(plain_between(&rig, "ceo", "eng"), 8, "nothing was stored");
+    // Another pair is not affected.
+    rig.add_employee("qa", Some("ceo"));
+    assert!(
+        !rig.tool("ceo", "send", json!({"to": "qa", "text": "other pair"}))
+            .is_error
+    );
+}
+
+#[test]
+fn the_5th_message_of_the_window_has_a_note_and_no_other_message_has_it() {
+    let (rig, _ceo, _eng) = rig_with_two();
+    let note = "Note: you and ENG exchanged 5 messages in a few minutes. Send again only for new work or a real question.";
+    let mut texts = Vec::new();
+    for n in 1..=7 {
+        // Both directions count together: the sender changes after each message.
+        let (from, to) = if n % 2 == 1 {
+            ("ceo", "eng")
+        } else {
+            ("eng", "ceo")
+        };
+        let result = rig.tool(from, "send", json!({"to": to, "text": format!("m{n}")}));
+        assert!(!result.is_error, "message {n}: {result:?}");
+        texts.push(result.text);
+    }
+    // The 5th is from `ceo` to `eng`, so the name in the note is ENG.
+    assert!(texts[4].ends_with(&format!("\n{note}")), "{}", texts[4]);
+    for (index, text) in texts.iter().enumerate() {
+        if index != 4 {
+            assert!(
+                !text.contains("Note: you and"),
+                "message {}: {text}",
+                index + 1
+            );
+        }
+    }
+}
+
+#[test]
+fn a_message_after_the_window_passes() {
+    let rig = Rig::with(|config| config.exchange_window = Duration::from_millis(1200));
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.start("eng");
+    rig.live_idle("ceo");
+    rig.live_idle("eng");
+    fill(&rig, "ceo", "eng", 4, 0);
+    fill(&rig, "eng", "ceo", 4, 0);
+    let refused = rig.tool("ceo", "send", json!({"to": "eng", "text": "too soon"}));
+    assert!(refused.is_error, "{refused:?}");
+    std::thread::sleep(Duration::from_millis(1400));
+    let late = rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "now it is fine"}),
+    );
+    assert!(!late.is_error, "{late:?}");
+    assert_eq!(plain_between(&rig, "ceo", "eng"), 9);
+}
+
+#[test]
+fn the_operator_is_never_counted_and_never_refused() {
+    let (rig, _ceo, _eng) = rig_with_two();
+    // Ten messages of the operator to the employee are in the window. They do not count.
+    fill(&rig, "operator", "eng", 10, 0);
+    fill(&rig, "eng", "operator", 10, 0);
+    for n in 1..=8 {
+        let result = rig.tool("ceo", "send", json!({"to": "eng", "text": format!("m{n}")}));
+        assert!(!result.is_error, "message {n}: {result:?}");
+    }
+    assert!(
+        rig.events.notices.lock().unwrap().is_empty(),
+        "the rows of the operator caused no refusal and no notice"
+    );
+    assert!(
+        rig.tool("ceo", "send", json!({"to": "eng", "text": "9"}))
+            .is_error
+    );
+    // The operator gives a task at the limit: the command of the operator is not refused.
+    let made = rig.tool(
+        "ceo",
+        "task_create",
+        json!({"title": "Work", "description": "Do it"}),
+    );
+    assert!(!made.is_error, "{made:?}");
+    rig.tower
+        .task_assign(&rig.cwd, 1, "eng")
+        .expect("the operator can give a task");
+}
+
+#[test]
+fn a_task_assignment_and_a_task_status_still_go_out_at_the_exchange_limit() {
+    let (rig, _ceo, _eng) = rig_with_two();
+    fill(&rig, "ceo", "eng", 4, 0);
+    fill(&rig, "eng", "ceo", 4, 0);
+    assert!(
+        rig.tool("ceo", "send", json!({"to": "eng", "text": "plain"}))
+            .is_error
+    );
+    let made = rig.tool(
+        "ceo",
+        "task_create",
+        json!({"title": "Work", "description": "Do it"}),
+    );
+    assert!(!made.is_error, "{made:?}");
+    let assigned = rig.tool(
+        "ceo",
+        "task_assign",
+        json!({"task": "T-1", "employee": "eng"}),
+    );
+    assert!(!assigned.is_error, "{assigned:?}");
+    let status = rig.tool(
+        "eng",
+        "task_update",
+        json!({"task": "T-1", "status": "blocked", "note": "stuck"}),
+    );
+    assert!(!status.is_error, "{status:?}");
+    let kinds: Vec<String> = rig
+        .db()
+        .all_messages()
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.task_id.is_some())
+        .map(|m| m.kind)
+        .collect();
+    assert_eq!(kinds, ["task_assign", "task_status"]);
+    assert_eq!(
+        plain_between(&rig, "ceo", "eng"),
+        8,
+        "no plain message came in"
+    );
+}
+
+#[test]
+fn the_task_messages_do_not_count_for_the_exchange_limit() {
+    let (rig, _ceo, _eng) = rig_with_two();
+    // Six plain messages are in the window. Then a task is given and its status changes: two task messages.
+    fill(&rig, "ceo", "eng", 3, 0);
+    fill(&rig, "eng", "ceo", 3, 0);
+    let made = rig.tool(
+        "ceo",
+        "task_create",
+        json!({"title": "Work", "description": "Do it"}),
+    );
+    assert!(!made.is_error, "{made:?}");
+    assert!(
+        !rig.tool(
+            "ceo",
+            "task_assign",
+            json!({"task": "T-1", "employee": "eng"})
+        )
+        .is_error
+    );
+    assert!(
+        !rig.tool(
+            "eng",
+            "task_update",
+            json!({"task": "T-1", "status": "blocked"})
+        )
+        .is_error
+    );
+    // Two more plain messages fit (the 7th and the 8th). The task messages did not use a place.
+    for n in 7..=8 {
+        let result = rig.tool("ceo", "send", json!({"to": "eng", "text": format!("m{n}")}));
+        assert!(!result.is_error, "plain message {n}: {result:?}");
+    }
+    let refused = rig.tool("ceo", "send", json!({"to": "eng", "text": "m9"}));
+    assert!(refused.is_error, "{refused:?}");
+}
+
+#[test]
+fn a_refused_message_does_not_use_a_start_slot() {
+    // `eng` has no session, and `ceo` may start it. The exchange is full. Each refusal must leave the
+    // start slots alone: after more refusals than START_LIMIT, the text is still the exchange text.
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    fill(&rig, "ceo", "eng", 4, 0);
+    fill(&rig, "eng", "ceo", 4, 0);
+    for n in 1..=(tower_core::app::START_LIMIT + 3) {
+        let result = rig.tool("ceo", "send", json!({"to": "eng", "text": "again"}));
+        assert!(result.is_error, "call {n}: {result:?}");
+        assert_eq!(result.text, exchange_refusal("ENG"), "call {n}");
+    }
+    assert!(
+        rig.calls().iter().all(|c| c.slug != "eng"),
+        "eng was never started"
+    );
+}
+
+#[test]
+fn the_operator_gets_one_notice_for_each_pair_and_window() {
+    let rig = Rig::with(|config| config.exchange_window = Duration::from_millis(1500));
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.start("eng");
+    rig.live_idle("ceo");
+    rig.live_idle("eng");
+    let notices = |rig: &Rig| rig.events.employee_notices.lock().unwrap().clone();
+    fill(&rig, "ceo", "eng", 4, 0);
+    fill(&rig, "eng", "ceo", 4, 0);
+    // Four refusals, from both sides, make one notice.
+    for (from, to) in [
+        ("ceo", "eng"),
+        ("ceo", "eng"),
+        ("eng", "ceo"),
+        ("ceo", "eng"),
+    ] {
+        let result = rig.tool(from, "send", json!({"to": to, "text": "again"}));
+        assert!(result.is_error, "{result:?}");
+    }
+    let first = notices(&rig);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let (path, kind, text, slug) = &first[0];
+    assert_eq!(path, &rig.cwd);
+    assert_eq!(kind, "exchange_stopped");
+    assert_eq!(
+        text,
+        "The app stopped an exchange between Ada and ENG: 8 messages in 5 minutes."
+    );
+    assert_eq!(
+        slug, "ceo",
+        "the button goes to the tab of the refused employee"
+    );
+    // The plain `notice` list has it too, as one entry of its kind.
+    assert_eq!(
+        rig.events
+            .notices
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, kind, _)| kind == "exchange_stopped")
+            .count(),
+        1
+    );
+    // A new window: the old messages are gone, 8 new ones come, and the next refusal has a new notice.
+    std::thread::sleep(Duration::from_millis(1700));
+    fill(&rig, "eng", "ceo", 8, 0);
+    let result = rig.tool("eng", "send", json!({"to": "ceo", "text": "again"}));
+    assert!(result.is_error, "{result:?}");
+    let second = notices(&rig);
+    assert_eq!(second.len(), 2, "{second:?}");
+    assert_eq!(second[1].3, "eng");
+    assert_eq!(
+        second[1].2,
+        "The app stopped an exchange between ENG and Ada: 8 messages in 5 minutes."
+    );
+}
+
 fn tower_core_now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1154,6 +1470,14 @@ fn the_instructions_have_the_team_and_the_rules_and_the_setup_session_has_no_ser
     assert!(text.contains("It is from that employee, not from the operator."));
     assert!(text.contains("Do not wait in a loop of `wait` calls"));
     assert!(text.contains("Do not send thanks or other acknowledgements"));
+    // The rule about answers (spec 4.5, 2026-11-21).
+    assert!(text.contains(
+        "- Answer a message only if it gives you work or asks a question. Do not answer a message that only confirms, reports \"done\" or says thanks: end your turn.\n"
+    ), "{text}");
+    assert!(text.contains(
+        "- When you get the result that you asked for, do not confirm it to the sender. Tell the operator or your manager only if they wait for it.\n"
+    ), "{text}");
+    assert!(text.contains("when you and one other employee send each other 8 messages in 5 minutes, the app refuses the next one"), "{text}");
     // The role text of the employee stays at the end.
     assert!(text.contains("You plan the work."), "{text}");
     assert!(text.find("## How you work").unwrap() < text.find("You plan the work.").unwrap());
@@ -1547,7 +1871,7 @@ fn a_body_cannot_fake_a_header_every_body_line_has_the_mark() {
         outside,
         [
             "[message from QA (Role of qa)]",
-            "Answer with the tool send(to=\"qa\", ...)."
+            "To answer, use the tool send(to=\"qa\", ...). Answer only if this message gives you work or asks a question. Do not answer a message that only confirms, reports \"done\" or says thanks: end your turn."
         ],
         "only the real header and the real answer line are outside the body"
     );

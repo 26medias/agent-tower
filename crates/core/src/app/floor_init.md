@@ -122,11 +122,17 @@ complete and that they can stop this session.
       `manager` chain. The `ceo` and the `pm` may start every employee of the floor. Nobody may
       start itself or the setup session. Any other start is refused with a clear error.
     - A message reaches the receiver with the header `[message from <Name> (<Role>)]`. Each line
-      of the message body starts with `> `. The receiver answers with `send`.
+      of the message body starts with `> `. The last line of the message says how to answer with
+      `send`, and says that the receiver answers only a message that gives work or asks a question.
+      A message that only confirms, reports "done" or says thanks needs no answer. The app writes
+      this rule into the instructions of each employee. Do not write a role text that tells an
+      employee to confirm or to thank.
     - The app denies the file tools of each employee for the files that it reads under `.swarm/`
       (`floor.toml`, `employees/`, `assets/`, `state/`). Only the operator and the setup agent
       change them. The app also limits the starts by employees (12 for each floor in 10 minutes).
-    - The app limits the messages from one employee to one other employee (30 in one hour).
+    - The app limits the messages from one employee to one other employee (30 in one hour). It also
+      limits an exchange: when two employees send each other 8 messages in 5 minutes (both
+      directions together), the app refuses the next one, and the operator gets a notice.
     - The app writes the team, the manager, the direct reports and the rules for these tools into
       the instructions of each employee. Your role texts add the details of the role.
     - **Subagents.** A role text must tell a manager to give work to the employees with these

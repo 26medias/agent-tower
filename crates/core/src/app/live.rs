@@ -114,6 +114,13 @@ impl Notifier {
         }
     }
 
+    /// A notice about one employee (`Observer::notice_for`).
+    pub fn notice_for(&self, path: &Path, kind: &str, text: &str, slug: &str) {
+        if let Some(observer) = self.get() {
+            observer.notice_for(path, kind, text, slug);
+        }
+    }
+
     pub fn question_asked(&self, path: &Path, event: &super::QuestionAsked) {
         if let Some(observer) = self.get() {
             observer.question_asked(path, event);

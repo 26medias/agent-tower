@@ -83,6 +83,9 @@ pub struct Events {
     pub tasks: Mutex<Vec<PathBuf>>,
     /// The `notice` events (floor, kind, text), oldest first.
     pub notices: Mutex<Vec<(PathBuf, String, String)>>,
+    /// The `notice_for` events (floor, kind, text, slug of the employee), oldest first. They are
+    /// also in `notices`.
+    pub employee_notices: Mutex<Vec<(PathBuf, String, String, String)>>,
     /// The `question_asked` events, oldest first.
     pub questions: Mutex<Vec<(PathBuf, QuestionAsked)>>,
     /// The `message_delivered` events, oldest first.
@@ -113,6 +116,16 @@ impl Observer for Events {
     fn notice(&self, path: &Path, kind: &str, text: &str) {
         lock(&self.notices).push((path.to_path_buf(), kind.to_owned(), text.to_owned()));
         self.changed.notify_all();
+    }
+
+    fn notice_for(&self, path: &Path, kind: &str, text: &str, slug: &str) {
+        lock(&self.employee_notices).push((
+            path.to_path_buf(),
+            kind.to_owned(),
+            text.to_owned(),
+            slug.to_owned(),
+        ));
+        self.notice(path, kind, text);
     }
 
     fn question_asked(&self, path: &Path, event: &QuestionAsked) {

@@ -285,7 +285,15 @@ fn an_assignment_sends_one_message_with_the_task_header_and_the_three_orders() {
     assert!(pasted.contains("task_update(task=\"T-1\", status=\"in_progress\")"));
     assert!(pasted.contains(".swarm/reports/T-1.md"));
     assert!(pasted.contains("status=\"review\", report=\".swarm/reports/T-1.md\""));
-    assert!(pasted.contains("send(to=\"ceo\", ...)"));
+    // The assignment keeps its orders: the order about the answer names the report, and the
+    // line of a plain message ("To answer, use...") is not on a task message.
+    assert!(
+        pasted.contains(
+            "3. Answer the person who gave you this task with the tool send(to=\"ceo\", ...)."
+        ),
+        "{pasted}"
+    );
+    assert!(!pasted.contains("To answer, use the tool send"), "{pasted}");
     assert_eq!(pasted.matches("[task T-1").count(), 1, "one message");
     assert_eq!(messages_of_kind(&rig, KIND_TASK_ASSIGN), 1);
     let stored = rig.db().all_messages().unwrap();
@@ -441,7 +449,15 @@ fn a_start_that_an_assignment_causes_counts_for_the_start_limit_but_the_operator
 
 #[test]
 fn the_messages_of_a_task_do_not_count_for_the_loop_limit() {
-    let rig = rig_with_team();
+    // The exchange limit (8 messages in 5 minutes) is off here: this test is about the loop limit.
+    let rig = Rig::with(|config| config.exchange_window = std::time::Duration::ZERO);
+    rig.create_floor();
+    rig.add_employee("eng", Some("pm"));
+    rig.add_employee("qa", Some("pm"));
+    for slug in ["ceo", "pm", "eng"] {
+        rig.start(slug);
+        rig.live_idle(slug);
+    }
     make(&rig, "ceo", "Work", "Do it");
     // One assignment ceo -> eng, and four status messages eng -> ceo.
     ok(&rig.tool(
@@ -507,7 +523,7 @@ fn the_text_for_a_waiting_task_message_orders_the_receiver_and_does_not_name_sen
     );
     let plain = rig.tool("pm", "send", json!({"to": "eng", "text": "hello"}));
     assert!(
-        ok(&plain).contains("ENG answers with the tool send."),
+        ok(&plain).contains("ENG answers with the tool send only if the message needs an answer."),
         "{plain:?}"
     );
 }
@@ -671,6 +687,13 @@ fn a_status_change_tells_the_assigner_or_the_creator_but_never_the_caller() {
         "{pasted}"
     );
     assert!(pasted.contains("task_get(task=\"T-1\")"));
+    // A status message does not ask for an answer: it has no `send(` and no answer line.
+    assert!(!pasted.contains("send("), "{pasted}");
+    assert!(!pasted.contains("To answer"), "{pasted}");
+    assert!(
+        pasted.ends_with("Do not send a message back for this status message."),
+        "{pasted}"
+    );
     assert_eq!(messages_of_kind(&rig, KIND_TASK_STATUS), 1);
 
     // The same status again: no new message.

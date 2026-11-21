@@ -16,10 +16,12 @@
 //      E2E_TOAST_SHOTS (folder for the screenshots of e2e/toast-checks.mjs; default
 //      /tmp/agent-tower-review/toast),
 //      E2E_ONLY=toast runs the page checks and the toast checks only. E2E_ONLY=sandbox runs the page checks and the Codex sandbox checks only.
+//      E2E_ONLY=exchange runs the page checks and the exchange checks only.
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { exchangeChecks } from "./exchange-checks.mjs";
 import { fourChecks } from "./four-checks.mjs";
 import { last3Checks } from "./last3-checks.mjs";
 import { lastChecks } from "./last-checks.mjs";
@@ -46,6 +48,10 @@ mkdirSync(last3Shots, { recursive: true });
 // The screenshots of the toast place and the three small items of the review "final-b5" (e2e/toast-checks.mjs).
 const toastShots = process.env.E2E_TOAST_SHOTS ?? "/tmp/agent-tower-review/toast";
 mkdirSync(toastShots, { recursive: true });
+
+// The screenshots of the exchange checks (e2e/exchange-checks.mjs).
+const exchangeShots = process.env.E2E_EXCHANGE_SHOTS ?? "/tmp/agent-tower-review/exchange";
+mkdirSync(exchangeShots, { recursive: true });
 
 // The screenshots of the Codex sandbox checks (e2e/sandbox-checks.mjs).
 const sandboxShots = process.env.E2E_SANDBOX_SHOTS ?? "/tmp/agent-tower-review/sandbox";
@@ -2139,20 +2145,23 @@ try {
     if (only === "") await repairChecks({ page, check, url, shots: repairShots });
 
     // 22. The last repairs of the review "final-b2" (N1 to N3, the one row of buttons, the Team activity list).
-    if (only !== "toast" && only !== "sandbox") await lastChecks({ page, check, url, shots: lastShots });
+    if (only !== "toast" && only !== "sandbox" && only !== "exchange") await lastChecks({ page, check, url, shots: lastShots });
 
     // 23. The four items of 2026-11-21: Browse..., the notification switch, test and reset of the programs.
-    if (only !== "toast" && only !== "sandbox") await fourChecks({ page, check, url, shots: fourShots });
+    if (only !== "toast" && only !== "sandbox" && only !== "exchange") await fourChecks({ page, check, url, shots: fourShots });
 
     // 24. The last repairs of the review "final-b4": the toast stack, the bar and the roster, the messages in Team activity.
-    if (only !== "toast" && only !== "sandbox") await last3Checks({ page, check, url, shots: last3Shots });
+    if (only !== "toast" && only !== "sandbox" && only !== "exchange") await last3Checks({ page, check, url, shots: last3Shots });
 
     // 25. The toast place (top right of the terminal area), the toasts under a modal, the errors of refused actions inside the
     // modals, the fold of the status rows, "resume" in the bar, and the main button of the header at 200 px.
-    if (only !== "sandbox") await toastChecks({ page, check, url, shots: toastShots });
+    if (only !== "sandbox" && only !== "exchange") await toastChecks({ page, check, url, shots: toastShots });
 
     // 26. The section "Codex sandbox" of Settings (decision O7, option A): the probe states, "Test again", the switch.
-    await sandboxChecks({ page, check, url, shots: sandboxShots });
+    if (only !== "exchange") await sandboxChecks({ page, check, url, shots: sandboxShots });
+
+    // 27. The notice `exchange_stopped`: the toast that stays with the button "Open", and the row in Team activity.
+    if (only !== "toast" && only !== "sandbox") await exchangeChecks({ page, check, url, shots: exchangeShots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

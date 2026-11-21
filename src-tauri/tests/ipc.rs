@@ -746,6 +746,71 @@ fn mcp_call(url: &str, token: &str, tool: &str, args: Value) -> Value {
 }
 
 #[test]
+fn an_exchange_that_the_app_stops_comes_as_one_notice_with_the_slug_of_the_refused_employee() {
+    let app = app();
+    let path = app.path();
+    app.call("floor_create", json!({ "path": path, "name": "Tower" }))
+        .unwrap();
+    app.call(
+        "session_start",
+        json!({ "path": path, "slug": "ceo", "firstMessage": null, "rows": 24, "cols": 80 }),
+    )
+    .unwrap();
+    let token = app
+        .tokens
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .rev()
+        .find(|(slug, _)| slug == "ceo")
+        .map(|(_, token)| token.clone())
+        .expect("the session has a token");
+    let first = mcp_call(
+        &app.mcp_url,
+        &token,
+        "employee_start",
+        json!({"employee": "pm", "message": "m1"}),
+    );
+    assert_eq!(first["result"]["isError"], false, "{first}");
+    for n in 2..=8 {
+        let answer = mcp_call(
+            &app.mcp_url,
+            &token,
+            "send",
+            json!({"to": "pm", "text": format!("m{n}")}),
+        );
+        assert_eq!(answer["result"]["isError"], false, "message {n}: {answer}");
+    }
+    // The 9th and the 10th are refused. The UI gets ONE notice.
+    for _ in 0..2 {
+        let refused = mcp_call(
+            &app.mcp_url,
+            &token,
+            "send",
+            json!({"to": "pm", "text": "more"}),
+        );
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+    }
+    app.wait_named("notice", "the notice exchange_stopped", |n| {
+        n["kind"] == "exchange_stopped"
+    });
+    let notices: Vec<Value> = app
+        .events_named("notice")
+        .into_iter()
+        .filter(|n| n["kind"] == "exchange_stopped")
+        .collect();
+    assert_eq!(
+        notices,
+        [json!({
+            "path": path,
+            "kind": "exchange_stopped",
+            "text": "The app stopped an exchange between Ada and Maya: 8 messages in 5 minutes.",
+            "slug": "ceo",
+        })]
+    );
+}
+
+#[test]
 fn an_employee_start_comes_as_a_session_changed_and_an_employee_started_event() {
     let app = app();
     let path = app.path();
