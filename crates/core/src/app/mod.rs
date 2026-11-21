@@ -41,6 +41,8 @@ mod logo_run;
 mod mcp;
 mod merge;
 mod models;
+mod notify;
+mod program_test;
 mod resume;
 mod settings;
 mod setup;
@@ -50,6 +52,7 @@ mod tools;
 use crate::adapter::{
     ClaudeAdapter, CliAdapter, CodexAdapter, McpAccess, Programs as AdapterPrograms, StartContext,
 };
+use crate::env::build_env;
 use crate::env::{EnvMap, current_env};
 use crate::gitwork;
 use crate::hookrx::HookReceiver;
@@ -78,14 +81,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-pub use bus::{START_LIMIT, START_WINDOW, TestHooks};
-pub use live::SCROLLBACK_LIMIT;
+pub use bus::{START_LIMIT, START_WINDOW, STOP_HOOK_HEADER, TestHooks};
+pub use live::{SCROLLBACK_LIMIT, STOP_BLOCK_LIMIT};
 pub use mcp::{FIRST_BYTE_TIMEOUT, MAX_CONNECTIONS, McpLimits, REQUEST_DEADLINE};
 pub use merge::{MergeReport, TaskDiffView};
 pub use models::{
     CodexSource, ModelCatalog, ModelKind, ModelOption, STANDARD_EFFORTS, is_valid_effort,
     is_valid_model_name,
 };
+pub use notify::{NOTIFICATION_TITLE, QuestionAsked, question_body, should_notify};
+pub use program_test::{PROGRAM_TEST_TIMEOUT, ProgramTest};
 pub use resume::ResumeProgress;
 pub use settings::{KeySource, SettingsView};
 pub use tools::{FAILURE_TTL, hook_candidates, locate_hook_program, workspace_root};
@@ -262,6 +267,9 @@ pub struct ProgramsView {
     pub codex: Option<PathBuf>,
     pub node: Option<PathBuf>,
     pub hook: Option<PathBuf>,
+    /// The override of the operator for each program, in the order `claude`, `codex`, `node`.
+    /// `None`: no override (the app searches).
+    pub overrides: [Option<PathBuf>; 3],
 }
 
 /// Receives the changes. See the module text for the rules.
@@ -281,6 +289,10 @@ pub trait Observer: Send + Sync {
     /// merge that was blocked, or a session that the resume of the team could not start. `kind`
     /// is `task_blocked` or `resume_failed`. `text` is the message. The default does nothing.
     fn notice(&self, _path: &Path, _kind: &str, _text: &str) {}
+    /// A session changed to `question`. The shell decides if the operator needs a desktop
+    /// notification (`notify::should_notify`). It comes after the `session_changed` of the same
+    /// change. The default does nothing.
+    fn question_asked(&self, _path: &Path, _event: &QuestionAsked) {}
 }
 
 /// Receives the output of the attached session, in order (see `live.rs`).
@@ -1135,6 +1147,18 @@ impl TowerCore {
         Ok(self.settings_get())
     }
 
+    /// The switch "Desktop notification when an agent asks a question" (`[interface]` of the app
+    /// config). `None` is "no change". Returns the settings.
+    pub fn settings_set_interface(&self, notify_on_question: Option<bool>) -> Result<SettingsView> {
+        if let Some(on) = notify_on_question {
+            settings::update(&self.logo_env.config_file, |table| {
+                settings::set_notify_on_question(table, on);
+            })
+            .map_err(|e| io_message("cannot write the app config", e))?;
+        }
+        Ok(self.settings_get())
+    }
+
     /// The model lists. It reads the Codex file and the app config again on each call.
     pub fn models_get(&self) -> ModelCatalog {
         models::catalog(&self.logo_env.config_file, self.codex_home.as_deref())
@@ -1421,7 +1445,7 @@ impl TowerCore {
         db.append_status_event(&id, Status::Starting.as_str(), now_ms())?;
 
         // The route is made BEFORE the process starts, so no hook event is lost.
-        let from_router = self.router.subscribe(&id);
+        let from_router = self.router.subscribe_replying(&id);
         let (to_session, session_events) = mpsc::channel();
         let (handle, streams) = match Session::start(plan.spec, employee.cli, &id, session_events) {
             Ok(started) => started,
@@ -1454,6 +1478,10 @@ impl TowerCore {
                 .as_ref()
                 .map(|guard| self.status_hook(&floor.path, slug, guard.token())),
             has_first_message,
+            on_question: Some(self.question_hook(&floor, setup_cli.is_some())),
+            // The Stop hook delivers messages to Claude employees only (spec 4.5, item N14).
+            on_stop: (token_guard.is_some() && employee.cli == CliKind::Claude)
+                .then(|| self.stop_hook(&floor.path, slug)),
         });
         locked(&self.registry)
             .live
@@ -1493,6 +1521,46 @@ impl TowerCore {
             return Err(io_message("cannot start the threads of the session", error));
         }
         Ok(live.view())
+    }
+
+    /// What the status thread of a session runs when the status changes to `question`: tell the
+    /// observer, with the name and the role of the employee and the name of the floor, so the
+    /// shell can show a desktop notification (`notify`).
+    fn question_hook(&self, floor: &Arc<FloorHandle>, is_setup: bool) -> live::QuestionHook {
+        let floor = Arc::clone(floor);
+        let notifier = Arc::clone(&self.notifier);
+        let config_file = self.logo_env.config_file.clone();
+        Arc::new(move |live, old| {
+            let (floor_name, who) = {
+                let store = locked(&floor.store);
+                let who = if is_setup {
+                    Some(("Setup agent".to_owned(), "Setup".to_owned()))
+                } else {
+                    store.read_employees().ok().and_then(|loaded| {
+                        loaded
+                            .employees
+                            .into_iter()
+                            .find(|e| e.slug == live.slug)
+                            .map(|e| (e.name, e.role))
+                    })
+                };
+                (store.floor().name.clone(), who)
+            };
+            let (name, role) = who.unwrap_or_else(|| (live.slug.clone(), "employee".to_owned()));
+            notifier.question_asked(
+                &live.path,
+                &QuestionAsked {
+                    session_id: live.id.clone(),
+                    slug: live.slug.clone(),
+                    name,
+                    role,
+                    floor_name,
+                    old,
+                    new: Status::Question,
+                    notifications_on: settings::notify_on_question(&config_file),
+                },
+            );
+        })
     }
 
     /// What the status thread of the setup session runs after each turn and at the stop: read the
@@ -1629,12 +1697,13 @@ impl TowerCore {
     /// The resolved programs. It resolves what is not yet cached; this can take some seconds
     /// the first time (a login shell).
     pub fn programs_get(&self) -> ProgramsView {
-        let (claude, codex, node) = {
+        let (claude, codex, node, overrides) = {
             let mut book = locked(&self.programs);
             (
                 book.resolve("claude").ok(),
                 book.resolve("codex").ok(),
                 book.resolve("node").ok(),
+                tools::PROGRAM_NAMES.map(|name| book.override_of(name)),
             )
         };
         ProgramsView {
@@ -1642,7 +1711,46 @@ impl TowerCore {
             codex,
             node,
             hook: self.hook_program().ok(),
+            overrides,
         }
+    }
+
+    /// Test a program: run `<path> --version` with the environment of a session (the login shell
+    /// environment, and the folders of `claude`, `codex` and `node` in `PATH`), with a time limit
+    /// of `PROGRAM_TEST_TIMEOUT`. It starts no model session. A program that the app cannot find
+    /// gives `ok: false` and no path. `name` is `claude`, `codex` or `node`.
+    pub fn program_test(&self, name: &str) -> Result<ProgramTest> {
+        self.program_test_within(name, PROGRAM_TEST_TIMEOUT)
+    }
+
+    /// `program_test` with another time limit (the tests use a short one).
+    #[doc(hidden)]
+    pub fn program_test_within(&self, name: &str, timeout: Duration) -> Result<ProgramTest> {
+        if !tools::PROGRAM_NAMES.contains(&name) {
+            return Err(other(format!(
+                "unknown program \"{name}\" (use claude, codex or node)"
+            )));
+        }
+        let (found, dirs) = {
+            let mut book = locked(&self.programs);
+            let found = book.resolve(name);
+            let dirs: Vec<PathBuf> = tools::PROGRAM_NAMES
+                .iter()
+                .filter_map(|each| book.resolve(each).ok())
+                .filter_map(|path| path.parent().map(Path::to_path_buf))
+                .collect();
+            (found, dirs)
+        };
+        let path = match found {
+            Ok(path) => path,
+            Err(error) => return Ok(ProgramTest::not_found(&error)),
+        };
+        // The same environment as a session: `build_env` over the parent environment, with the
+        // folders of the three programs in front of the `PATH`.
+        let env = build_env(&self.session_env.get(), &[], &dirs)
+            .map_err(|e| other(format!("cannot build the environment: {e}")))?;
+        let cwd = self.home.clone().unwrap_or_else(|| PathBuf::from("/"));
+        Ok(program_test::run_version(&path, &env, &cwd, timeout))
     }
 
     /// Store an override of `claude`, `codex` or `node`. An empty path removes it.

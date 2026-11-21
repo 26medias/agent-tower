@@ -356,6 +356,8 @@ pub struct Settings {
     pub openai_key_set: bool,
     pub openai_key_source: Option<KeySource>,
     pub image_model: String,
+    /// `[interface] notify_on_question` of the app config (default `true`).
+    pub notify_on_question: bool,
 }
 
 impl From<app::SettingsView> for Settings {
@@ -367,6 +369,7 @@ impl From<app::SettingsView> for Settings {
                 app::KeySource::Env => KeySource::Env,
             }),
             image_model: view.image_model,
+            notify_on_question: view.notify_on_question,
         }
     }
 }
@@ -380,6 +383,35 @@ pub struct Programs {
     pub codex: Option<String>,
     pub node: Option<String>,
     pub hook: String,
+    /// The path that the operator set for each program. `null`: no override.
+    pub overrides: ProgramOverrides,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramOverrides {
+    pub claude: Option<String>,
+    pub codex: Option<String>,
+    pub node: Option<String>,
+}
+
+/// The result of `program_test`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramTestResult {
+    pub ok: bool,
+    pub path: Option<String>,
+    pub output: String,
+}
+
+impl From<app::ProgramTest> for ProgramTestResult {
+    fn from(result: app::ProgramTest) -> ProgramTestResult {
+        ProgramTestResult {
+            ok: result.ok,
+            path: result.path.map(|p| text(&p)),
+            output: result.output,
+        }
+    }
 }
 
 impl From<app::ProgramsView> for Programs {
@@ -390,6 +422,14 @@ impl From<app::ProgramsView> for Programs {
             codex: opt(view.codex),
             node: opt(view.node),
             hook: view.hook.map(|p| text(&p)).unwrap_or_default(),
+            overrides: {
+                let [claude, codex, node] = view.overrides;
+                ProgramOverrides {
+                    claude: opt(claude),
+                    codex: opt(codex),
+                    node: opt(node),
+                }
+            },
         }
     }
 }
@@ -754,19 +794,21 @@ mod tests {
             openai_key_set: true,
             openai_key_source: Some(KeySource::Env),
             image_model: "m".into(),
+            notify_on_question: false,
         };
         assert_eq!(
             to_json(&settings),
-            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m"})
+            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false})
         );
         let none = Settings {
             openai_key_set: false,
             openai_key_source: None,
             image_model: "m".into(),
+            notify_on_question: true,
         };
         assert_eq!(
             to_json(&none),
-            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m"})
+            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true})
         );
         assert_eq!(to_json(&KeySource::Config), json!("config"));
     }
@@ -830,10 +872,24 @@ mod tests {
             codex: None,
             node: Some("/n".into()),
             hook: "/h".into(),
+            overrides: ProgramOverrides {
+                claude: Some("/mine/c".into()),
+                codex: None,
+                node: None,
+            },
         };
         assert_eq!(
             to_json(&programs),
-            json!({"claude": "/c", "codex": null, "node": "/n", "hook": "/h"})
+            json!({"claude": "/c", "codex": null, "node": "/n", "hook": "/h",
+                "overrides": {"claude": "/mine/c", "codex": null, "node": null}})
+        );
+        assert_eq!(
+            to_json(&ProgramTestResult {
+                ok: false,
+                path: None,
+                output: "x".into()
+            }),
+            json!({"ok": false, "path": null, "output": "x"})
         );
         assert_eq!(
             to_json(&OutputMessage {

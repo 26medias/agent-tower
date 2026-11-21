@@ -46,6 +46,7 @@ import {
     type ModelKind,
     type NoticePayload,
     type ProgramName,
+    type ProgramTestResult,
     type Programs,
     type SessionView,
     type Settings,
@@ -139,6 +140,10 @@ class Store {
     activeByPath = $state.raw<Record<string, string>>({});
     toasts = $state.raw<Toast[]>([]);
     programs = $state.raw<Programs | null>(null);
+    /** The last `program_test` result of each program. A change of the path clears it. */
+    programTests = $state.raw<Record<ProgramName, ProgramTestResult | null>>({ claude: null, codex: null, node: null });
+    /** A `program_test` runs now for this program. */
+    programTesting = $state.raw<Record<ProgramName, boolean>>({ claude: false, codex: false, node: false });
     settings = $state.raw<Settings | null>(null);
     /** The model lists (docs/ipc-settings.md). Null until the first `models_get` answers. */
     models = $state.raw<ModelCatalog | null>(null);
@@ -1246,6 +1251,38 @@ class Store {
     async setProgram(name: ProgramName, path: string): Promise<boolean> {
         try {
             this.programs = await ipc.programsSet(name, path.trim());
+            this.programTests = { ...this.programTests, [name]: null };
+            return true;
+        } catch (e) {
+            this.fail(e);
+            return false;
+        }
+    }
+
+    /** Remove the override of a program. The app then searches again, and `programs` shows what it finds. */
+    async resetProgram(name: ProgramName): Promise<boolean> {
+        return this.setProgram(name, "");
+    }
+
+    /** Run `<path> --version` for a program. The result shows next to the program. */
+    async testProgram(name: ProgramName): Promise<void> {
+        if (this.programTesting[name]) return;
+        this.programTesting = { ...this.programTesting, [name]: true };
+        try {
+            const result = await ipc.programTest(name);
+            this.programTests = { ...this.programTests, [name]: result };
+        } catch (e) {
+            // A refusal of the command itself (not a failed program). Show it in the same place.
+            this.programTests = { ...this.programTests, [name]: { ok: false, path: null, output: ipc.errorText(e) } };
+        } finally {
+            this.programTesting = { ...this.programTesting, [name]: false };
+        }
+    }
+
+    /** The switch "Desktop notification when an agent asks a question". Returns true on success. */
+    async setNotifyOnQuestion(on: boolean): Promise<boolean> {
+        try {
+            this.settings = await ipc.settingsSet(null, null, on);
             return true;
         } catch (e) {
             this.fail(e);

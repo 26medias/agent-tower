@@ -33,8 +33,9 @@
 
 use super::{Observer, OutputSink, SessionView};
 use crate::adapter::cli_session_id_from_event;
-use crate::session::{HookRouter, OutputChunk, Session, SessionHandle, StatusChange};
-use crate::status::Status;
+use crate::hookrx::HookReply;
+use crate::session::{HookRouter, OutputChunk, Routed, Session, SessionHandle, StatusChange};
+use crate::status::{HookEvent, HookKind, Status};
 use crate::store::Database;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -112,6 +113,12 @@ impl Notifier {
             observer.notice(path, kind, text);
         }
     }
+
+    pub fn question_asked(&self, path: &Path, event: &super::QuestionAsked) {
+        if let Some(observer) = self.get() {
+            observer.question_asked(path, event);
+        }
+    }
 }
 
 struct OutBuf {
@@ -155,10 +162,70 @@ pub(crate) struct Live {
     worked: AtomicBool,
     /// The session started with a first message. See `worked`.
     has_first_message: bool,
+    /// Claude sessions of employees only. The hook thread calls it for each `Stop` event that
+    /// comes with a reply (spec 4.5). It decides if the stop is blocked to deliver messages.
+    on_stop: Option<StopHook>,
+    /// The status thread calls it when the status changes to `question`, with the status before.
+    /// It tells the observer (the desktop notification).
+    on_question: Option<QuestionHook>,
+    /// What the Stop hook has done for this session (`StopState`).
+    pub stop_state: Mutex<StopState>,
 }
 
 /// See `Live::on_status`.
 pub(crate) type StatusHook = Arc<dyn Fn(&Live, Status) + Send + Sync>;
+
+/// See `Live::on_stop`. It gets the session, the payload of the `Stop` event and the reply of
+/// the hook program. It returns `true` if it blocked the stop (it wrote a `block` answer).
+pub(crate) type StopHook = Arc<dyn Fn(&Live, &Value, &HookReply) -> bool + Send + Sync>;
+
+/// See `Live::on_question`.
+pub(crate) type QuestionHook = Arc<dyn Fn(&Live, Status) + Send + Sync>;
+
+/// The most blocked stops in a row for one session. After this many, the next `Stop` ends the
+/// turn, and the paste path delivers what waits (spec 4.5).
+pub const STOP_BLOCK_LIMIT: u32 = 5;
+
+/// What the Stop hook has done for one session: the loop guard.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct StopState {
+    /// The stops that the hook blocked in a row. A `Stop` that is not blocked ends the row.
+    pub blocked_in_row: u32,
+    /// The highest ID of the messages that the last block gave.
+    pub last_given_id: i64,
+}
+
+impl StopState {
+    /// May this `Stop` be blocked? `active` is `stop_hook_active` of the payload. `newest` is the
+    /// highest ID of the messages that would go out (`None`: no message). It returns `newest` if
+    /// the stop may be blocked. The rules:
+    /// - no message: no block;
+    /// - `active` and no message newer than the last block: no block (the same message cannot
+    ///   make the turn go on two times);
+    /// - `STOP_BLOCK_LIMIT` blocks in a row: no block, so the turn ends and the paste path
+    ///   delivers.
+    ///
+    /// A `Stop` that is not blocked ends the turn, so it ends the row. A `Stop` with `active`
+    /// false is the start of a new row.
+    pub fn may_block(&mut self, active: bool, newest: Option<i64>) -> Option<i64> {
+        if !active {
+            self.blocked_in_row = 0;
+        }
+        let allowed = newest.filter(|newest| {
+            !(active && *newest <= self.last_given_id) && self.blocked_in_row < STOP_BLOCK_LIMIT
+        });
+        if allowed.is_none() {
+            self.blocked_in_row = 0;
+        }
+        allowed
+    }
+
+    /// The hook wrote a block answer with messages up to `newest`.
+    pub fn blocked(&mut self, newest: i64) {
+        self.blocked_in_row += 1;
+        self.last_given_id = self.last_given_id.max(newest);
+    }
+}
 
 /// What `Live::new` needs.
 pub(crate) struct LiveParts {
@@ -178,6 +245,10 @@ pub(crate) struct LiveParts {
     pub on_status: Option<StatusHook>,
     /// The session started with a first message. See `Live::worked`.
     pub has_first_message: bool,
+    /// See `Live::on_stop`.
+    pub on_stop: Option<StopHook>,
+    /// See `Live::on_question`.
+    pub on_question: Option<QuestionHook>,
 }
 
 impl Live {
@@ -204,6 +275,9 @@ impl Live {
             on_status: parts.on_status,
             worked: AtomicBool::new(false),
             has_first_message: parts.has_first_message,
+            on_stop: parts.on_stop,
+            on_question: parts.on_question,
+            stop_state: Mutex::new(StopState::default()),
         })
     }
 
@@ -258,6 +332,15 @@ impl Live {
         if last.as_ref() != Some(&view) {
             *last = Some(view.clone());
             self.notifier.session_changed(&self.path, &view);
+        }
+    }
+
+    /// A `Stop` event came with a reply. Ask the Stop hook of the app (Claude employees only).
+    /// With no hook, the reply is dropped and the program prints nothing.
+    fn run_on_stop(&self, event: &Value, reply: &HookReply) -> bool {
+        match &self.on_stop {
+            Some(hook) => hook(self, event, reply),
+            None => false,
         }
     }
 
@@ -349,7 +432,7 @@ pub(crate) fn spawn_pumps(
     live: &Arc<Live>,
     status: Receiver<StatusChange>,
     output: Receiver<OutputChunk>,
-    hooks_in: Receiver<Value>,
+    hooks_in: Receiver<Routed>,
     hooks_out: Sender<Value>,
     router: Arc<HookRouter>,
     learn_cli_session_id: bool,
@@ -377,15 +460,31 @@ pub(crate) fn spawn_pumps(
 
 fn run_hooks(
     live: &Live,
-    from_router: Receiver<Value>,
+    from_router: Receiver<Routed>,
     to_session: Sender<Value>,
     mut learn_cli_session_id: bool,
 ) {
-    for event in from_router {
+    for Routed { event, reply } in from_router {
         // Codex: the ID comes in the first hook event. It is stored before the event goes on.
         if learn_cli_session_id && let Some(id) = cli_session_id_from_event(&event) {
             live.store_cli_session_id(&id);
             learn_cli_session_id = false;
+        }
+        // A `Stop` with a reply: the Stop hook of the app may block it. This thread handles the
+        // events of the session one by one, so no later event can pass this one. If the stop was
+        // blocked, the machine hears it BEFORE it gets the `Stop` event, so the `Stop` keeps
+        // `working` and the status never shows `idle` (spec 4.3). With no reply, or with no
+        // block, the `reply` is dropped here, and the connection of the hook program closes with
+        // no answer.
+        let blocked = match &reply {
+            Some(reply) if HookEvent::from_json(&event).kind == HookKind::Stop => {
+                live.run_on_stop(&event, reply)
+            }
+            _ => false,
+        };
+        drop(reply);
+        if blocked {
+            live.session.stop_blocked_by_app();
         }
         let _ = to_session.send(event);
         // The session applies the event in its own thread, so this can be a little early. A
@@ -423,8 +522,14 @@ fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) 
             // for its first prompt (after `SessionStart`), and a message can be pasted now.
             live.worked.store(true, Ordering::SeqCst);
         }
-        *locked(&live.reported) = change.new;
+        let old = std::mem::replace(&mut *locked(&live.reported), change.new);
         live.refresh();
+        if change.new == Status::Question
+            && old != Status::Question
+            && let Some(hook) = &live.on_question
+        {
+            hook(live, old);
+        }
         live.run_on_status(change.new);
         if matches!(change.new, Status::Idle | Status::Done) && working {
             working = false;
@@ -483,4 +588,54 @@ fn tail_of(path: &Path, limit: usize) -> Vec<u8> {
         let _ = file.read_to_end(&mut bytes);
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_message_means_no_block_and_ends_the_row() {
+        let mut state = StopState {
+            blocked_in_row: 3,
+            last_given_id: 9,
+        };
+        assert_eq!(state.may_block(true, None), None);
+        assert_eq!(state.blocked_in_row, 0);
+    }
+
+    #[test]
+    fn a_new_message_may_block_with_stop_hook_active_or_not() {
+        let mut state = StopState::default();
+        assert_eq!(state.may_block(false, Some(4)), Some(4));
+        state.blocked(4);
+        // The turn goes on after the block, and the next `Stop` has `stop_hook_active`.
+        assert_eq!(state.may_block(true, Some(7)), Some(7));
+    }
+
+    #[test]
+    fn stop_hook_active_never_blocks_twice_for_the_same_message() {
+        let mut state = StopState::default();
+        assert_eq!(state.may_block(false, Some(4)), Some(4));
+        state.blocked(4);
+        // The message came back (for example a failed mark): it is not new.
+        assert_eq!(state.may_block(true, Some(4)), None);
+        assert_eq!(state.may_block(true, Some(3)), None);
+        // With `stop_hook_active` false it is a new turn: the same rule does not apply.
+        assert_eq!(state.may_block(false, Some(4)), Some(4));
+    }
+
+    #[test]
+    fn at_most_five_blocks_in_a_row() {
+        let mut state = StopState::default();
+        for id in 1..=STOP_BLOCK_LIMIT as i64 {
+            assert_eq!(state.may_block(id > 1, Some(id)), Some(id), "block {id}");
+            state.blocked(id);
+        }
+        // The sixth stop in the row is not blocked, even with a new message.
+        let sixth = STOP_BLOCK_LIMIT as i64 + 1;
+        assert_eq!(state.may_block(true, Some(sixth)), None);
+        // The row ended: a later turn can be blocked again.
+        assert_eq!(state.may_block(false, Some(sixth)), Some(sixth));
+    }
 }

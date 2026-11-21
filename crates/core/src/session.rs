@@ -594,7 +594,39 @@ impl Inner {
 // Router
 // ---------------------------------------------------------------------------------------------
 
-type Routes = Arc<Mutex<HashMap<String, Sender<Value>>>>;
+/// One hook event for a session, with the reply of the sender when it waits for an answer.
+#[derive(Debug)]
+pub struct Routed {
+    pub event: Value,
+    /// `Some` when the hook program waits for an answer (the Stop hook). Drop it to close the
+    /// connection with no answer.
+    pub reply: Option<crate::hookrx::HookReply>,
+}
+
+/// Where the events of one session go.
+enum Route {
+    /// The events only. A reply that comes with an event is dropped, so its connection closes.
+    Plain(Sender<Value>),
+    /// The events with their replies.
+    Replying(Sender<Routed>),
+}
+
+impl Route {
+    /// Give the message to the session. `false` means the channel is closed.
+    fn send(&self, message: crate::hookrx::HookMessage) -> bool {
+        match self {
+            Route::Plain(sender) => sender.send(message.event).is_ok(),
+            Route::Replying(sender) => sender
+                .send(Routed {
+                    event: message.event,
+                    reply: message.reply,
+                })
+                .is_ok(),
+        }
+    }
+}
+
+type Routes = Arc<Mutex<HashMap<String, Route>>>;
 
 /// Sends the events of one `HookReceiver` to the sessions, by `HookMessage.session`.
 ///
@@ -618,13 +650,14 @@ impl HookRouter {
                 .spawn(move || {
                     for message in source {
                         let mut routes = locked(&routes);
-                        let delivered = match routes.get(&message.session) {
-                            Some(sender) => sender.send(message.event).is_ok(),
+                        let session = message.session.clone();
+                        let delivered = match routes.get(&session) {
+                            Some(route) => route.send(message),
                             None => false,
                         };
                         if !delivered {
                             // A closed route is removed.
-                            routes.remove(&message.session);
+                            routes.remove(&session);
                             unrouted.fetch_add(1, Ordering::SeqCst);
                         }
                     }
@@ -637,7 +670,15 @@ impl HookRouter {
     /// first channel.
     pub fn subscribe(&self, session_id: &str) -> Receiver<Value> {
         let (sender, receiver) = mpsc::channel();
-        locked(&self.routes).insert(session_id.to_owned(), sender);
+        locked(&self.routes).insert(session_id.to_owned(), Route::Plain(sender));
+        receiver
+    }
+
+    /// Like `subscribe`, and each event comes with the reply of its sender (if the sender
+    /// waits for an answer).
+    pub fn subscribe_replying(&self, session_id: &str) -> Receiver<Routed> {
+        let (sender, receiver) = mpsc::channel();
+        locked(&self.routes).insert(session_id.to_owned(), Route::Replying(sender));
         receiver
     }
 
@@ -1402,6 +1443,7 @@ mod tests {
                 .send(HookMessage {
                     session: session.into(),
                     event: hook(name),
+                    reply: None,
                 })
                 .unwrap();
         };

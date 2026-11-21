@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createMockBackend, type MockControl } from "./mock";
-import type { FloorView } from "./types";
+import type { FloorView, ProgramTestResult, Programs, Settings } from "./types";
 
 const FLOOR = "/home/demo/tower";
 const control = () => (globalThis as unknown as { __towerMock: MockControl }).__towerMock;
@@ -127,5 +127,49 @@ describe("mock: the rules for commands with no question", () => {
         expect(await b.invoke("floor_permissions_proposed", { path: FLOOR })).toEqual([]);
         control().goneFloor(FLOOR);
         expect(await rejected(b.invoke("floor_permissions_proposed", { path: FLOOR }))).toMatch(/^FLOOR_GONE: /);
+    });
+});
+
+describe("mock: settings switch, program test and reset", () => {
+    it("has the notification switch on by default, and settings_set changes only it", async () => {
+        const b = createMockBackend();
+        expect((await b.invoke<Settings>("settings_get")).notifyOnQuestion).toBe(true);
+        const off = await b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, notifyOnQuestion: false });
+        expect(off.notifyOnQuestion).toBe(false);
+        // The old call with no such argument keeps the switch, and null is "no change".
+        const same = await b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: "m-1" });
+        expect(same).toMatchObject({ notifyOnQuestion: false, imageModel: "m-1" });
+        const nul = await b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, notifyOnQuestion: null });
+        expect(nul.notifyOnQuestion).toBe(false);
+        const on = await b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, notifyOnQuestion: true });
+        expect(on.notifyOnQuestion).toBe(true);
+    });
+
+    it("tests a program: a good result, a bad result and a program that is not found", async () => {
+        const b = createMockBackend();
+        const test = (name: string) => b.invoke<ProgramTestResult>("program_test", { name });
+        expect(await test("claude")).toEqual({ ok: true, path: "/usr/local/bin/claude", output: "2.1.330 (Claude Code)" });
+        expect(await test("codex")).toMatchObject({ ok: false, path: null });
+        await b.invoke("programs_set", { name: "node", path: "/opt/broken/node-x" });
+        expect(await test("node")).toMatchObject({ ok: true });
+        await b.invoke("programs_set", { name: "node", path: "/opt/tools/broken-node" });
+        expect(await test("node")).toEqual({ ok: false, path: "/opt/tools/broken-node", output: "exit code 2: unknown option --version" });
+        expect(await rejected(test("rm"))).toMatch(/unknown program/);
+    });
+
+    it("resets a program with an empty path and shows the path that the app finds", async () => {
+        const b = createMockBackend();
+        const set = await b.invoke<Programs>("programs_set", { name: "claude", path: "/my/claude" });
+        expect(set.claude).toBe("/my/claude");
+        expect(set.overrides.claude).toBe("/my/claude");
+        expect(set.overrides.node).toBeNull();
+        const reset = await b.invoke<Programs>("programs_set", { name: "claude", path: "" });
+        expect(reset.overrides.claude).toBeNull();
+        expect(reset.claude).toBe("/usr/local/bin/claude");
+        // A program that the app does not find has no path after the reset.
+        await b.invoke("programs_set", { name: "codex", path: "/my/codex" });
+        const none = await b.invoke<Programs>("programs_set", { name: "codex", path: "  " });
+        expect(none.codex).toBeNull();
+        expect(none.overrides.codex).toBeNull();
     });
 });

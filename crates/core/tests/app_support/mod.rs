@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tower_core::adapter::{CliAdapter, McpAccess, SpawnPlan, StartContext};
 use tower_core::app::{
-    EmployeeStarted, FloorView, Observer, OutputSink, SessionView, Tower, TowerConfig, TowerError,
+    EmployeeStarted, FloorView, Observer, OutputSink, QuestionAsked, SessionView, Tower,
+    TowerConfig, TowerError,
 };
 use tower_core::env::{EnvMap, build_env};
 use tower_core::login_env::LoginEnvSource;
@@ -81,6 +82,8 @@ pub struct Events {
     pub tasks: Mutex<Vec<PathBuf>>,
     /// The `notice` events (floor, kind, text), oldest first.
     pub notices: Mutex<Vec<(PathBuf, String, String)>>,
+    /// The `question_asked` events, oldest first.
+    pub questions: Mutex<Vec<(PathBuf, QuestionAsked)>>,
 }
 
 impl Observer for Events {
@@ -106,6 +109,11 @@ impl Observer for Events {
 
     fn notice(&self, path: &Path, kind: &str, text: &str) {
         lock(&self.notices).push((path.to_path_buf(), kind.to_owned(), text.to_owned()));
+        self.changed.notify_all();
+    }
+
+    fn question_asked(&self, path: &Path, event: &QuestionAsked) {
+        lock(&self.questions).push((path.to_path_buf(), event.clone()));
         self.changed.notify_all();
     }
 }
@@ -241,6 +249,10 @@ pub fn record_path(cwd: &Path, id: &str) -> PathBuf {
     cwd.join(".swarm/state").join(format!("{id}.record"))
 }
 
+pub fn hook_record_path(cwd: &Path, id: &str) -> PathBuf {
+    cwd.join(".swarm/state").join(format!("{id}.hooks"))
+}
+
 pub fn marker_path(cwd: &Path, id: &str) -> PathBuf {
     cwd.join(".swarm/state").join(format!("{id}.marker"))
 }
@@ -279,6 +291,8 @@ impl TestAdapter {
             ctx.hook_program.display().to_string(),
             "--marker".into(),
             marker_path(&ctx.cwd, id).display().to_string(),
+            "--hook-record".into(),
+            hook_record_path(&ctx.cwd, id).display().to_string(),
             "--cli-session-id".into(),
             cli_id,
         ]);
@@ -518,6 +532,44 @@ impl Rig {
         stream
             .write_all(line.as_bytes())
             .expect("write the hook line");
+    }
+
+    /// Send a `Stop` event that asks for an answer, as `tower-hook` does, and return the answer
+    /// line. `None` means the app closed the connection with no answer.
+    pub fn stop_request(
+        &self,
+        session_id: &str,
+        stop_hook_active: bool,
+    ) -> Option<serde_json::Value> {
+        use std::io::{BufRead, BufReader, Write};
+        let line = serde_json::json!({
+            "session": session_id,
+            "event": {"hook_event_name": "Stop", "stop_hook_active": stop_hook_active},
+            "reply": true,
+        });
+        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(stream, "{line}").expect("write the request");
+        let mut answer = String::new();
+        BufReader::new(stream)
+            .read_line(&mut answer)
+            .expect("the app answers or closes");
+        (!answer.is_empty()).then(|| serde_json::from_str(&answer).expect("a JSON answer"))
+    }
+
+    /// Send a `Stop` request, then close at once without reading (the hook program is gone).
+    pub fn stop_request_and_leave(&self, session_id: &str) {
+        use std::io::Write;
+        let line = serde_json::json!({
+            "session": session_id,
+            "event": {"hook_event_name": "Stop", "stop_hook_active": false},
+            "reply": true,
+        });
+        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket).expect("connect");
+        writeln!(stream, "{line}").expect("write the request");
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 
     pub fn stop_and_wait(&self, id: &str) {
@@ -791,6 +843,37 @@ impl Rig {
             .expect("a session of the employee");
         self.wait_first_turn(&id);
         id
+    }
+
+    /// The reasons of the stops that the Stop hook blocked in this session (spec 4.5), oldest
+    /// first. `fake-cli` writes them as it continues the turn.
+    pub fn hook_reasons(&self, id: &str) -> Vec<String> {
+        std::fs::read_to_string(hook_record_path(&self.cwd, id))
+            .unwrap_or_default()
+            .lines()
+            // `fake-cli` can be in the middle of a write: a line that does not parse yet is skipped.
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .map(|value| value["reason"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// The messages that the Stop hook gave in each block, oldest block first: the text after the
+    /// first line of the reason (which tells the agent what the text is), as a paste would carry
+    /// it.
+    pub fn hook_texts(&self, id: &str) -> Vec<String> {
+        self.hook_reasons(id)
+            .into_iter()
+            .map(|reason| {
+                let (first, rest) = reason.split_once("\n\n").expect("a blank line");
+                assert_eq!(first, tower_core::app::STOP_HOOK_HEADER, "{reason:?}");
+                rest.to_owned()
+            })
+            .collect()
+    }
+
+    /// The messages of the last block of the Stop hook.
+    pub fn hook_text(&self, id: &str) -> Option<String> {
+        self.hook_texts(id).pop()
     }
 
     /// The paste that the session got, with the text of the paste only.

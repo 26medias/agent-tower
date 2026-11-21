@@ -83,6 +83,12 @@ impl ProgramBook {
         result
     }
 
+    /// The override of the operator for a program, if there is one.
+    pub fn override_of(&mut self, name: &str) -> Option<PathBuf> {
+        self.load();
+        self.overrides.get(name).cloned()
+    }
+
     /// Store an operator override. An empty path removes it. The path is checked first.
     pub fn set(&mut self, name: &str, path: &str) -> Result<(), TowerError> {
         if !PROGRAM_NAMES.contains(&name) {

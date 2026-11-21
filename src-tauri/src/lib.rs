@@ -3,6 +3,8 @@
 //! events (`TauriObserver`), and the types into the JSON of `docs/ipc-m1.md` (`views`).
 
 mod commands;
+#[doc(hidden)]
+pub mod notifications;
 mod signals;
 mod views;
 
@@ -10,7 +12,7 @@ use commands::{Shared, WriteQueues};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
-use tower_core::app::{EmployeeStarted, Observer, SessionView, Tower, TowerConfig};
+use tower_core::app::{EmployeeStarted, Observer, QuestionAsked, SessionView, Tower, TowerConfig};
 
 /// Sends the changes of the Tower to all windows as Tauri events.
 struct TauriObserver<R: Runtime> {
@@ -54,6 +56,10 @@ impl<R: Runtime> Observer for TauriObserver<R> {
         };
         let _ = self.app.emit("notice", payload);
     }
+
+    fn question_asked(&self, _path: &Path, event: &QuestionAsked) {
+        notifications::on_question(&self.app, event);
+    }
 }
 
 /// Register the commands of `docs/ipc-m1.md`, `docs/ipc-visuals-init.md`, `docs/ipc-settings.md`, `docs/ipc-m2.md` and `docs/ipc-m3.md` on a builder. Public for the tests of the shell.
@@ -76,6 +82,7 @@ pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         commands::debug_paste,
         commands::programs_get,
         commands::programs_set,
+        commands::program_test,
         commands::floor_logo,
         commands::logo_generate,
         commands::setup_start,
@@ -112,7 +119,14 @@ pub fn install_tower<R: Runtime>(app: &impl Manager<R>, tower: Arc<Tower>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = register_commands(tauri::Builder::default()).setup(|app| {
+    // The plugins: the system folder dialog ("Browse...") and the desktop notification for a
+    // question. Their permissions are in `capabilities/default.json`.
+    let builder = register_commands(
+        tauri::Builder::default()
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_notification::init()),
+    )
+    .setup(|app| {
         let config_dir = app.path().app_config_dir()?;
         install_tower(app, Arc::new(Tower::new(TowerConfig::new(config_dir))?));
         signals::install(app.handle().clone())?;

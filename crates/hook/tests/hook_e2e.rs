@@ -270,3 +270,147 @@ fn two_hundred_sequential_hooks_arrive_in_order() {
     );
     assert_eq!(receiver.dropped_count(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The Stop event waits for an answer (spec 4.5)
+// ---------------------------------------------------------------------------------------------
+
+const STOP_PAYLOAD: &str =
+    r#"{"hook_event_name":"Stop","session_id":"claude-1","stop_hook_active":false}"#;
+
+/// A Stop event gets the answer `block` from the app, and the program prints it, as JSON with
+/// the decision and the reason only. The request line has `"reply": true`.
+#[test]
+fn a_stop_event_gets_the_block_answer_and_prints_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (receiver, events) = HookReceiver::bind(dir.path().join("t.sock")).unwrap();
+    let app = std::thread::spawn(move || {
+        let message = events.recv_timeout(WAIT).expect("the Stop event arrives");
+        assert_eq!(message.event["hook_event_name"], "Stop");
+        let reply = message.reply.expect("the Stop event asks for an answer");
+        reply
+            .send(r#"{"decision":"block","reason":"line one\nline \"two\"","extra":true}"#)
+            .expect("the program reads the answer");
+    });
+    let (output, elapsed) = run_hook(Some("s"), Some(receiver.path()), STOP_PAYLOAD.as_bytes());
+    app.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "{\"decision\":\"block\",\"reason\":\"line one\\nline \\\"two\\\"\"}\n"
+    );
+    assert!(elapsed < Duration::from_millis(1500), "took {elapsed:?}");
+}
+
+/// The other events do not ask for an answer: the message has no reply.
+#[test]
+fn an_event_that_is_not_a_stop_asks_for_no_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (receiver, events) = HookReceiver::bind(dir.path().join("t.sock")).unwrap();
+    let (output, _) = run_hook(
+        Some("s"),
+        Some(receiver.path()),
+        br#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#,
+    );
+    assert_silent_success(&output);
+    let message = events.recv_timeout(WAIT).unwrap();
+    assert!(message.reply.is_none());
+}
+
+/// The app has nothing to say: it drops the reply. The program prints nothing and ends at once.
+#[test]
+fn a_stop_event_with_no_answer_prints_nothing_and_ends_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (receiver, events) = HookReceiver::bind(dir.path().join("t.sock")).unwrap();
+    let app = std::thread::spawn(move || {
+        let message = events.recv_timeout(WAIT).unwrap();
+        drop(message.reply);
+    });
+    let (output, elapsed) = run_hook(Some("s"), Some(receiver.path()), STOP_PAYLOAD.as_bytes());
+    app.join().unwrap();
+    assert_silent_success(&output);
+    assert!(elapsed < Duration::from_millis(1500), "took {elapsed:?}");
+}
+
+/// A dead socket: nothing is printed, and the program ends fast.
+#[test]
+fn a_stop_event_with_a_dead_socket_prints_nothing_and_ends_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist.sock");
+    let (output, elapsed) = run_hook(Some("s"), Some(&missing), STOP_PAYLOAD.as_bytes());
+    assert_silent_success(&output);
+    assert!(elapsed < Duration::from_millis(1500), "took {elapsed:?}");
+
+    // A socket file that nobody listens on (the app crashed).
+    let stale = dir.path().join("stale.sock");
+    drop(UnixListener::bind(&stale).unwrap());
+    let (output, elapsed) = run_hook(Some("s"), Some(&stale), STOP_PAYLOAD.as_bytes());
+    assert_silent_success(&output);
+    assert!(elapsed < Duration::from_millis(1500), "took {elapsed:?}");
+}
+
+/// A slow app: it takes the request and never answers. The program ends inside its limit of 2 s,
+/// prints nothing, and exits 0.
+#[test]
+fn a_stop_event_with_a_slow_app_ends_in_2_seconds_with_no_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("slow.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let app = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        // Hold the connection open for longer than the limit of the program.
+        std::thread::sleep(Duration::from_millis(3500));
+        drop(stream);
+    });
+    let (output, elapsed) = run_hook(Some("s"), Some(&path), STOP_PAYLOAD.as_bytes());
+    assert_silent_success(&output);
+    assert!(
+        elapsed >= Duration::from_millis(1800) && elapsed < Duration::from_millis(2800),
+        "took {elapsed:?}"
+    );
+    app.join().unwrap();
+}
+
+/// A late answer has no reader: the program is gone, and the write of the app fails. The app
+/// then marks nothing.
+#[test]
+fn an_answer_after_the_program_has_ended_fails_to_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let (receiver, events) = HookReceiver::bind(dir.path().join("t.sock")).unwrap();
+    let hook_path = receiver.path().to_path_buf();
+    let runner =
+        std::thread::spawn(move || run_hook(Some("s"), Some(&hook_path), STOP_PAYLOAD.as_bytes()));
+    let message = events.recv_timeout(WAIT).unwrap();
+    let reply = message.reply.unwrap();
+    let (output, _) = runner.join().unwrap(); // Ends after 2 s, with no answer.
+    assert_silent_success(&output);
+    assert!(
+        reply
+            .send(r#"{"decision":"block","reason":"too late"}"#)
+            .is_err()
+    );
+}
+
+/// The program prints only a real `block` decision with a text. Any other answer prints nothing.
+#[test]
+fn a_bad_answer_to_a_stop_event_prints_nothing() {
+    for answer in [
+        r#"{"decision":"approve","reason":"x"}"#,
+        r#"{"decision":"block"}"#,
+        r#"{"decision":"block","reason":""}"#,
+        "not json at all",
+        "[]",
+        "",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (receiver, events) = HookReceiver::bind(dir.path().join("t.sock")).unwrap();
+        let app = std::thread::spawn(move || {
+            let message = events.recv_timeout(WAIT).unwrap();
+            let _ = message.reply.unwrap().send(answer);
+        });
+        let (output, _) = run_hook(Some("s"), Some(receiver.path()), STOP_PAYLOAD.as_bytes());
+        app.join().unwrap();
+        assert_silent_success(&output);
+    }
+}

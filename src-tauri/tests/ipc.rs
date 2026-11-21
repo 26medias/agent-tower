@@ -64,6 +64,10 @@ impl FakeAdapter {
         if self.0 == CliKind::Codex {
             args.extend(["--kind".into(), "codex".into()]);
         }
+        // An employee with the slug `asker` asks a permission question at its first prompt.
+        if ctx.employee.slug == "asker" {
+            args.extend(["--script".into(), "perm-dialog".into()]);
+        }
         if let Some(message) = &ctx.first_message {
             args.push(message.into());
         }
@@ -482,7 +486,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
     // Settings. The arguments are camelCase, and a null is "no change".
     assert_eq!(
         app.call("settings_get", json!({})).unwrap(),
-        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst" })
+        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true })
     );
     let set = app
         .call(
@@ -500,7 +504,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
         .unwrap();
     assert_eq!(
         set,
-        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y" })
+        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true })
     );
     assert!(!set.to_string().contains("sk-test-1"));
     let set = app
@@ -1044,4 +1048,211 @@ fn a_floor_whose_folder_is_gone_has_the_flag_the_events_and_the_error_text() {
         json!({ "path": path, "title": "t", "description": "d" }),
     )
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Interface features of 2026-11-21: the notification switch, program_test and the reset, and
+// the desktop notification for a question
+// ---------------------------------------------------------------------------------------------
+
+/// `settings_set` has the new optional argument `notifyOnQuestion`. An old call with no such
+/// argument still works, and the other fields do not change.
+#[test]
+fn the_notification_switch_is_in_settings_get_and_settings_set() {
+    let app = app();
+    assert_eq!(
+        app.call("settings_get", json!({})).unwrap()["notifyOnQuestion"],
+        json!(true)
+    );
+    let off = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "notifyOnQuestion": false }),
+        )
+        .unwrap();
+    assert_eq!(off["notifyOnQuestion"], json!(false));
+    assert_eq!(
+        app.call("settings_get", json!({})).unwrap()["notifyOnQuestion"],
+        json!(false)
+    );
+    // A call with no `notifyOnQuestion` (the old UI), and one with null: no change.
+    let same = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": "m-1" }),
+        )
+        .unwrap();
+    assert_eq!(same["notifyOnQuestion"], json!(false));
+    assert_eq!(same["imageModel"], json!("m-1"));
+    let same = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "notifyOnQuestion": null }),
+        )
+        .unwrap();
+    assert_eq!(same["notifyOnQuestion"], json!(false));
+    let on = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "notifyOnQuestion": true }),
+        )
+        .unwrap();
+    assert_eq!(on["notifyOnQuestion"], json!(true));
+    assert_eq!(on["imageModel"], json!("m-1"));
+}
+
+#[test]
+fn program_test_and_the_reset_work_through_the_ipc() {
+    let app = app();
+    // The overrides show in programs_get. The harness set all three.
+    let programs = app.call("programs_get", json!({})).unwrap();
+    assert_eq!(
+        programs["overrides"],
+        json!({ "claude": bin("fake-cli").to_str().unwrap(),
+                "codex": bin("fake-cli").to_str().unwrap(), "node": "/bin/true" })
+    );
+
+    // A good program: a script that prints a version.
+    let script = app.dir.path().join("claude-good");
+    std::fs::write(&script, "#!/bin/sh\necho \"claude $1 ok\"\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    app.call(
+        "programs_set",
+        json!({ "name": "claude", "path": script.to_str().unwrap() }),
+    )
+    .unwrap();
+    let good = app
+        .call("program_test", json!({ "name": "claude" }))
+        .unwrap();
+    assert_eq!(
+        good,
+        json!({ "ok": true, "path": script.to_str().unwrap(), "output": "claude --version ok" })
+    );
+    // A bad program: `fake-cli` refuses `--version`.
+    let bad = app
+        .call("program_test", json!({ "name": "codex" }))
+        .unwrap();
+    assert_eq!(bad["ok"], json!(false));
+    assert_eq!(bad["path"], json!(bin("fake-cli").to_str().unwrap()));
+    assert!(
+        bad["output"].as_str().unwrap().starts_with("exit code 2:"),
+        "{bad}"
+    );
+    assert!(bad["output"].as_str().unwrap().chars().count() <= 200);
+
+    // The reset: an empty path removes the override. The harness has no search folder, so the
+    // app finds nothing, and the test says so, with no path.
+    let reset = app
+        .call("programs_set", json!({ "name": "codex", "path": "" }))
+        .unwrap();
+    assert_eq!(reset["overrides"]["codex"], Value::Null);
+    assert_eq!(reset["codex"], Value::Null);
+    assert_eq!(
+        reset["overrides"]["claude"],
+        json!(script.to_str().unwrap())
+    );
+    let missing = app
+        .call("program_test", json!({ "name": "codex" }))
+        .unwrap();
+    assert_eq!(missing["ok"], json!(false));
+    assert_eq!(missing["path"], Value::Null);
+    assert!(
+        missing["output"].as_str().unwrap().contains("codex"),
+        "{missing}"
+    );
+    // Spaces around the path count as empty (the command trims).
+    let reset = app
+        .call("programs_set", json!({ "name": "node", "path": "   " }))
+        .unwrap();
+    assert_eq!(reset["overrides"]["node"], Value::Null);
+
+    let error = app
+        .call("program_test", json!({ "name": "tower-hook" }))
+        .unwrap_err();
+    assert!(error.contains("unknown program"), "{error}");
+}
+
+/// A change to `question` makes one notification with the title and the body of the contract.
+/// The test window of the mock runtime has no focus. The notification plugin is not loaded in
+/// the mock runtime, so the call that the app makes is read from `notifications::recent`.
+#[test]
+fn a_question_makes_one_notification_and_the_switch_stops_it() {
+    use agent_tower_lib::notifications::recent;
+    let app = app();
+    let path = app.path();
+    app.call("floor_create", json!({ "path": path, "name": "Fin Check" }))
+        .unwrap();
+    app.call(
+        "employee_save",
+        json!({ "path": path, "employee": {
+            "slug": "asker", "name": "Eli", "role": "Engineer", "manager": null,
+            "cli": "claude", "model": null, "effort": null,
+            "policy": "read_only", "roleText": "Ask." }}),
+    )
+    .unwrap();
+    let body = "Eli (Engineer) asks a question in Fin Check";
+    let count = || {
+        recent()
+            .iter()
+            .filter(|(title, text)| title == "Agent Tower" && text == body)
+            .count()
+    };
+    assert_eq!(count(), 0);
+
+    let started = app
+        .call(
+            "session_start",
+            json!({ "path": path, "slug": "asker", "firstMessage": null, "rows": 24, "cols": 80 }),
+        )
+        .unwrap();
+    let id = started["sessionId"].as_str().unwrap().to_owned();
+    app.wait_event("question", |e| {
+        e["session"]["sessionId"] == json!(id) && e["session"]["status"] == "question"
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while count() == 0 {
+        assert!(Instant::now() < deadline, "no notification: {:?}", recent());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(count(), 1, "one for each question");
+
+    // The operator answers, the turn ends. Then the switch goes off and a second question
+    // makes no notification.
+    app.call(
+        "pty_write",
+        json!({ "sessionId": id, "data": STANDARD.encode(b"1") }),
+    )
+    .unwrap();
+    app.wait_event("idle again", |e| {
+        e["session"]["sessionId"] == json!(id) && e["session"]["status"] == "idle"
+    });
+    app.call(
+        "settings_set",
+        json!({ "openaiKey": null, "imageModel": null, "notifyOnQuestion": false }),
+    )
+    .unwrap();
+    app.call(
+        "pty_write",
+        json!({ "sessionId": id, "data": STANDARD.encode(b"\x1b[200~again\x1b[201~\r") }),
+    )
+    .unwrap();
+    let questions = || {
+        app.session_events()
+            .iter()
+            .filter(|e| {
+                e["session"]["sessionId"] == json!(id) && e["session"]["status"] == "question"
+            })
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while questions() < 2 {
+        assert!(Instant::now() < deadline, "no second question");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(count(), 1, "the switch is off: no second notification");
 }

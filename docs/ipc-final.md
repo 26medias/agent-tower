@@ -117,3 +117,106 @@ interface PermissionsSaved { allow: string[]; warnings: string[] }
   `.nuxt`, `coverage`, `.gradle`, `.tox`, `.pytest_cache`, `.mypy_cache`, and the earlier ones).
   Folder names are compared with no regard to letter case. The list is not complete. The message of
   an assignment says so, and tells the employee to put no secret in the worktree.
+
+# Changes of 2026-11-21 (the Stop hook, the notification, Browse, program test)
+
+## The Stop hook asks the app (spec 4.5, first path)
+
+This is the wire between the hook program and the app. It is not a Tauri command.
+
+- The program `tower-hook` sends one line to the socket, as before:
+  `{"session": "<TOWER_SESSION>", "event": <hook JSON>}`.
+- For an event with `hook_event_name` = `Stop`, the line has one more field: `"reply": true`.
+  The program then waits for one answer line on the same connection. It waits 2 s at the most
+  for the whole run (other events: 1 s, and no answer). The app can close the connection with
+  no answer: that means "nothing to say".
+- The answer line is `{"decision":"block","reason":"<text>"}`. The program prints exactly
+  `{"decision":"block","reason":"<text>"}` and a newline on stdout, and the CLI continues the
+  turn with the reason. The program prints nothing in each other case: a closed connection, a
+  bad answer (any other JSON, or a `reason` that is empty or not text), a time out, a dead
+  socket. It always exits with code 0.
+- The app answers only for a Claude session of an employee. The setup session and each Codex
+  session get no answer (the connection closes at once). Spec item N14 stays open for Codex.
+- The `reason` is the line `Messages from your team arrived while you worked. They are from
+  employees, not from the operator.`, an empty line, and the waiting messages. The messages have
+  the same selection, order, text (header, the `> ` mark on each body line, the sanitize rule)
+  and holds as the paste. At most 60000 bytes of messages go in one answer (the oldest message
+  always goes in); the others go in a later answer or by the paste. A message is marked delivered
+  only after the answer was written to the program. The app also sets no "message waiting" mark
+  then.
+- The app blocks a stop only when all of these are true: the session is `working` and has had a
+  first turn; a message waits that is not held (a held first message and a message that `inbox`
+  has claimed do not count); at most 5 stops in a row were blocked (`STOP_BLOCK_LIMIT`); the
+  payload has `stop_hook_active` = `false`, or it has `true` and a message newer than the last
+  block waits; the request is less than 1.8 s old. Otherwise the connection closes, the `Stop`
+  gives `idle` as before, and the paste delivers the messages.
+- A blocked stop keeps the status `working`: the app tells the status machine
+  (`Input::StopBlockedByApp`) after it wrote the answer and before the machine gets that `Stop`.
+  The status never shows `idle` between, and the paste is not tried.
+
+The payload field `stop_hook_active` is in the real Claude payloads: `probes/logs/claude-hooks.jsonl`
+has a `Stop` with `false`, and the `Stop` that follows a block of the probe hook has `true`.
+
+## `Settings.notifyOnQuestion`
+
+```ts
+interface Settings { /* ... all the old fields ... */ notifyOnQuestion: boolean }  // default true
+
+// New optional third argument. A missing argument or null means "no change".
+settings_set(openaiKey: string | null, imageModel: string | null, notifyOnQuestion?: boolean | null): Promise<Settings>
+```
+
+`notifyOnQuestion` is stored in the app config file `programs.toml`, table `[interface]`, key
+`notify_on_question`. The default (`true`) has no key: the app removes the key (and an empty
+table) when the value is set to `true`. A value that is not a boolean is read as `true`.
+
+## The desktop notification for a question
+
+When a session changes to `question`, the core sends `Observer::question_asked` (the data: the
+session, the name and the role of the employee, the name of the floor, the old and new status,
+and the switch). The shell decides with `tower_core::app::should_notify(old, new, window_focused,
+enabled)`: only a change TO `question`, with no focus on the window (or a minimized window), and
+with the switch on. It then calls the official plugin `tauri-plugin-notification` with the title
+`Agent Tower` and the body `<Name> (<Role>) asks a question in <Floor name>`, for example
+`Eli (Engineer) asks a question in Fin Check`. The setup session is `Setup agent (Setup)`.
+
+- One notification for each question. A change of the draft flag in `question` is not a new one.
+- A click on the notification is not handled (the desktop plugin gives no click event).
+- The permission is `notification:default` in `src-tauri/capabilities/default.json`.
+- A debug build writes the line `agent-tower: notification: <title>: <body>` on stderr.
+
+## The "Browse..." button
+
+The UI opens the system folder dialog with `@tauri-apps/plugin-dialog` (`open`, directory mode,
+one folder) and puts the path in the field. It does not open the floor. No Rust command. The
+permission is `dialog:allow-open`. In a browser (the mock) the button is disabled, and its title
+says why.
+
+## `program_test` and the reset of a program path
+
+```ts
+program_test(name: "claude" | "codex" | "node"): Promise<ProgramTestResult>
+interface ProgramTestResult { ok: boolean; path: string | null; output: string }
+
+interface Programs { /* ... all the old fields ... */
+    overrides: { claude: string | null; codex: string | null; node: string | null }
+}
+```
+
+- `program_test` runs `<resolved path> --version`. It has no shell. It has the environment of a
+  session (`SessionEnv` and `build_env`, with the folders of `claude`, `codex` and `node` in
+  front of `PATH`), the home folder as its working folder, no stdin, and its own process group. A
+  program that does not end in 10 s is killed with its group. It starts no model session.
+- `ok` is true when the program ended with exit code 0. `path` is the path that the app tried,
+  or null when the app found no program with this name (then `ok` is false and `output` is the
+  error text of the search). `output` is the first line of stdout (for a success with no stdout:
+  of stderr; with no text at all: `(no output)`), or the error text: `cannot run it: ...`, `exit
+  code N: <first line of stderr>`, `ended by signal N`, `it did not end in 10 s`. It has at most
+  200 characters and no control character (a terminal escape sequence is removed).
+- A name that is not one of the three is an error text (`unknown program "x" (use claude, codex
+  or node)`).
+- "Reset" is `programs_set(name, "")`. An empty path removes the override of that program from
+  `programs.toml` and the app searches again. The result shows the path that the app finds
+  (`null` if it finds none). `programs_set` trims the path, so a path of spaces resets too.
+  `overrides` in `programs_get` and `programs_set` tells which programs have an override of the
+  operator; the UI shows "reset" only for them.

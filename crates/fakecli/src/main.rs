@@ -7,7 +7,10 @@
 //!   and it does this BEFORE it draws a dialog.
 //!
 //! Usage: `fake-cli [--script echo|perm-dialog|startup-dialog|queued-turn] [--kind claude|codex]
-//! [--record <file>] [--hook <program>] [--marker <file>] [--work-ms <n>] [--hook-gap-ms <n>] [--cli-session-id <id>] [PROMPT]`
+//! [--record <file>] [--hook-record <file>] [--hook <program>] [--marker <file>] [--work-ms <n>] [--hook-gap-ms <n>] [--cli-session-id <id>] [PROMPT]`
+//!
+//! `--hook-record <file>`: each reason that the hook program blocks a stop with is appended to the
+//! file as one JSON line `{"reason": "..."}`. A test reads it to see what the hook delivered.
 //!
 //! `PROMPT` (one positional argument, not starting with `--`) is the first prompt, as the `[PROMPT]` of a real CLI.
 //!
@@ -18,7 +21,9 @@
 //!
 //! Scripts (a "prompt" is a bracketed paste followed by `\r`, or typed text followed by `\r`):
 //! - `echo`: `SessionStart` at start (Codex kind: at the first prompt). On a prompt:
-//!   `UserPromptSubmit`, prints the text, works for `--work-ms`, `Stop`.
+//!   `UserPromptSubmit`, prints the text, works for `--work-ms`, `Stop`. If the hook program
+//!   prints a `block` decision for the `Stop`, the turn goes on: the CLI prints
+//!   `hook says: <reason>`, works again, and sends a new `Stop` with `stop_hook_active` true.
 //! - `perm-dialog`: on a prompt: `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, then the
 //!   dialog "1. Yes  2. No". `\r` or `1`: writes the `--marker` file, `PostToolUse`, `Stop`.
 //!   `2` or Esc: no event (Claude kind), or `Interrupt` (Codex kind), and back to the prompt.
@@ -64,6 +69,8 @@ struct Opts {
     script: Script,
     kind: Kind,
     record: Option<PathBuf>,
+    /// Where the reasons of blocked stops are written (`--hook-record`).
+    hook_record: Option<PathBuf>,
     hook: Option<PathBuf>,
     marker: Option<PathBuf>,
     work: Duration,
@@ -79,6 +86,7 @@ fn parse_args() -> Result<Opts, String> {
         script: Script::Echo,
         kind: Kind::Claude,
         record: None,
+        hook_record: None,
         hook: std::env::var_os("TOWER_HOOK")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
@@ -109,6 +117,7 @@ fn parse_args() -> Result<Opts, String> {
                 }
             }
             "--record" => opts.record = Some(value()?.into()),
+            "--hook-record" => opts.hook_record = Some(value()?.into()),
             "--hook" => opts.hook = Some(value()?.into()),
             "--marker" => opts.marker = Some(value()?.into()),
             "--work-ms" => {
@@ -294,8 +303,27 @@ impl App {
             .send("UserPromptSubmit", json!({ "prompt": text }));
         out(format!("\r\nyou said: {}\r\n", text.replace('\n', "\r\n")).as_bytes());
         self.work();
-        self.hooks.send("Stop", json!({}));
+        self.end_turn();
         true
+    }
+
+    /// The turn ends: send `Stop`. If the hook blocks it, the turn goes on with the reason, as a
+    /// real CLI does, and the next `Stop` has `stop_hook_active`.
+    fn end_turn(&mut self) {
+        let mut active = false;
+        while let Some(reason) = self.hooks.stop(active) {
+            if let Some(path) = &self.opts.hook_record
+                && let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            {
+                let _ = writeln!(file, "{}", json!({ "reason": reason }));
+            }
+            out(format!("\r\nhook says: {}\r\n", reason.replace('\n', "\r\n")).as_bytes());
+            self.work();
+            active = true;
+        }
     }
 
     fn perm_turn(&mut self, text: &str) -> bool {
@@ -315,7 +343,7 @@ impl App {
                     out(b"approved\r\n");
                     self.hooks.send_tool("PostToolUse", PERM_COMMAND);
                     self.work();
-                    self.hooks.send("Stop", json!({}));
+                    self.end_turn();
                     return true;
                 }
                 Next::Key(Key::Char('2') | Key::Esc) => {

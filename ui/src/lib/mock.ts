@@ -91,6 +91,8 @@ export interface MockConfig {
     startCallMs?: number;
     /** The pause between two starts of `team_resume`, in ms. Default 400 (the real app waits 2 s). */
     resumePauseMs?: number;
+    /** How long `program_test` takes, in ms. Default 0. */
+    programTestMs?: number;
     /** Text that the CLI has already printed when a session is made (it shows in the scrollback of the attach). */
     startingText?: string;
 }
@@ -261,11 +263,13 @@ export function createMockBackend(): Backend {
     const known: string[] = [];
     const sessions = new Map<string, MockSession>();
     const listeners = new Map<string, Set<(payload: unknown) => void>>();
+    // What the app finds when there is no override (the "reset" button goes back to this).
+    const FOUND: Record<ProgramName, string | null> = { claude: "/usr/local/bin/claude", codex: null, node: "/usr/bin/node" };
+    const VERSIONS: Record<ProgramName, string> = { claude: "2.1.330 (Claude Code)", codex: "codex-cli 0.9.1", node: "v24.10.0" };
     const programs: Programs = {
-        claude: "/usr/local/bin/claude",
-        codex: null,
-        node: "/usr/bin/node",
+        ...FOUND,
         hook: "/opt/agent-tower/bin/tower-hook",
+        overrides: { claude: null, codex: null, node: null },
     };
     let counter = 0;
     // Errors that the mock gives one time, to show what the UI does when a start fails.
@@ -275,7 +279,12 @@ export function createMockBackend(): Backend {
     // `MockControl.freeze`: no automatic status change while this is true.
     let frozen = false;
 
-    const settings: Settings = { openaiKeySet: false, openaiKeySource: null, imageModel: "gpt-image-2.6-sunburst" };
+    const settings: Settings = {
+        openaiKeySet: false,
+        openaiKeySource: null,
+        imageModel: "gpt-image-2.6-sunburst",
+        notifyOnQuestion: true,
+    };
     // The custom models of the app config (`[models]`).
     const custom: Record<ModelKind, string[]> = { claude: [], codex: [], image: [] };
 
@@ -807,13 +816,14 @@ export function createMockBackend(): Backend {
 
     // ---- command dispatch ----
 
-    function args<T>(raw: Record<string, unknown> | undefined, names: string[]): T {
+    /** `optional` names may be missing, as an `Option` argument of a Tauri command may be. */
+    function args<T>(raw: Record<string, unknown> | undefined, names: string[], optional: string[] = []): T {
         const a = raw ?? {};
         for (const name of names) {
             if (!(name in a)) throw `missing argument ${name}`;
         }
         for (const name of Object.keys(a)) {
-            if (!names.includes(name)) throw `unexpected argument ${name}`;
+            if (!names.includes(name) && !optional.includes(name)) throw `unexpected argument ${name}`;
         }
         return a as T;
     }
@@ -1044,7 +1054,14 @@ export function createMockBackend(): Backend {
                 return { ...settings };
             }
             case "settings_set": {
-                const a = args<{ openaiKey: string | null; imageModel: string | null }>(raw, ["openaiKey", "imageModel"]);
+                const a = args<{ openaiKey: string | null; imageModel: string | null; notifyOnQuestion?: boolean | null }>(
+                    raw,
+                    ["openaiKey", "imageModel"],
+                    ["notifyOnQuestion"],
+                );
+                if (a.notifyOnQuestion !== undefined && a.notifyOnQuestion !== null) {
+                    settings.notifyOnQuestion = a.notifyOnQuestion;
+                }
                 if (a.openaiKey !== null) {
                     const key = a.openaiKey.trim();
                     settings.openaiKeySet = key !== "";
@@ -1100,14 +1117,34 @@ export function createMockBackend(): Backend {
             }
             case "programs_get": {
                 args(raw, []);
-                return { ...programs };
+                return { ...programs, overrides: { ...programs.overrides } };
             }
             case "programs_set": {
                 const { name, path } = args<{ name: ProgramName; path: string }>(raw, ["name", "path"]);
                 if (name !== "claude" && name !== "codex" && name !== "node") throw `unknown program ${name}`;
-                if (path.trim() === "") throw "the path is empty";
-                programs[name] = path.trim();
-                return { ...programs };
+                if (path.trim() === "") {
+                    // An empty path removes the override. The app searches again, and shows what it finds.
+                    programs.overrides[name] = null;
+                    programs[name] = FOUND[name];
+                } else {
+                    programs.overrides[name] = path.trim();
+                    programs[name] = path.trim();
+                }
+                return { ...programs, overrides: { ...programs.overrides } };
+            }
+            case "program_test": {
+                const { name } = args<{ name: ProgramName }>(raw, ["name"]);
+                if (name !== "claude" && name !== "codex" && name !== "node") throw `unknown program ${name}`;
+                await sleep(config().programTestMs ?? 0);
+                const path = programs[name];
+                if (path === null) {
+                    return { ok: false, path: null, output: `The program "${name}" was not found. Set its path in Programs.` };
+                }
+                // A path whose file name starts with "broken" is a program that fails (for the e2e check).
+                if (/(^|\/)broken[^/]*$/.test(path)) {
+                    return { ok: false, path, output: "exit code 2: unknown option --version" };
+                }
+                return { ok: true, path, output: VERSIONS[name] };
             }
             case "task_list": {
                 const a = args<{ path: string }>(raw, ["path"]);

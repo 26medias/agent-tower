@@ -179,7 +179,7 @@ Special cases:
       This works because the permission prompt draws output each 0.6 s, a working turn each 0.1 s, and the idle prompt draws nothing.
 - **Startup dialogs have unsafe defaults (PROBED at step 0).** Enter on the Claude trust dialog selects "No, exit". Enter on the Codex update dialog selects "Update now".
   This is one more reason for the rule that the app never types into `starting`.
-- **Stop that the app blocked (M2).** When the Stop hook of the app returns `block` to deliver messages (4.5), the turn continues with no new event. That `Stop` keeps `working`. The next `Stop` gives `idle`.
+- **Stop that the app blocked (M2).** When the Stop hook of the app returns `block` to deliver messages (4.5), the turn continues with no new event. That `Stop` keeps `working`. The next `Stop` gives `idle`. Built on 2026-11-21 (Claude only): the app tells the machine `StopBlockedByApp` after it wrote the answer and before the machine gets that `Stop`.
 - The facts about `SubagentStop`, `Notification` timing and the Codex `Interrupt` event are PROBED.
 
 Fallback for a CLI with no hooks: PTY output activity gives `working` or `idle` only. Codex can also give
@@ -247,12 +247,14 @@ Sending is a tool call. Delivery into a session has three paths. The app selects
 
 | Status of the receiver | Path |
 |---|---|
-| `working` | **Stop hook.** When the turn ends, the Stop hook of the session asks the app for waiting messages. If there are some, it returns `{"decision":"block","reason":<messages>}`. The CLI continues the turn with the messages (mechanism PROBED for both CLIs). |
+| `working` | **Stop hook.** When the turn ends, the Stop hook of the session asks the app for waiting messages. If there are some, it returns `{"decision":"block","reason":<messages>}`. The CLI continues the turn with the messages (mechanism PROBED for both CLIs). **Built for Claude on 2026-11-21.** Codex keeps the paste path: item N14 is open, and the app never blocks a Codex stop. |
 | `idle`, `done` | **PTY paste.** The app writes `ESC[200~` + text + `ESC[201~` + `\r` to the PTY in one write (bracketed paste; PROBED for both CLIs, also with multi-line text). |
 | `question`, `starting` | **No delivery.** The messages stay in the queue. |
 | `stopped` | The messages stay in the queue. `employee_start` from a manager resumes the session with them. |
 
 The agent can also pull at any time with `inbox()` or `wait()`.
+
+**The Stop hook as built (2026-11-21, Claude employees only).** `tower-hook` sends the `Stop` event with `"reply": true` and waits 2 s at the most for an answer on the same socket. The app answers `block` only if the session is `working` and has had a first turn, a message waits that is not held, fewer than 5 stops in a row were blocked, and (when the payload has `stop_hook_active` = `true`) a message newer than the last block waits. It takes the messages with the same code as the paste (same selection, order, text, `> ` mark, sanitize rule and holds), at most 60000 bytes at one time. The `reason` starts with the line `Messages from your team arrived while you worked. They are from employees, not from the operator.`. The app marks the messages delivered only after the answer was written to the hook program. In every other case (no message, a dead hook program, a time out, the setup session, a Codex session) the hook prints nothing and the turn ends as before: the status goes to `idle` and the paste delivers later. A blocked stop keeps the status `working` (4.3). Details of the wire: `docs/ipc-final.md`.
 
 Each delivered message has a clear header, for example `[message from Maya (Project Manager), task T-12]`.
 The role instructions say that messages from other employees arrive in this form, also as "blocked by hook" text,
@@ -500,7 +502,7 @@ Placeholder art is used in M1 to M3. The visual work (M4) can move earlier if th
 | N11 | How `question` ends when the operator denies a prompt, both CLIs. Claude Ctrl-C and the 2 s quiet rule | PROBED at step 0 (4.3). Evidence in `probes/step0/` |
 | N12 | Claude permission mode and tool rules for `read_only` and `edit_in_worktree` | CLOSED in M3 (2026-11-21), PROBED with six `claude -p --model haiku` calls (4.7) |
 | N13 | First message as the `[PROMPT]` argument when a startup dialog shows. Codex `check_for_update_on_startup=false` | WORKS, PROBED at step 0 (4.2). Not traced: Codex without `--no-daemon`, and the Codex option "Continue without trusting" hooks |
-| N14 | A Codex agent acts on a message that the Stop hook delivers, when the role instructions explain it | NOT TRACED. Close at the start of M2 |
+| N14 | A Codex agent acts on a message that the Stop hook delivers, when the role instructions explain it | NOT TRACED. Still open on 2026-11-21: the Stop hook is built for Claude only, and Codex sessions get messages by paste and `inbox()`. Close it before the Stop hook is turned on for Codex |
 | N15 | Nested worktrees: parent `CLAUDE.md` loading, test runners that collect `.swarm/worktrees/` | Changed in M3 (2026-11-21): the session stays in the main checkout, so Claude loads the `CLAUDE.md` of the main checkout as before. A worktree copy of `CLAUDE.md` loading when an employee reads files in the worktree, and test runners that collect `.swarm/worktrees/`: NOT TRACED |
 
 ## 9. Points closed by the operator (2026-11-19)

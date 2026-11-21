@@ -6,6 +6,7 @@
     import { store } from "$lib/store.svelte";
     import { buildingScale } from "$lib/sizes";
     import Building from "./Building.svelte";
+    import BrowseButton from "./BrowseButton.svelte";
     import ConfirmButton from "./ConfirmButton.svelte";
 
     let pathInput = $state("");
@@ -106,6 +107,12 @@
                     aria-describedby={showError ? "floor-path-error" : undefined}
                     bind:value={pathInput}
                     oninput={() => store.clearOpenError()}
+                />
+                <BrowseButton
+                    onpick={(picked) => {
+                        pathInput = picked;
+                        store.clearOpenError();
+                    }}
                 />
                 <button type="submit" class="primary">open</button>
             </div>

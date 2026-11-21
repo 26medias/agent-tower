@@ -7,6 +7,13 @@
 //! image_model = "..."     # the image model; the default is `logo::DEFAULT_IMAGE_MODEL`
 //! ```
 //!
+//! The interface settings are in the table `[interface]` (since 2026-11-21):
+//!
+//! ```toml
+//! [interface]
+//! notify_on_question = false   # a desktop notification when an agent asks a question; the default is true
+//! ```
+//!
 //! The rules of the floors for commands with no question (since 2026-11-21) are in the table
 //! `[floor_permissions]`. Each key is the real absolute path of a floor, and the value is the
 //! list of the rules. The file is in the config folder of the app, not in a project folder, so an
@@ -47,6 +54,9 @@ pub struct SettingsView {
     pub openai_key_set: bool,
     pub openai_key_source: Option<KeySource>,
     pub image_model: String,
+    /// `[interface] notify_on_question`: show a desktop notification when an agent asks a
+    /// question and the window has no focus. The default is `true`.
+    pub notify_on_question: bool,
 }
 
 /// The table of a config file. A missing or unreadable file is an empty table.
@@ -114,6 +124,40 @@ pub(crate) fn view(file: &Path, env: &EnvMap) -> SettingsView {
         openai_key_set: key.is_some(),
         openai_key_source: key.map(|(_, source)| source),
         image_model: image_model(file),
+        notify_on_question: notify_on_question(file),
+    }
+}
+
+/// `[interface] notify_on_question`. A missing file, a missing key or a value that is not a
+/// boolean gives the default: `true`.
+pub(crate) fn notify_on_question(file: &Path) -> bool {
+    read_table(file)
+        .get("interface")
+        .and_then(toml::Value::as_table)
+        .and_then(|section| section.get("notify_on_question"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Set `[interface] notify_on_question`. The default value (`true`) removes the key, and an
+/// empty table goes too, so the file stays as small as it was.
+pub(crate) fn set_notify_on_question(table: &mut toml::Table, on: bool) {
+    let section = table
+        .entry("interface")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let now_empty = match section.as_table_mut() {
+        Some(section) => {
+            if on {
+                section.remove("notify_on_question");
+            } else {
+                section.insert("notify_on_question".to_owned(), toml::Value::Boolean(false));
+            }
+            section.is_empty()
+        }
+        None => false,
+    };
+    if now_empty {
+        table.remove("interface");
     }
 }
 

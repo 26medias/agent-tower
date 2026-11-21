@@ -8,11 +8,14 @@
 //      E2E_REPAIR_SHOTS (folder for the screenshots of e2e/repair-checks.mjs; default
 //      /tmp/agent-tower-review/final-b-repair),
 //      E2E_LAST_SHOTS (folder for the screenshots of e2e/last-checks.mjs; default
-//      /tmp/agent-tower-review/final-b3).
+//      /tmp/agent-tower-review/final-b3),
+//      E2E_FOUR_SHOTS (folder for the screenshots of e2e/four-checks.mjs; default
+//      /tmp/agent-tower-review/four/shots).
 import { chromium } from "playwright-core";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fourChecks } from "./four-checks.mjs";
 import { lastChecks } from "./last-checks.mjs";
 import { repairChecks } from "./repair-checks.mjs";
 
@@ -26,6 +29,9 @@ mkdirSync(repairShots, { recursive: true });
 // The screenshots of the last checks (e2e/last-checks.mjs).
 const lastShots = process.env.E2E_LAST_SHOTS ?? "/tmp/agent-tower-review/final-b3";
 mkdirSync(lastShots, { recursive: true });
+// The screenshots of the checks of the four items of 2026-11-21 (e2e/four-checks.mjs).
+const fourShots = process.env.E2E_FOUR_SHOTS ?? "/tmp/agent-tower-review/four/shots";
+mkdirSync(fourShots, { recursive: true });
 
 function findChrome() {
     if (process.env.E2E_CHROME) return process.env.E2E_CHROME;
@@ -2110,6 +2116,9 @@ try {
 
     // 22. The last repairs of the review "final-b2" (N1 to N3, the one row of buttons, the Team activity list).
     await lastChecks({ page, check, url, shots: lastShots });
+
+    // 23. The four items of 2026-11-21: Browse..., the notification switch, test and reset of the programs.
+    await fourChecks({ page, check, url, shots: fourShots });
 
     await page.screenshot({ path: shot });
     console.log("screenshot:", shot);

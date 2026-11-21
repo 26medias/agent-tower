@@ -73,6 +73,8 @@ export interface Settings {
     openaiKeySet: boolean;
     openaiKeySource: "config" | "env" | null;
     imageModel: string;
+    /** `[interface] notify_on_question` of the app config. The default is true. */
+    notifyOnQuestion: boolean;
 }
 
 export interface ModelOption {
@@ -98,6 +100,17 @@ export interface Programs {
     codex: string | null;
     node: string | null;
     hook: string;
+    /** The path that the operator set for each program. Null: no override (the app searches). */
+    overrides: Record<ProgramName, string | null>;
+}
+
+/** Result of `program_test`: `<path> --version` with the environment of a session. */
+export interface ProgramTestResult {
+    ok: boolean;
+    /** The path that was tried. Null when the app found no program with this name. */
+    path: string | null;
+    /** The first line of the output, or the error text. At most 200 characters. */
+    output: string;
 }
 
 /** Message on the output channel of `session_attach`: base64 of the output bytes, in order. */

@@ -14,8 +14,8 @@
 
 use crate::views::{
     AttachResult, Cli, Employee, FloorDefaults, FloorEntry, FloorView, ModelCatalog, OutputMessage,
-    PermissionsSaved, Programs, ResumeProgress, SessionView, Settings, TaskDetail, TaskDiff,
-    TaskMerge, TaskStatus, TaskView,
+    PermissionsSaved, ProgramTestResult, Programs, ResumeProgress, SessionView, Settings,
+    TaskDetail, TaskDiff, TaskMerge, TaskStatus, TaskView,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -234,9 +234,12 @@ pub async fn settings_set(
     tower: State<'_, Shared>,
     openai_key: Option<String>,
     image_model: Option<String>,
+    notify_on_question: Option<bool>,
 ) -> Result<Settings, String> {
     blocking(&tower, move |t| {
-        t.settings_set(openai_key, image_model).map(Settings::from)
+        t.settings_set(openai_key, image_model)?;
+        t.settings_set_interface(notify_on_question)
+            .map(Settings::from)
     })
     .await
 }
@@ -359,6 +362,19 @@ pub async fn programs_set(
 ) -> Result<Programs, String> {
     blocking(&tower, move |t| {
         t.programs_set(&name, path.trim()).map(Programs::from)
+    })
+    .await
+}
+
+/// Run `<program> --version` with the environment of a session. It starts no model session.
+/// `name` is `claude`, `codex` or `node`.
+#[tauri::command]
+pub async fn program_test(
+    tower: State<'_, Shared>,
+    name: String,
+) -> Result<ProgramTestResult, String> {
+    blocking(&tower, move |t| {
+        t.program_test(&name).map(ProgramTestResult::from)
     })
     .await
 }

@@ -320,7 +320,7 @@ pub(crate) fn run_login_shell(shell: &OsStr, script: &str, timeout: Duration) ->
 
 /// Start a command. A script that was just written can give "text file busy" for a moment,
 /// when another thread forks while the write handle is open. Retry a few times.
-fn spawn_with_retry(command: &mut Command) -> io::Result<std::process::Child> {
+pub(crate) fn spawn_with_retry(command: &mut Command) -> io::Result<std::process::Child> {
     let mut attempts = 0;
     loop {
         match command.spawn() {

@@ -17,6 +17,7 @@ import type {
     OutputMessage,
     PermissionsSaved,
     ProgramName,
+    ProgramTestResult,
     Programs,
     SessionChangedPayload,
     NoticePayload,
@@ -156,7 +157,11 @@ export const debugPaste = (sessionId: string, text: string) => call<void>("debug
 
 export const programsGet = () => call<Programs>("programs_get");
 
+/** An empty `path` removes the override (the "reset" button): the app then searches again. */
 export const programsSet = (name: ProgramName, path: string) => call<Programs>("programs_set", { name, path });
+
+/** Runs `<path> --version` with the environment of a session. It starts no model session. */
+export const programTest = (name: ProgramName) => call<ProgramTestResult>("program_test", { name });
 
 // ---- Commands (docs/ipc-visuals-init.md, section 4) ----
 
@@ -174,9 +179,12 @@ export const setupStart = (path: string, cli: CliKind, rows: number, cols: numbe
 
 export const settingsGet = () => call<Settings>("settings_get");
 
-/** A null argument means "no change". An empty `openaiKey` removes the key from the app config. */
-export const settingsSet = (openaiKey: string | null, imageModel: string | null) =>
-    call<Settings>("settings_set", { openaiKey, imageModel });
+/**
+ * A null argument means "no change". An empty `openaiKey` removes the key from the app config.
+ * `notifyOnQuestion` is the switch of the desktop notification (`[interface]` of the app config).
+ */
+export const settingsSet = (openaiKey: string | null, imageModel: string | null, notifyOnQuestion: boolean | null = null) =>
+    call<Settings>("settings_set", { openaiKey, imageModel, notifyOnQuestion });
 
 // ---- Commands (docs/ipc-settings.md, section 4) ----
 

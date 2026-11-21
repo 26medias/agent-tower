@@ -167,6 +167,17 @@
                 />
                 <span>Show the debug paste bar under the terminal (Ctrl+Shift+D)</span>
             </label>
+            <label class="check">
+                <input
+                    type="checkbox"
+                    name="notifyOnQuestion"
+                    checked={store.settings?.notifyOnQuestion ?? true}
+                    disabled={!store.settings}
+                    onchange={(e) => void store.setNotifyOnQuestion(e.currentTarget.checked)}
+                />
+                <span>Desktop notification when an agent asks a question</span>
+            </label>
+            <p class="hint">The app shows it only while its window has no focus, or is minimized. A click on it does nothing.</p>
         </section>
     </div>
 </div>

@@ -4,6 +4,15 @@
 //! `{"session": "<TOWER_SESSION>", "event": <hook JSON of the CLI>}`.
 //! One connection carries one line. Bytes after the first line are ignored.
 //!
+//! # Request and answer (Stop hook, spec 4.5)
+//!
+//! A line can have the extra field `"reply": true`. The sender then waits for one answer line on
+//! the same connection. The server keeps the connection open and gives the message a
+//! [`HookReply`]. The app calls [`HookReply::send`] to write the answer line, or drops the
+//! reply to close the connection with no answer. The sender treats a close with no answer as
+//! "nothing to say". The answer is not part of the order logic: the line is released in order
+//! as usual, and the answer is written later by whoever holds the reply.
+//!
 //! # Order
 //!
 //! A CLI runs its hooks one after another: each `tower-hook` process ends before the next one
@@ -39,9 +48,9 @@ use std::io::{self, BufRead, BufReader};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -59,23 +68,104 @@ pub const GIVE_UP_AFTER: Duration = Duration::from_millis(1200);
 /// `GIVE_UP_AFTER + LATE_GRACE` (1.5 s).
 const LATE_GRACE: Duration = Duration::from_millis(300);
 
+/// The longest time that a write of an answer waits for the sender to read it.
+const REPLY_WRITE_LIMIT: Duration = Duration::from_millis(500);
+
 /// One hook event, with the session that it belongs to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookMessage {
     pub session: String,
     pub event: Value,
+    /// `Some` when the sender asked for an answer (`"reply": true`).
+    pub reply: Option<HookReply>,
 }
 
-/// Parse one wire line. `None` means the line is malformed and must be dropped.
+/// The open connection of a sender that waits for an answer. Clones share one connection. The
+/// connection closes when the last clone is dropped, or after [`HookReply::send`].
+#[derive(Clone)]
+pub struct HookReply {
+    inner: Arc<ReplyInner>,
+}
+
+struct ReplyInner {
+    stream: Mutex<Option<UnixStream>>,
+    accepted: Instant,
+}
+
+impl HookReply {
+    fn new(stream: UnixStream, accepted: Instant) -> HookReply {
+        HookReply {
+            inner: Arc::new(ReplyInner {
+                stream: Mutex::new(Some(stream)),
+                accepted,
+            }),
+        }
+    }
+
+    /// The time since the server accepted the connection. The sender has a time limit, so an
+    /// answer that is very late has no reader.
+    pub fn age(&self) -> Duration {
+        self.inner.accepted.elapsed()
+    }
+
+    /// Write one answer line (`text` and `\n`) and close the connection. It fails when the
+    /// sender is gone or does not read, or when an answer was sent already. The write waits for
+    /// at most [`REPLY_WRITE_LIMIT`].
+    pub fn send(&self, text: &str) -> io::Result<()> {
+        use std::io::Write;
+        let stream = self
+            .inner
+            .stream
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| io::Error::other("the answer was sent already"))?;
+        stream.set_write_timeout(Some(REPLY_WRITE_LIMIT))?;
+        let mut line = Vec::with_capacity(text.len() + 1);
+        line.extend_from_slice(text.as_bytes());
+        line.push(b'\n');
+        (&stream).write_all(&line)?;
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for HookReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HookReply")
+    }
+}
+
+impl PartialEq for HookReply {
+    fn eq(&self, other: &HookReply) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+/// Parse one wire line. `None` means the line is malformed and must be dropped. The message has
+/// no reply: use `parse_request` to learn if the sender wants an answer.
 pub fn parse_line(line: &[u8]) -> Option<HookMessage> {
+    parse_request(line).map(|(message, _)| message)
+}
+
+/// Like `parse_line`, and also tells if the line has `"reply": true`.
+fn parse_request(line: &[u8]) -> Option<(HookMessage, bool)> {
     let mut value: Value = serde_json::from_slice(line).ok()?;
     let object = value.as_object_mut()?;
     let session = object.get("session")?.as_str()?.to_owned();
     if session.is_empty() {
         return None;
     }
+    let wants_reply = object.get("reply").and_then(Value::as_bool) == Some(true);
     let event = object.remove("event")?;
-    Some(HookMessage { session, event })
+    Some((
+        HookMessage {
+            session,
+            event,
+            reply: None,
+        },
+        wants_reply,
+    ))
 }
 
 /// The server. Drop it to stop it and to remove the socket file.
@@ -199,7 +289,8 @@ fn accept_loop(
         let Ok(stream) = stream else {
             continue;
         };
-        let deadline = Instant::now() + GIVE_UP_AFTER;
+        let accepted_at = Instant::now();
+        let deadline = accepted_at + GIVE_UP_AFTER;
         if to_dispatcher
             .send(Event::Accepted { seq, deadline })
             .is_err()
@@ -215,7 +306,7 @@ fn accept_loop(
         let spawned = thread::Builder::new()
             .name("hookrx-conn".into())
             .spawn(move || {
-                let outcome = serve_connection(stream, read_deadline, &dropped);
+                let outcome = serve_connection(stream, accepted_at, read_deadline, &dropped);
                 let _ = sender.send(Event::Finished {
                     seq: this_seq,
                     outcome,
@@ -231,12 +322,24 @@ fn accept_loop(
     }
 }
 
-/// Read the one line of a connection. Count a bad or too long line as dropped.
-fn serve_connection(stream: UnixStream, deadline: Instant, dropped: &AtomicU64) -> Outcome {
+/// Read the one line of a connection. Count a bad or too long line as dropped. A sender that
+/// wants an answer keeps its connection in the reply of the message.
+fn serve_connection(
+    stream: UnixStream,
+    accepted: Instant,
+    deadline: Instant,
+    dropped: &AtomicU64,
+) -> Outcome {
+    let writer = stream.try_clone().ok();
     let mut reader = BufReader::new(stream);
     match read_line(&mut reader, deadline) {
-        Line::Complete(bytes) => match parse_line(&bytes) {
-            Some(message) => Outcome::Message(message),
+        Line::Complete(bytes) => match parse_request(&bytes) {
+            Some((mut message, wants_reply)) => {
+                if wants_reply && let Some(writer) = writer {
+                    message.reply = Some(HookReply::new(writer, accepted));
+                }
+                Outcome::Message(message)
+            }
             None => {
                 dropped.fetch_add(1, Ordering::SeqCst);
                 Outcome::Nothing
@@ -670,5 +773,94 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700);
+    }
+
+    // ---- the reply of a request (Stop hook) ------------------------------------------------
+
+    fn read_answer(stream: &mut UnixStream) -> Vec<u8> {
+        use std::io::Read;
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        let mut bytes = Vec::new();
+        let _ = stream.read_to_end(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn a_line_with_reply_true_gets_a_reply_and_the_answer_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sock");
+        let (_receiver, messages) = HookReceiver::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .write_all(b"{\"session\":\"s\",\"event\":{\"a\":1},\"reply\":true}\n")
+            .unwrap();
+        let message = messages.recv_timeout(WAIT).unwrap();
+        assert_eq!(message.event, json!({"a": 1}));
+        let reply = message.reply.expect("a reply");
+        assert!(reply.age() < Duration::from_secs(2));
+        reply.send(r#"{"decision":"block","reason":"x"}"#).unwrap();
+        assert_eq!(
+            read_answer(&mut client),
+            b"{\"decision\":\"block\",\"reason\":\"x\"}\n"
+        );
+        // One answer only.
+        assert!(reply.send("again").is_err());
+    }
+
+    #[test]
+    fn a_line_without_reply_true_has_no_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sock");
+        let (_receiver, messages) = HookReceiver::bind(&path).unwrap();
+        for line in [
+            &b"{\"session\":\"s\",\"event\":{}}\n"[..],
+            b"{\"session\":\"s\",\"event\":{},\"reply\":false}\n",
+            b"{\"session\":\"s\",\"event\":{},\"reply\":\"yes\"}\n",
+        ] {
+            send_raw(&path, line);
+            assert!(messages.recv_timeout(WAIT).unwrap().reply.is_none());
+        }
+    }
+
+    #[test]
+    fn a_dropped_reply_closes_the_connection_with_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sock");
+        let (_receiver, messages) = HookReceiver::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .write_all(b"{\"session\":\"s\",\"event\":{},\"reply\":true}\n")
+            .unwrap();
+        let message = messages.recv_timeout(WAIT).unwrap();
+        // The connection stays open while the reply lives, also after the thread that read the
+        // line has ended.
+        std::thread::sleep(Duration::from_millis(100));
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let early = std::io::Read::read(&mut client, &mut byte);
+        assert!(
+            matches!(&early, Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+            "the connection must stay open: {early:?}"
+        );
+        drop(message);
+        assert_eq!(read_answer(&mut client), b"");
+    }
+
+    #[test]
+    fn an_answer_to_a_client_that_has_gone_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sock");
+        let (_receiver, messages) = HookReceiver::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .write_all(b"{\"session\":\"s\",\"event\":{},\"reply\":true}\n")
+            .unwrap();
+        let reply = messages.recv_timeout(WAIT).unwrap().reply.unwrap();
+        // `shutdown`, not `drop`: another test can fork a process while this one runs, and that
+        // process holds a copy of the descriptor until it execs. A shutdown acts on the socket.
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(reply.send("late").is_err());
     }
 }

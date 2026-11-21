@@ -646,7 +646,7 @@ fn send_to_a_stopped_employee_that_the_caller_may_start_starts_it() {
 }
 
 #[test]
-fn send_to_a_stopped_employee_that_the_caller_may_not_start_waits_and_goes_out_later() {
+fn send_to_a_stopped_employee_that_the_caller_may_not_start_waits_and_goes_out_at_the_stop_hook() {
     let (rig, _ceo, _eng) = rig_with_two();
     rig.add_employee("qa", Some("ceo"));
     let before = rig.calls().len();
@@ -665,23 +665,25 @@ fn send_to_a_stopped_employee_that_the_caller_may_not_start_waits_and_goes_out_l
     assert_eq!(rig.calls().len(), before, "nothing started");
     assert_eq!(rig.db().count_pending_messages("qa").unwrap(), 1);
 
-    // The operator starts `qa`. After its first turn the message is pasted.
+    // The operator starts `qa`. The message goes out at the end of its first turn, through the
+    // Stop hook.
     let started = rig.start("qa");
     let qa = started.session_id;
-    wait_for("the waiting message is pasted after the first turn", || {
-        rig.paste_text(&qa).is_some()
+    wait_for("the waiting message is given by the Stop hook", || {
+        rig.hook_text(&qa).is_some()
     });
     assert_eq!(
-        rig.paste_text(&qa).unwrap(),
+        rig.hook_text(&qa).unwrap(),
         delivered("ENG", "Role of eng", "eng", "need a test run")
     );
+    assert!(rig.paste_text(&qa).is_none(), "no paste");
     wait_for("it is marked delivered", || {
         rig.db().count_pending_messages("qa").unwrap() == 0
     });
 }
 
 #[test]
-fn a_message_to_a_working_employee_waits_and_is_pasted_after_the_turn_ends() {
+fn a_message_to_a_working_employee_waits_and_goes_out_at_the_stop_hook() {
     let rig = Rig::new();
     rig.create_floor();
     rig.add_employee("eng", Some("ceo"));
@@ -710,14 +712,13 @@ fn a_message_to_a_working_employee_waits_and_is_pasted_after_the_turn_ends() {
     // The "message waiting" mark shows.
     assert!(rig.events.latest(&eng).unwrap().message_waiting);
 
-    wait_for("the paste after the turn", || {
-        rig.paste_text(&eng).is_some()
-    });
+    wait_for("the Stop hook gives it", || rig.hook_text(&eng).is_some());
     assert_eq!(
-        rig.paste_text(&eng).unwrap(),
+        rig.hook_text(&eng).unwrap(),
         delivered("Ada", "CEO", "ceo", "after your turn")
     );
-    // The paste is written before the row is marked: wait for the mark.
+    assert!(rig.paste_text(&eng).is_none(), "no paste");
+    // The answer is written before the row is marked: wait for the mark.
     wait_for("the row is marked delivered", || {
         rig.db().count_pending_messages("eng").unwrap() == 0
     });
@@ -753,17 +754,17 @@ fn nothing_is_pasted_in_question_and_the_message_goes_out_after_the_answer() {
 
     // The operator answers the dialog. Then the turn ends, and the message goes out.
     rig.tower.pty_write(&eng, b"1").unwrap();
-    wait_for("the paste", || rig.paste_text(&eng).is_some());
+    wait_for("the Stop hook gives it", || rig.hook_text(&eng).is_some());
     let record = rig.record(&eng);
-    assert_eq!(record[0], b'1', "the answer of the operator comes first");
+    assert_eq!(record, b"1", "only the answer of the operator is typed");
     assert_eq!(
-        rig.paste_text(&eng).unwrap(),
+        rig.hook_text(&eng).unwrap(),
         delivered("Ada", "CEO", "ceo", "do not approve this")
     );
 }
 
 #[test]
-fn several_waiting_messages_go_in_one_paste_oldest_first() {
+fn several_waiting_messages_go_in_one_block_of_the_stop_hook_oldest_first() {
     let rig = Rig::new();
     rig.create_floor();
     rig.add_employee("eng", Some("ceo"));
@@ -780,16 +781,11 @@ fn several_waiting_messages_go_in_one_paste_oldest_first() {
     rig.tool("ceo", "send", json!({"to": "eng", "text": "third"}));
     assert!(rig.record(&eng).is_empty());
 
-    wait_for("the paste", || rig.paste_text(&eng).is_some());
-    let record = String::from_utf8(rig.record(&eng)).unwrap();
+    wait_for("the Stop hook gives them", || rig.hook_text(&eng).is_some());
+    assert!(rig.record(&eng).is_empty(), "no paste");
+    assert_eq!(rig.hook_reasons(&eng).len(), 1, "one block for all three");
     assert_eq!(
-        record.matches(ESC_PASTE_START).count(),
-        1,
-        "one paste: {record:?}"
-    );
-    assert_eq!(record.matches(ESC_PASTE_END).count(), 1);
-    assert_eq!(
-        rig.paste_text(&eng).unwrap(),
+        rig.hook_text(&eng).unwrap(),
         [
             delivered("Ada", "CEO", "ceo", "first"),
             delivered("Maya", "Project Manager", "pm", "second"),
@@ -1231,16 +1227,18 @@ fn a_failed_start_keeps_the_message_waiting_and_the_answer_is_not_an_error() {
     assert!(rows[0].delivered_at.is_none(), "{rows:?}");
     assert!(lock(&rig.events.started).is_empty(), "no start event");
 
-    // The operator starts the employee. After its first turn the message is pasted, one time.
+    // The operator starts the employee. At the end of its first turn the Stop hook gives the
+    // message, one time.
     fix_the_program(&rig);
     let pm = rig.start("pm").session_id;
-    wait_for("the waiting message is pasted", || {
-        rig.paste_text(&pm).is_some()
+    wait_for("the Stop hook gives the waiting message", || {
+        rig.hook_text(&pm).is_some()
     });
     assert_eq!(
-        rig.paste_text(&pm).unwrap(),
+        rig.hook_text(&pm).unwrap(),
         delivered("Ada", "CEO", "ceo", "please plan")
     );
+    assert_eq!(rig.hook_reasons(&pm).len(), 1);
     wait_for("the row is marked delivered", || {
         rig.db().count_pending_messages("pm").unwrap() == 0
     });
@@ -1277,11 +1275,11 @@ fn a_message_is_waiting_again_when_the_new_session_stops_before_its_first_turn()
 
     fix_the_program(&rig);
     let pm = rig.start("pm").session_id;
-    wait_for("the message is pasted into the next session", || {
-        rig.paste_text(&pm).is_some()
+    wait_for("the Stop hook gives it in the next session", || {
+        rig.hook_text(&pm).is_some()
     });
     assert_eq!(
-        rig.paste_text(&pm).unwrap(),
+        rig.hook_text(&pm).unwrap(),
         delivered("Ada", "CEO", "ceo", "first words")
     );
     wait_for("it is marked delivered", || {
@@ -1294,7 +1292,7 @@ fn a_message_is_waiting_again_when_the_new_session_stops_before_its_first_turn()
 /// `wait`), a new message is not pasted, and the "message waiting" mark shows. At the first
 /// `working` the first message is marked delivered, and the new message is pasted after the turn.
 #[test]
-fn in_the_gap_before_the_first_prompt_nothing_is_pasted_and_the_first_message_is_held() {
+fn in_the_gap_before_the_first_prompt_nothing_is_sent_and_the_first_message_is_held() {
     let (rig, _ceo, _eng) = rig_with_two();
     // The CLI waits 3 s after each hook call: `SessionStart`, then 3 s, then the first prompt.
     lock(&rig.shared.extra_args).extend(["--hook-gap-ms".into(), "3000".into()]);
@@ -1344,13 +1342,13 @@ fn in_the_gap_before_the_first_prompt_nothing_is_pasted_and_the_first_message_is
     assert_eq!(rig.db().count_pending_messages("pm").unwrap(), 2);
 
     // The first turn runs. The first message is delivered, and the other one is pasted.
-    wait_for("the second message is pasted", || {
-        rig.paste_text(&pm).is_some()
+    wait_for("the Stop hook gives the second message", || {
+        rig.hook_text(&pm).is_some()
     });
     assert_eq!(
-        rig.paste_text(&pm).unwrap(),
+        rig.hook_text(&pm).unwrap(),
         delivered("Ada", "CEO", "ceo", "in the gap"),
-        "the first message is not pasted again"
+        "the first message is not given again"
     );
     wait_for("both rows are delivered", || {
         rig.db()
@@ -1401,7 +1399,7 @@ fn a_session_resumed_with_no_message_gets_the_messages_that_come_later() {
 /// 60000 bytes. The others (the new message too, when it does not fit) are pasted after the first
 /// turn, in order. Each message goes out one time. The answer of the tool says what happened.
 #[test]
-fn the_first_message_of_a_start_is_limited_and_the_rest_is_pasted_after_the_first_turn() {
+fn the_first_message_of_a_start_is_limited_and_the_rest_goes_out_at_the_stop_hook() {
     let (rig, _ceo, _eng) = rig_with_two();
     rig.add_employee("qa", Some("ceo"));
     // `eng` may not start `qa`, so its messages wait. Each message has its own letter.
@@ -1443,10 +1441,23 @@ fn the_first_message_of_a_start_is_limited_and_the_rest_is_pasted_after_the_firs
     );
     assert!(!first.contains("start now"), "the new message is not first");
 
-    // The others are pasted after the first turn, in order, and each exactly one time.
+    // The others go out at the end of the first turn through the Stop hook, in order, and each
+    // exactly one time. A block has 60000 bytes at most, so it takes more than one block.
     let qa = call.app_session_id;
-    wait_for("the rest is pasted", || rig.paste_text(&qa).is_some());
-    let pasted = rig.paste_text(&qa).unwrap();
+    wait_for("the rest is given", || {
+        rig.db().count_pending_messages("qa").unwrap() == 0
+    });
+    wait_for("the last block is recorded", || {
+        rig.hook_texts(&qa).join("\n\n").contains("start now")
+    });
+    let blocks = rig.hook_texts(&qa);
+    assert!(blocks.len() >= 2, "{} blocks", blocks.len());
+    assert!(
+        blocks.iter().all(|b| b.len() <= 60_000),
+        "a block is too long"
+    );
+    assert!(rig.paste_text(&qa).is_none(), "no paste");
+    let pasted = blocks.join("\n\n");
     let mut last = 0;
     for letter in ['c', 'd', 'e', 'f', 'g'] {
         let block = letter.to_string().repeat(20_000);
@@ -2048,4 +2059,381 @@ fn over_the_connection_limit_the_server_answers_503_and_a_closed_connection_free
             == 200
     });
     drop(idle);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The Stop hook (spec 4.5, first path)
+// ---------------------------------------------------------------------------------------------
+
+/// The reason that the Stop hook gives for these messages: the first line, a blank line, and the
+/// messages as a paste has them.
+fn stop_reason(messages: &[String]) -> String {
+    format!(
+        "{}\n\n{}",
+        tower_core::app::STOP_HOOK_HEADER,
+        messages.join("\n\n")
+    )
+}
+
+/// Make the next CLI a process that sends no hook and reads nothing. The test sends the hook
+/// events itself (`Rig::send_hook`, `Rig::stop_request`).
+fn raw_program(rig: &Rig) {
+    *lock(&rig.shared.program) = Some((
+        PathBuf::from("/bin/sh"),
+        vec!["-c".to_owned(), "exec sleep 120".to_owned()],
+    ));
+}
+
+/// A rig with a live `ceo` (fake-cli) and a raw `eng` session that the test drives: the floor, `eng`
+/// with the manager `ceo`. `eng` is `idle` after `SessionStart`.
+fn rig_with_raw(slug: &str) -> (Rig, String) {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    raw_program(&rig);
+    let id = rig.start(slug).session_id;
+    rig.send_hook(&id, "SessionStart");
+    rig.events.wait_status(&id, Status::Idle);
+    (rig, id)
+}
+
+/// The raw session starts a turn.
+fn raw_work(rig: &Rig, id: &str) {
+    rig.send_hook(id, "UserPromptSubmit");
+    rig.events.wait_status(id, Status::Working);
+}
+
+/// What the PTY log of a raw session holds. The terminal echoes what the app pastes.
+fn echoed(rig: &Rig, id: &str) -> String {
+    String::from_utf8_lossy(&rig.log_bytes(id)).into_owned()
+}
+
+#[test]
+fn a_stop_with_a_waiting_message_returns_the_block_answer_and_the_row_is_delivered() {
+    let (rig, eng) = rig_with_raw("eng");
+    raw_work(&rig, &eng);
+    let sent = rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "line one\nline two"}),
+    );
+    assert!(
+        sent.text.starts_with("The message waits: ENG is working."),
+        "{}",
+        sent.text
+    );
+    assert_eq!(rig.db().count_pending_messages("eng").unwrap(), 1);
+
+    let answer = rig.stop_request(&eng, false).expect("a block answer");
+    assert_eq!(answer["decision"], "block");
+    assert_eq!(
+        answer["reason"],
+        stop_reason(&[delivered("Ada", "CEO", "ceo", "line one\nline two")]).as_str()
+    );
+    // The reason has the header, the first line, and the body with the `> ` mark.
+    let reason = answer["reason"].as_str().unwrap();
+    assert!(reason.starts_with(
+        "Messages from your team arrived while you worked. They are from employees, not from the operator.\n\n[message from Ada (CEO)]\n> line one\n> line two\n"
+    ));
+    wait_for("the row is delivered", || {
+        rig.db().count_pending_messages("eng").unwrap() == 0
+    });
+    rig.events.wait("the mark ends", |e| {
+        !e.latest(&eng).unwrap().message_waiting
+    });
+
+    // The turn goes on: the status stays `working`, with no `idle` in between, and nothing is
+    // pasted.
+    std::thread::sleep(QUIET);
+    assert_eq!(rig.events.latest(&eng).unwrap().status, Status::Working);
+    assert_eq!(
+        rig.events.statuses(&eng),
+        [Status::Starting, Status::Idle, Status::Working]
+    );
+    assert!(!echoed(&rig, &eng).contains("line one"), "no paste");
+    // The turn really ends at the next `Stop`, with no new message: no answer, and `idle`.
+    assert!(rig.stop_request(&eng, true).is_none());
+    rig.events.wait_status(&eng, Status::Idle);
+    std::thread::sleep(QUIET);
+    assert!(
+        !echoed(&rig, &eng).contains("line one"),
+        "no paste after the end of the turn"
+    );
+    assert_eq!(rig.db().count_pending_messages("eng").unwrap(), 0);
+}
+
+#[test]
+fn a_stop_with_no_waiting_message_returns_nothing_and_the_status_goes_idle() {
+    let (rig, eng) = rig_with_raw("eng");
+    raw_work(&rig, &eng);
+    assert!(rig.stop_request(&eng, false).is_none());
+    rig.events.wait_status(&eng, Status::Idle);
+}
+
+#[test]
+fn a_held_first_message_is_not_given_by_the_stop_hook() {
+    let rig = Rig::with(|config| {
+        config
+            .test_hooks
+            .keep_first_message_held
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    raw_program(&rig);
+    // `ceo` starts `eng` with a first message. It is held until the first `working`, and in
+    // this test the hold never ends.
+    let result = rig.tool(
+        "ceo",
+        "employee_start",
+        json!({"employee": "eng", "message": "the first one"}),
+    );
+    assert!(!result.is_error, "{result:?}");
+    let eng = rig
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.slug == "eng")
+        .unwrap()
+        .app_session_id;
+    rig.send_hook(&eng, "SessionStart");
+    raw_work(&rig, &eng);
+    assert_eq!(rig.db().count_pending_messages("eng").unwrap(), 1, "held");
+    rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "the second one"}),
+    );
+    assert_eq!(rig.db().count_pending_messages("eng").unwrap(), 2);
+
+    let answer = rig.stop_request(&eng, false).expect("a block answer");
+    let reason = answer["reason"].as_str().unwrap();
+    assert!(reason.contains("> the second one"), "{reason}");
+    assert!(
+        !reason.contains("the first one"),
+        "the held message must stay: {reason}"
+    );
+    wait_for("the second message is delivered", || {
+        rig.db()
+            .all_messages()
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "the second one" && m.delivered_at.is_some())
+    });
+    let rows = rig.db().all_messages().unwrap();
+    let first = rows.iter().find(|m| m.text == "the first one").unwrap();
+    assert!(
+        first.delivered_at.is_none(),
+        "the held message is still waiting"
+    );
+}
+
+#[test]
+fn a_message_in_question_is_not_given_by_the_stop_hook() {
+    let (rig, eng) = rig_with_raw("eng");
+    raw_work(&rig, &eng);
+    rig.send_hook(&eng, "PreToolUse");
+    rig.send_hook(&eng, "PermissionRequest");
+    rig.events.wait_status(&eng, Status::Question);
+    rig.tool("ceo", "send", json!({"to": "eng", "text": "not now"}));
+    assert_eq!(rig.db().count_pending_messages("eng").unwrap(), 1);
+    let answer = rig.stop_request(&eng, false);
+    assert!(
+        answer.is_none(),
+        "no answer in question: {answer:?}, statuses {:?}",
+        rig.events.statuses(&eng)
+    );
+    // The `Stop` is a normal one now: the status goes `idle`, and the PASTE path delivers the
+    // message. It is not given by the hook, and it is not lost.
+    rig.events.wait_status(&eng, Status::Idle);
+    wait_for("the paste path delivers it", || {
+        echoed(&rig, &eng).contains("not now")
+    });
+}
+
+#[test]
+fn the_setup_session_and_a_codex_session_never_get_a_block() {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.add_employee("cdx", Some("ceo"));
+    rig.make_codex("cdx");
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    raw_program(&rig);
+
+    // Codex: a message waits, the session works, a Stop asks for an answer.
+    let cdx = rig.start("cdx").session_id;
+    raw_work(&rig, &cdx);
+    rig.tool("ceo", "send", json!({"to": "cdx", "text": "for codex"}));
+    assert_eq!(rig.db().count_pending_messages("cdx").unwrap(), 1);
+    assert!(
+        rig.stop_request(&cdx, false).is_none(),
+        "Codex gets no block"
+    );
+    rig.events.wait_status(&cdx, Status::Idle);
+    // The paste path delivers it (to the terminal).
+    wait_for("the paste for Codex", || {
+        echoed(&rig, &cdx).contains("for codex")
+    });
+    wait_for("the row is delivered", || {
+        rig.db().count_pending_messages("cdx").unwrap() == 0
+    });
+
+    // The setup session: a message for the slug `setup` (stored by hand: no tool can send one).
+    let setup = rig
+        .tower
+        .setup_start(&rig.cwd, CliKind::Claude, 24, 80)
+        .unwrap()
+        .session_id;
+    rig.send_hook(&setup, "SessionStart");
+    rig.events.wait_status(&setup, Status::Idle);
+    raw_work(&rig, &setup);
+    rig.db()
+        .insert_message("ceo", "setup", "for setup", 1, None)
+        .unwrap();
+    assert!(
+        rig.stop_request(&setup, false).is_none(),
+        "setup gets no block"
+    );
+    assert_eq!(rig.db().count_pending_messages("setup").unwrap(), 1);
+}
+
+#[test]
+fn a_failed_write_to_the_hook_marks_nothing_and_the_stop_goes_through() {
+    let (rig, eng) = rig_with_raw("eng");
+    raw_work(&rig, &eng);
+    rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "nobody reads this"}),
+    );
+    // The hook program is gone before the app writes.
+    rig.stop_request_and_leave(&eng);
+    // The `Stop` is applied as a normal one: `idle`. Then the paste path delivers the message.
+    rig.events.wait_status(&eng, Status::Idle);
+    wait_for("the paste path delivers it", || {
+        echoed(&rig, &eng).contains("nobody reads this")
+    });
+    wait_for("the row is delivered", || {
+        rig.db().count_pending_messages("eng").unwrap() == 0
+    });
+}
+
+#[test]
+fn at_most_five_stops_in_a_row_are_blocked_then_the_paste_path_delivers() {
+    let (rig, eng) = rig_with_raw("eng");
+    raw_work(&rig, &eng);
+    for number in 1..=5 {
+        let text = format!("message {number}");
+        rig.tool("ceo", "send", json!({"to": "eng", "text": text}));
+        let answer = rig
+            .stop_request(&eng, number > 1)
+            .unwrap_or_else(|| panic!("block {number}"));
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("> {text}")),
+            "{answer}"
+        );
+        wait_for("the row is delivered", || {
+            rig.db().count_pending_messages("eng").unwrap() == 0
+        });
+    }
+    // A sixth message, and a sixth stop in the row (`stop_hook_active` is true): no block.
+    rig.tool("ceo", "send", json!({"to": "eng", "text": "message 6"}));
+    assert!(
+        rig.stop_request(&eng, true).is_none(),
+        "the sixth is not blocked"
+    );
+    // The turn ends (`idle`), and the paste path delivers the sixth message.
+    rig.events.wait_status(&eng, Status::Idle);
+    wait_for("the paste of the sixth message", || {
+        echoed(&rig, &eng).contains("message 6")
+    });
+    wait_for("the row is delivered", || {
+        rig.db().count_pending_messages("eng").unwrap() == 0
+    });
+    // The five blocked stops kept `working`: one `working` to `idle` change in all.
+    assert_eq!(
+        rig.events
+            .statuses(&eng)
+            .iter()
+            .filter(|s| **s == Status::Idle)
+            .count(),
+        2,
+        "idle at the start and idle at the end: {:?}",
+        rig.events.statuses(&eng)
+    );
+    // The row ended: in a new turn the hook blocks again.
+    rig.send_hook(&eng, "UserPromptSubmit");
+    rig.events.wait("working again", |e| {
+        e.statuses(&eng).last() == Some(&Status::Working)
+    });
+    rig.tool("ceo", "send", json!({"to": "eng", "text": "message 7"}));
+    assert!(
+        rig.stop_request(&eng, false).is_some(),
+        "a new turn can be blocked again"
+    );
+}
+
+/// The whole path with the real programs: `fake-cli` runs the real `tower-hook`, the hook asks the
+/// app, the answer blocks the stop, and `fake-cli` goes on with the reason, as Claude does. The
+/// status never shows `idle` between the first `working` and the end, the row is marked delivered
+/// BEFORE the final `idle` event, and no paste is written.
+#[test]
+fn the_real_hook_delivers_at_the_end_of_the_turn_and_the_status_never_flashes_idle() {
+    let rig = Rig::new();
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    lock(&rig.shared.extra_args).extend(["--work-ms".into(), "1500".into()]);
+    let eng = rig.start("eng").session_id;
+    rig.events.wait_status(&eng, Status::Working);
+    rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "please also do this"}),
+    );
+
+    rig.events.wait("the turn ends", |e| {
+        e.statuses(&eng).last() == Some(&Status::Idle)
+            && e.statuses(&eng).contains(&Status::Working)
+    });
+    // The turn went on with the message, so the CLI worked a second time before the end.
+    wait_for("the hook text reached the CLI", || {
+        rig.hook_text(&eng).is_some()
+    });
+    assert_eq!(
+        rig.hook_texts(&eng),
+        [delivered("Ada", "CEO", "ceo", "please also do this")]
+    );
+    assert_eq!(
+        rig.events.statuses(&eng),
+        [
+            Status::Starting,
+            Status::Idle,
+            Status::Working,
+            Status::Idle
+        ]
+    );
+    assert!(
+        rig.record(&eng).is_empty(),
+        "no paste: the CLI got no typed byte"
+    );
+    // Time: the row was delivered before the last `idle` event of the session.
+    let rows = rig.db().all_messages().unwrap();
+    let delivered_at = rows[0].delivered_at.expect("delivered");
+    let events = rig.db().status_events(&eng).unwrap();
+    let (last_status, last_at) = events.last().unwrap().clone();
+    assert_eq!(last_status, "idle");
+    assert!(delivered_at <= last_at, "{delivered_at} <= {last_at}");
+    let working_at = events.iter().find(|(s, _)| s == "working").unwrap().1;
+    assert!(delivered_at >= working_at);
 }

@@ -115,7 +115,14 @@ fn paste_of(rig: &Rig, slug: &str) -> String {
         .find(|c| c.slug == slug)
         .unwrap()
         .app_session_id;
-    rig.paste_text(&id).unwrap_or_default()
+    // A message for a session that is working comes through the Stop hook, not by a paste. The
+    // tests here ask what the session got, by any path.
+    let mut got = rig.paste_text(&id).unwrap_or_default();
+    for text in rig.hook_texts(&id) {
+        got.push('\n');
+        got.push_str(&text);
+    }
+    got
 }
 
 /// A hook that writes a marker file when it runs. `fail` makes the hook end with an error.

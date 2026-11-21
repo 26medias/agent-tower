@@ -116,23 +116,37 @@ impl Hooks {
     /// Send one event. It waits for `tower-hook` to end, as a CLI does for a hook.
     /// A problem is not an error: a hook must never change a turn.
     pub fn send(&self, event: &str, extra: Value) {
-        let Some(program) = &self.program else {
-            return;
-        };
+        let _ = self.run(event, extra);
+    }
+
+    /// Send a `Stop` event, as a CLI does, and return the reason if the hook blocked the stop.
+    /// `active` is the field `stop_hook_active`: true when the turn goes on after an earlier
+    /// block. A real CLI continues the turn with the reason as a new instruction.
+    pub fn stop(&self, active: bool) -> Option<String> {
+        let output = self.run("Stop", json!({ "stop_hook_active": active }))?;
+        let answer: Value = serde_json::from_str(output.lines().next()?).ok()?;
+        if answer.get("decision")?.as_str()? != "block" {
+            return None;
+        }
+        answer.get("reason")?.as_str().map(str::to_owned)
+    }
+
+    /// Run the hook program with the payload. It returns what the program printed on stdout.
+    fn run(&self, event: &str, extra: Value) -> Option<String> {
+        let program = self.program.as_ref()?;
         let payload = self.payload(event, extra);
-        let Ok(mut child) = Command::new(program)
+        let mut child = Command::new(program)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-        else {
-            return;
-        };
+            .ok()?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(payload.to_string().as_bytes());
         }
-        let _ = child.wait();
+        let output = child.wait_with_output().ok();
         std::thread::sleep(self.gap);
+        output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     pub fn send_tool(&self, event: &str, command: &str) {

@@ -4,6 +4,7 @@
     // sees must be here, in the middle of the office area.
     import { onMount } from "svelte";
     import { store } from "$lib/store.svelte";
+    import BrowseButton from "./BrowseButton.svelte";
 
     let field = $state<HTMLInputElement | null>(null);
     let path = $state("");
@@ -70,6 +71,12 @@
                     aria-describedby={showError ? "start-path-error" : undefined}
                     bind:value={path}
                     oninput={() => store.clearOpenError()}
+                />
+                <BrowseButton
+                    onpick={(picked) => {
+                        path = picked;
+                        store.clearOpenError();
+                    }}
                 />
                 <button type="submit" class="primary" disabled={busy || path.trim() === ""}>Open</button>
             </div>
