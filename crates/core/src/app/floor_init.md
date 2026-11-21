@@ -202,21 +202,17 @@ complete and that they can stop this session.
     - `edit-in-worktree`, in a git repository: the CLI edits files inside the task worktrees
       (`.swarm/worktrees/`) and the report files with no question. An edit of a file of the main
       checkout asks the operator. A shell command (tests, builds, a browser) still asks the
-      operator, unless the operator's own CLI settings or the table `[permissions]` of
-      `floor.toml` permit it. Use it for seats that write code, documents, data or assets, and
+      operator, unless the operator's own CLI settings or the rules that the operator sets in
+      Settings for this floor permit it. Use it for seats that write code, documents, data or assets, and
       for seats that must run and build things.
     - `edit-in-worktree`, with no git repository: the CLI edits files in the project folder with
       no question, as before, because no worktree exists.
     - `ask-always`: the CLI asks before each action. Use it for a seat that must ask the operator
       before each action.
-    - **`[permissions]` in `floor.toml`.** The operator can list commands that need no question,
-      for example `allow = ["Bash(cargo test:*)", "Bash(git status:*)"]`. The app adds these
-      rules to each `claude` employee, except an `ask-always` employee. The operator sets the list
-      in Settings. Do NOT write this table, and do not ask the operator for it in the team
-      proposal. It applies at the next start of a session. A rule must match the command as the
-      CLI sees it after the hooks of the operator. On a machine with a hook that rewrites
-      commands (for example RTK), `cargo test` becomes `rtk cargo test`, and the rule must name
-      that form.
+    - **Commands with no question.** The operator can list commands that need no question, for
+      example `Bash(cargo test:*)`. The operator sets these rules in Settings. They are not in
+      the project folder. Do NOT write them anywhere, and do not ask the operator for them in the
+      team proposal. They apply at the next start of a session.
 - **Permission with the CLI `codex`.** The CLI does not enforce `read-only` or
   `edit-in-worktree` on this machine: only the role text limits the employee. So write the limit
   as an order in the role text (for example "Do not edit files."). `ask-always` does not work
@@ -328,8 +324,8 @@ write program code: give each change of code to the engineer who owns that area.
 ## The file `.swarm/floor.toml`
 
 This file already exists. It has the version, the name of the floor and maybe default values.
-Do not change the lines `version`, `name` and the tables `[defaults]` and `[permissions]`. Add or
-change only the table `[brand]`.
+Do not change the lines `version`, `name` and the table `[defaults]`. Add or change only the
+table `[brand]`.
 Example of a complete file after your change:
 
 ```
@@ -345,11 +341,9 @@ description = "A web shop for hand-made candles."
 logo_prompt = "A golden honeycomb hexagon with a small bee."
 ```
 
-The tables `[defaults]` and `[permissions]` can be missing or empty. Keep them as they are. Do not
-add or change `[permissions]`: the app checks it after each turn of this session, and it puts the
-old list back if you change it. If the file has no `[brand]` table, add it at the end of the file.
-A rule in `[permissions]` must match the command as the CLI sees it after the hooks of the
-operator (on a machine with the RTK hook, `cargo test` becomes `rtk cargo test`).
+The table `[defaults]` can be missing or empty. Keep it as it is. If the file has no `[brand]`
+table, add it at the end of the file. The commands with no question are not in this file: the
+operator sets them in Settings, and the app keeps them outside the project folder.
 
 ## Rules
 

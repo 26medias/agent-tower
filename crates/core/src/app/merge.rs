@@ -38,7 +38,9 @@ use super::tasks::{Actor, parse_task_ref, status_body, task_error};
 use super::{FloorHandle, OPERATOR, Result, TowerCore, locked, now_ms, other};
 use crate::gitwork::{self, MergeResult, Snapshot};
 use crate::model::Employee;
-use crate::store::{GitAfter, KIND_TASK_STATUS, NewTaskMessage, TaskRecord, TaskStatus};
+use crate::store::{
+    GitAfter, KIND_TASK_STATUS, NewTaskMessage, TaskEventRecord, TaskRecord, TaskStatus,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -50,6 +52,15 @@ pub const DIFF_STAT_MAX_BYTES: usize = 20_000;
 
 /// The note of the status event of a discard. `task_merge` reads it to know a discarded task.
 const DISCARD_NOTE: &str = "discarded by the operator";
+
+/// Did the operator discard this task? A discarded task has no branch and no worktree any more,
+/// and its events have the status event with `DISCARD_NOTE`.
+pub(super) fn was_discarded(task: &TaskRecord, events: &[TaskEventRecord]) -> bool {
+    task.branch.is_none()
+        && events
+            .iter()
+            .any(|e| e.kind == "status" && e.text.as_deref() == Some(DISCARD_NOTE))
+}
 
 /// The most file names in the text of a blocked merge.
 const FILES_SHOWN: usize = 10;
@@ -264,11 +275,7 @@ impl TowerCore {
         }
         // A discarded task has no branch and no worktree any more. That is not "nothing to
         // merge": the work was thrown away, and the task must not become `done`.
-        if task.branch.is_none()
-            && events
-                .iter()
-                .any(|e| e.kind == "status" && e.text.as_deref() == Some(DISCARD_NOTE))
-        {
+        if was_discarded(&task, &events) {
             return Err(format!(
                 "Task T-{id} was discarded by the operator: discarded, nothing to merge. The status stays {}.",
                 task.status.as_str()

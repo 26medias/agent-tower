@@ -58,59 +58,117 @@ change:
 | `task_merge` | `path`, `id` | `TaskMerge` | The operator merges the branch of a task. The task must be in `review` or `blocked`, else the command is an error. A merge that the app could not do (another branch in the main checkout, uncommitted changes, a conflict) is a result with `merged: false`: the task is `blocked` and `message` says why. A task with no branch gets the status `done` with the message "There is nothing to merge" |
 | `task_diff` | `path`, `id` | `TaskDiff` | Only committed changes show. The app commits the worktree when the task goes to `review` |
 | `task_discard` | `path`, `id` | `TaskView` | For a task that is not `done` (or that is `done`, and its worktree still exists). The app removes the worktree (`git worktree remove --force`) and the branch (`git branch -D`) of that one task, and sets the status `blocked` with the note "discarded by the operator". The UI asks for a confirmation first |
-| `floor_permissions_get` | `path` | `string[]` | The rules of `[permissions] allow` of `floor.toml`, as stored |
-| `floor_permissions_set` | `path`, `allow` | `string[]` | Checks each rule (below). One bad rule refuses the whole call and writes nothing. The text is trimmed and a duplicate is dropped. At most 100 rules. Returns the stored list. The new rules apply at the next start of a session |
+| `floor_permissions_get` | `path` | `string[]` | The rules of the floor, as stored in the app config (table `[floor_permissions]`, key = the real path of the floor). Empty when the operator set no list |
+| `floor_permissions_set` | `path`, `allow` | `PermissionsSaved` | Checks each rule (below). One bad rule refuses the whole call and writes nothing. The text is trimmed and a duplicate is dropped. At most 100 rules. Writes the app config (not the project folder), and removes the old `[permissions]` table from `floor.toml` (the rest of the file stays). Returns the stored list and the warnings. The new rules apply at the next start of a session |
+| `floor_permissions_proposed` | `path` | `string[]` | New (2026-11-21). The rules of the old `[permissions]` table of `floor.toml` that pass the check, with no duplicate. It is empty when the app config has an entry for the floor already (also an empty list), or when the file has no table. The app never imports these rules by itself, because an agent can have written them. The UI shows them in Settings with a button "Use these rules". The click calls `floor_permissions_set` with the list that the operator sees |
 | `team_resume` | `path` | `ResumeProgress` | Resumes the employees of `FloorView.resumable` in a background thread, one by one, with a pause of 2 s between two starts. Returns at once with `{ done: 0, total: N }`. Errors: nothing to resume, or a resume runs already |
 
 Errors that the commands give: `Task T-12 has the status todo. Only a task in review or blocked can
 be merged.`, `Task T-12 is done and has no worktree. The app does not discard a done task.`,
-`Task T-12 was discarded by the operator: discarded, nothing to merge. The status stays blocked.`, `the rule "Bash(*)" is
+`Task T-12 was discarded by the operator: discarded, nothing to merge. The status stays blocked.`, `Task T-12 was discarded by the operator: discarded, so you cannot set it to done. The status stays blocked.` (an employee with `task_update`; the operator can set `done`), `the rule "Bash(*)" is
 refused: ...`, `there is no session of the last team to resume`, `the last team is resuming now`.
+
+### Where the rules are (changed 2026-11-21)
+
+```ts
+interface PermissionsSaved {
+  allow: string[];     // the stored rules, trimmed, with no duplicate
+  warnings: string[];  // one text for each rule that runs the code of the project
+}
+```
+
+`floor_permissions_set` returned `string[]` before. It returns `PermissionsSaved` now. The old
+array is the field `allow`. A warning is `<rule>: This rule lets each agent of the floor run the
+project's own code with no question.` The rule is saved. The warning is for the operator to read.
+The UI shows each warning next to the saved list.
+
+The rules are in the app config file (`programs.toml` in the config folder, mode 0600), in the
+table `[floor_permissions]`. Each key is the real absolute path of a floor (symbolic links
+resolved), and the value is the array of its rules:
+
+```toml
+[floor_permissions]
+"/home/you/my project.v2" = ["Bash(rtk cargo test:*)", "Read(./src/**)"]
+```
+
+They are not in the project folder. A Codex employee, or any shell command that is allowed, can
+write `floor.toml`, so a list in that file is a list that an agent can change (finding H1 of the
+second review). The app does not read `[permissions]` of `floor.toml` for a session any more.
+When a floor is opened and the app config has no entry for it, and `floor.toml` has the old table,
+the app only offers the rules in `floor_permissions_proposed`. `floor_forget` removes the entry of
+the floor. The setup session has no put-back guard any more.
 
 ### The check of a rule
 
-Changed on 2026-11-21 (finding H1). A rule is 1 to 200 characters. Each character is printable
-ASCII (0x20 to 0x7E). The whole entry is one of:
+Changed on 2026-11-21 (finding H1, twice). A rule is 1 to 200 characters. Each character is
+printable ASCII (0x20 to 0x7E). The whole entry is one of:
 
 - `WebSearch` alone (`WebSearch(...)` with a pattern is refused);
 - `Tool(pattern)` with `Tool` one of `Bash`, `Read`, `Glob`, `Grep`, `WebFetch`. The pattern has no
   `(` and no `)`, so one entry is one rule (`Bash(ls) Bash(rm:*)` and `Bash(ls:*))` are refused).
 
-The pattern must not be empty, and it depends on the tool:
+The check is a guard against the mistakes of the operator. A list of blocked programs can never be
+complete, so each program that is not on a list is allowed: the list is the choice of the operator,
+and an agent cannot write it. The pattern must not be empty, and it depends on the tool:
 
 - `Bash`: the pattern does not start with a space. The first word (up to the first space or `:`)
   is not empty and has only `[A-Za-z0-9._/+-]`, so `Bash(*)`, `Bash(* *)`, `Bash(?*)`, `Bash(*.sh)`
-  and `Bash(:*)` are refused. The first word is not a program that runs other commands or
-  destroys data or sends data out: `sh`, `bash`, `zsh`, `dash`, `fish`, `env`, `xargs`, `eval`,
-  `exec`, `sudo`, `su`, `doas`, `nohup`, `time`, `timeout`, `nice`, `python`, `python3` (and
-  `python3.12` and so on), `node`, `perl`, `ruby`, `php`, `rm`, `dd`, `mkfs`, `chmod`, `chown`,
-  `curl`, `wget`, `ssh`, `scp`, `nc` (a folder in front, like `/bin/sh`, does not help; the case
-  does not matter). `git` needs a subcommand that starts with a lower-case letter, and it is not
-  `push`, `reset`, `clean`, `checkout` or `config`: `Bash(git status:*)` is allowed, `Bash(git:*)`
-  and `Bash(git push:*)` are refused.
+  and `Bash(:*)` are refused.
+  - `rtk` is unwrapped first: the check applies to the words after `rtk`. `Bash(rtk:*)`, `rtk`
+    with an option after it (`rtk -v ...`), and `rtk` with `proxy`, `run`, `err`, `test`,
+    `summary`, `pipe`, `rewrite`, `hook`, `init`, `trust`, `untrust` or `config` are refused: they
+    run any command or they change the settings of `rtk`.
+  - The program (the word after `rtk` when there is one) is not one of these, which run other
+    commands, change or destroy data, or send data out: `sh`, `bash`, `zsh`, `dash`, `fish`,
+    `ksh`, `csh`, `tcsh`, `pwsh`, `powershell`, `busybox`, `env`, `xargs`, `eval`, `exec`, `sudo`,
+    `su`, `doas`, `pkexec`, `nohup`, `time`, `timeout`, `nice`, `setsid`, `stdbuf`, `flock`,
+    `unshare`, `script`, `watch`, `parallel`, `strace`, `ltrace`, `gdb`, `command`, `builtin`,
+    `source`, `.`, `python`, `python3`, `pypy`, `pypy3`, `node`, `deno`, `bun`, `lua`, `perl`,
+    `ruby`, `php`, `find`, `awk`, `gawk`, `mawk`, `sed`, `tar`, `tee`, `cp`, `mv`, `ln`, `rm`,
+    `dd`, `mkfs`, `shred`, `truncate`, `unlink`, `chmod`, `chown`, `rsync`, `curl`, `wget`, `ssh`,
+    `scp`, `nc`, `ncat`, `socat`, `telnet`, `ftp`, `docker`, `podman`, `kubectl`, `vim`, `vi`,
+    `nano`, `emacs`, `kill`, `pkill`, `systemctl`, `mount`, `umount`, `crontab`, `at`, and a few
+    wrappers (`ssh-agent`, `sshpass`, `expect`, `chroot`, `nsenter`, `ionice`, `taskset`,
+    `numactl`, `runuser`, `setpriv`, `start-stop-daemon`, `run-parts`, `systemd-run`, `screen`,
+    `tmux`). A folder in front (`/bin/sh`) does not help, the case does not matter, and a
+    versioned name is the same program (`python3.12`, `lua5.4`).
+  - `git` has an allow list. The word after `git` is one of `status`, `log`, `diff`, `show`,
+    `blame`, `ls-files`, `rev-parse`, `describe`. Every other subcommand, no subcommand, and an
+    option before the subcommand are refused. A pattern with `--output`, `--exec` or `-c` is
+    refused too. `Bash(git status:*)` is allowed. `Bash(git:*)`, `Bash(git push:*)`,
+    `Bash(git rebase:*)` and `Bash(git log --output=x:*)` are refused.
+  - The build and package tools are allowed, with a warning: `cargo`, `npm`, `npx`, `pnpm`,
+    `yarn`, `make`, `just`, `uv`, `pip`, `go`, `gradle`, `mvn`, `pytest`, `tox`, `bundle`, `rake`,
+    `composer`, `dotnet`, also after `rtk`. A program that a relative path names
+    (`./scripts/check.sh`) gets the warning too. They run the code of the project.
+  - Each other program is allowed.
 - `Read`, `Glob`, `Grep`: a path that is relative to the project (not `/...`, not `~...`) with no
-  `..` part. The bare names `Read`, `Glob` and `Grep` are refused now: they open the whole disk.
+  `..` part. The bare names `Read`, `Glob` and `Grep` are refused: they open the whole disk. A
+  pattern that starts with `.swarm/state` or `./.swarm/state`, a pattern that has
+  `**/.swarm/state`, and `.swarm/**` or `.swarm/*` are refused: that folder has the database and
+  the logs of the floor.
 - `WebFetch`: only `domain:<host>`, with a host of `[A-Za-z0-9.-]` that has a dot and no empty
-  part, so `WebFetch(*)` and `WebFetch(domain:*)` are refused.
+  part, so `WebFetch(*)` and `WebFetch(domain:*)` are refused. An IP address (also `127.1` and
+  `0x7f.0.0.1`: a host whose last part starts with a digit), `localhost`, and a host that ends
+  with `.localhost`, `.local`, `.internal` or `.localdomain` are refused.
 
 A rule must match the command as Claude sees it after the hooks of the operator. On a machine with
 a hook that rewrites commands (for example RTK), `cargo test` becomes `rtk cargo test`, so the rule
 is `Bash(rtk cargo test:*)`. The UI repeats the check (`ui/src/lib/permissions.ts`) and the Rust
-side checks again (`crates/core/src/model.rs`, `check_allow_rule`). A rule that a hand edit of
-`floor.toml` puts in the file and that fails the check is dropped when a session starts. The
-error text of a refusal names the reason.
+side checks again (`crates/core/src/model.rs`, `check_allow_rule`). A rule in the app config that
+fails the check (the check can change in a new version, or someone edited the file by hand) is
+dropped when a session starts. The error text of a refusal names the reason.
 
-The setup session can write `floor.toml` (it runs with `acceptEdits`). So the app keeps the value
-of `[permissions]` that it read when the setup session started. After each turn of the setup
-session (and at its stop), if the table in the file is not that value, the app writes the old
-value back and sends the `notice` `permissions_restored`. A change that the operator makes with
-`floor_permissions_set` while the setup session runs is the new value.
+What stays open. The build and package tools run the code of the project, and an agent of the
+floor can write the code of its own worktree. So a rule for them lets that agent run code with no
+question. The warning says this. The app config is outside the project, but a Codex employee has no
+enforced limits on this machine, so it can write the file if it tries.
 
 ## Events
 
 | Event | Payload | When |
 |---|---|---|
-| `notice` | `{ path, kind, text }` | Something that the operator must see. `kind` is `task_blocked` (a merge that the app could not do: `text` is `Task T-12 is blocked: <reason>`), `resume_failed` (`text` is `Could not resume <slug>: <error>`), `permissions_restored` (new, 2026-11-21: `text` is `The setup agent tried to change the commands with no question. The app put the old list back.`) or `task_done_unmerged` (new, 2026-11-21: the operator set `done` on a task that has a branch. `text` is `Task T-12 is set to done, but its branch <branch> is not merged. The app did not merge it. Use the merge on the board to merge it.`). The UI shows a toast |
+| `notice` | `{ path, kind, text }` | Something that the operator must see. `kind` is `task_blocked` (a merge that the app could not do: `text` is `Task T-12 is blocked: <reason>`), `resume_failed` (`text` is `Could not resume <slug>: <error>`) or `task_done_unmerged` (new, 2026-11-21: the operator set `done` on a task that has a branch. `text` is `Task T-12 is set to done, but its branch <branch> is not merged. The app did not merge it. Use the merge on the board to merge it.`). The UI shows a toast. The kind `permissions_restored` is removed (2026-11-21): the rules are not in the project folder any more, so the setup agent cannot change them |
 
 `tasks-changed` follows each merge, discard and worktree. `floor-changed` follows each start of the
 resume, so that `resumeProgress` and `resumable` stay current.

@@ -209,6 +209,10 @@ fn an_assignment_makes_a_worktree_and_a_branch_and_tells_the_assignee_the_rules(
     );
     assert!(pasted.contains("Do not commit."), "{pasted}");
     assert!(
+        pasted.contains("never put a secret in the worktree"),
+        "{pasted}"
+    );
+    assert!(
         pasted.contains(&format!(
             "write your report to {}/.swarm/reports/T-1.md",
             rig.cwd.display()
@@ -1241,6 +1245,30 @@ fn the_operator_can_set_done_with_a_warning_and_discard_a_done_task_that_has_a_w
             .contains("discarded, nothing to merge")
     );
     assert_eq!(task(&rig, id).status, TaskStatus::Blocked);
+}
+
+/// A discarded task has no branch. The pm cannot set it to `done` with `task_update` (the same
+/// rule as `task_merge`). The operator can.
+#[test]
+fn an_employee_cannot_set_done_on_a_discarded_task_but_the_operator_can() {
+    let rig = git_rig();
+    let id = task_in_review(&rig, "Add a", "eng", "a.txt", "A\n");
+    rig.tower.task_discard(&rig.cwd, id).unwrap();
+    for slug in ["pm", "eng"] {
+        let result = rig.tool(
+            slug,
+            "task_update",
+            json!({"task": "T-1", "status": "done"}),
+        );
+        let text = refused(&result);
+        assert!(text.contains("discarded by the operator"), "{slug}: {text}");
+        assert_eq!(task(&rig, id).status, TaskStatus::Blocked, "{slug}");
+    }
+    let after = rig
+        .tower
+        .task_update(&rig.cwd, id, TaskStatus::Done, None)
+        .unwrap();
+    assert_eq!(after.status, TaskStatus::Done);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -570,6 +570,7 @@ pub(super) fn assign_orders(
    Branch: {branch} (it starts from the branch {base}, at commit {commit})\n\
    Use a path that starts with {wt} for each file that you write or edit. Your terminal starts in the main checkout, so go to the worktree folder before a command that changes files (for example the tests or the build).\n\
 2. Do not commit. Do not run git add, git checkout, git merge, git reset or git push. The app commits your changes when you set the status review.\n\
+   The app refuses a commit that has secrets or build output, but its list is not complete: never put a secret in the worktree.\n\
 3. {start}\n\
 4. {complete} The report goes in the reports folder of the main checkout, not in the worktree.\n\
 5. {answer}",

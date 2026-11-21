@@ -13,8 +13,8 @@
 //! | `edit-in-worktree`, floor is a git repository | `manual` | edits under `.swarm/worktrees/` and `.swarm/reports/` |
 //! | `edit-in-worktree`, no repository | `acceptEdits` (as in M1) | none |
 //!
-//! Each employee also gets the rule `mcp__tower` and the rules of `[permissions] allow` of the
-//! floor (not for `ask-always`). The deny rules for the files that the app reads stay for all.
+//! Each employee also gets the rule `mcp__tower` and the rules of the floor from the app config
+//! (not for `ask-always`). The deny rules for the files that the app reads stay for all.
 //!
 //! PROBED with `claude -p --model haiku` (Claude 2.1.330, evidence in
 //! `/tmp/agent-tower-review/m3/probe/`): in `manual` mode, the rule `Edit(//abs/.swarm/worktrees/**)`

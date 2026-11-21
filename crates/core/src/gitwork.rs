@@ -620,29 +620,81 @@ pub const SNAPSHOT_FILE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// The most files that one snapshot commits.
 pub const SNAPSHOT_FILES_MAX: usize = 2000;
 
-/// A new file in one of these folders is build output or a package cache.
-const SNAPSHOT_BLOCKED_FOLDERS: [&str; 6] = [
+/// A new file in one of these folders is build output or a package cache. The app compares the
+/// folder names with no regard to letter case.
+const SNAPSHOT_BLOCKED_FOLDERS: [&str; 14] = [
     "target",
     "node_modules",
     "dist",
     "build",
     ".venv",
     "__pycache__",
+    "out",
+    ".next",
+    ".nuxt",
+    "coverage",
+    ".gradle",
+    ".tox",
+    ".pytest_cache",
+    ".mypy_cache",
 ];
+
+/// A new file with a folder of this name in its path holds keys or credentials.
+const SECRET_FOLDERS: [&str; 3] = [".aws", ".ssh", ".gnupg"];
 
 /// The most paths that the text of a refusal lists.
 const PROBLEMS_SHOWN: usize = 20;
 
-/// Does a file name look like a secret? `.env` and `.env.*` (not `.env.example`), `*.pem`,
-/// `*.key`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx`.
+/// Does a file name look like a secret? The list is not complete. It has:
+/// - `.env` and `.env.*` (not `.env.example`), and `*.env` (not `example.env`, `sample.env`);
+/// - `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`;
+/// - `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`;
+/// - `credentials`, `credentials.json`, `.npmrc`, `.netrc`, `.pypirc`.
 fn is_secret_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    (name == ".env" || (name.starts_with(".env.") && name != ".env.example"))
-        || [".pem", ".key", ".p12", ".pfx"]
+    let dot_env = name == ".env" || (name.starts_with(".env.") && name != ".env.example");
+    let star_env = name.ends_with(".env") && name != "example.env" && name != "sample.env";
+    dot_env
+        || star_env
+        || [".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx"]
             .iter()
             .any(|end| name.ends_with(end))
-        || name.starts_with("id_rsa")
-        || name.starts_with("id_ed25519")
+        || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
+            .iter()
+            .any(|start| name.starts_with(start))
+        || [
+            "credentials",
+            "credentials.json",
+            ".npmrc",
+            ".netrc",
+            ".pypirc",
+        ]
+        .contains(&name.as_str())
+}
+
+/// Is this folder name one of `names`? The check ignores letter case.
+fn folder_in(component: &str, names: &[&str]) -> bool {
+    names.iter().any(|n| n.eq_ignore_ascii_case(component))
+}
+
+/// Why a NEW file at this path (relative, with `/`) must not go in a commit, by its folders and
+/// its name. `None` when the path is fine.
+fn new_path_problem(path: &str) -> Option<&'static str> {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    let name = parts.pop().unwrap_or_default();
+    if parts
+        .iter()
+        .any(|c| folder_in(c, &SNAPSHOT_BLOCKED_FOLDERS))
+    {
+        Some("it is in a folder of build output or packages")
+    } else if is_secret_name(name)
+        || parts.iter().any(|c| folder_in(c, &SECRET_FOLDERS))
+        || folder_in(name, &SECRET_FOLDERS)
+    {
+        Some("its name looks like a secret")
+    } else {
+        None
+    }
 }
 
 /// One staged file that is not a deletion.
@@ -689,7 +741,8 @@ fn staged_files(scope: &Scope<'_>) -> Result<Vec<Staged>, String> {
 /// - a file over `SNAPSHOT_FILE_MAX_BYTES`;
 /// - a nested repository (a git link, mode 160000);
 /// - a NEW file in a folder of `SNAPSHOT_BLOCKED_FOLDERS`;
-/// - a NEW file whose name looks like a secret (`is_secret_name`);
+/// - a NEW file whose name looks like a secret (`is_secret_name`), or that has a folder of
+///   `SECRET_FOLDERS` in its path;
 /// - and, as one more entry, a count over `SNAPSHOT_FILES_MAX`.
 ///
 /// A file that the repository tracks already is not blocked for its folder or its name: the
@@ -707,8 +760,6 @@ fn staged_problems(scope: &Scope<'_>, worktree: &Path) -> Result<Vec<(String, St
         ));
     }
     for file in &files {
-        let mut parts: Vec<&str> = file.path.split('/').collect();
-        let name = parts.pop().unwrap_or_default();
         let reason = if file.new_mode == "160000" {
             Some("it is a nested git repository".to_owned())
         } else if let Some(size) = std::fs::symlink_metadata(worktree.join(&file.path))
@@ -721,10 +772,8 @@ fn staged_problems(scope: &Scope<'_>, worktree: &Path) -> Result<Vec<(String, St
                 size.div_ceil(1024 * 1024),
                 SNAPSHOT_FILE_MAX_BYTES / (1024 * 1024)
             ))
-        } else if file.added && parts.iter().any(|c| SNAPSHOT_BLOCKED_FOLDERS.contains(c)) {
-            Some("it is in a folder of build output or packages".to_owned())
-        } else if file.added && is_secret_name(name) {
-            Some("its name looks like a secret".to_owned())
+        } else if file.added {
+            new_path_problem(&file.path).map(str::to_owned)
         } else {
             None
         };
@@ -1270,6 +1319,56 @@ mod tests {
         parent
     }
 
+    /// The name of the test below, and the variable that marks the child process.
+    const CHILD_TEST: &str = "gitwork::tests::the_public_entry_cleans_the_real_process_environment";
+    const CHILD_MARK: &str = "TOWER_GITWORK_CHILD_REPO";
+
+    /// `run` is the entry that every git call of the app uses. It reads the real environment of
+    /// the process. The test above gives the environment as an argument, so it stays green when
+    /// `run_with_environment` forgets `clean_environment`. This test starts the test binary again
+    /// as a child process, with `GIT_DIR` set to a wrong folder in the environment of the child.
+    /// The child calls `run`. The test process itself never changes its environment, so the
+    /// parallel tests are safe.
+    #[test]
+    fn the_public_entry_cleans_the_real_process_environment() {
+        if let Some(repo) = std::env::var_os(CHILD_MARK) {
+            // This is the child. `GIT_DIR` points at a folder that is not a repository.
+            assert!(
+                std::env::var_os("GIT_DIR").is_some(),
+                "the parent did not set GIT_DIR"
+            );
+            let out = run(
+                Path::new(&repo),
+                &["rev-parse", "--show-toplevel"],
+                Options::READ,
+            )
+            .unwrap();
+            assert!(out.success, "git failed in the child: {}", out.message());
+            assert_eq!(
+                std::fs::canonicalize(out.stdout_text()).unwrap(),
+                std::fs::canonicalize(&repo).unwrap()
+            );
+            return;
+        }
+        let repo = temp_repo();
+        let wrong = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([CHILD_TEST, "--exact", "--test-threads=1", "--nocapture"])
+            .env(CHILD_MARK, repo.path())
+            .env("GIT_DIR", wrong.path())
+            .env("GIT_WORK_TREE", wrong.path())
+            .output()
+            .expect("start the child test process");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "the child failed: {text}");
+        // The child must really have run (a filter that matches nothing also exits with 0).
+        assert!(text.contains("1 passed"), "the child did not run: {text}");
+    }
+
     /// Finding M8: no test showed that the cleaning of the environment matters. The parent
     /// environment is an argument here, so the test does not change the environment of the test
     /// process (the other tests run in parallel).
@@ -1451,11 +1550,28 @@ mod tests {
             "id_ed25519",
             "cert.p12",
             "cert.pfx",
+            "prod.env",
+            "Staging.ENV",
+            "credentials.json",
+            "credentials",
+            ".npmrc",
+            ".netrc",
+            ".pypirc",
+            "id_ecdsa",
+            "id_ecdsa.pub",
+            "id_dsa",
+            "release.keystore",
+            "release.jks",
+            "vault.kdbx",
         ] {
             assert!(is_secret_name(name), "{name}");
         }
         for name in [
             ".env.example",
+            "example.env",
+            "sample.env",
+            "credentials.rs",
+            "my-credentials.json",
             "environment.rs",
             "keyboard.rs",
             "monkey.txt",
@@ -1477,6 +1593,43 @@ mod tests {
             "precious",
         ] {
             assert!(!is_worktree_relative(12, bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_new_path_is_refused_by_its_folders_and_its_name() {
+        for path in [
+            "target/debug/app",
+            "a/node_modules/x.js",
+            "out/index.js",
+            ".next/cache/x",
+            ".nuxt/x",
+            "coverage/lcov.info",
+            ".gradle/x",
+            ".tox/x",
+            ".pytest_cache/x",
+            ".mypy_cache/x",
+            "Build/x.o",
+            "DIST/x.js",
+            "Target/x",
+            "config/prod.env",
+            ".aws/config",
+            "home/.ssh/known_hosts",
+            "x/.GnuPG/pubring.kbx",
+            "x/.ssh",
+        ] {
+            assert!(new_path_problem(path).is_some(), "{path}");
+        }
+        for path in [
+            "src/lib.rs",
+            "src/output/x.rs",
+            "docs/example.env",
+            "docs/sample.env",
+            ".env.example",
+            "src/awsome/x",
+            "ssh.md",
+        ] {
+            assert_eq!(new_path_problem(path), None, "{path}");
         }
     }
 

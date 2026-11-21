@@ -56,7 +56,7 @@ use crate::hookrx::HookReceiver;
 use crate::login_env::{LoginEnvSource, SessionEnv};
 use crate::logo::{DEFAULT_API_BASE, REQUEST_TIMEOUT};
 use crate::model::{
-    CliKind, Employee, FloorDefaults, FloorPermissions, PermissionPolicy, SessionRecord,
+    CliKind, Employee, FloorDefaults, PermissionPolicy, SessionRecord, allow_rule_warnings,
     valid_allow_rules,
 };
 use crate::programs::Resolver;
@@ -127,7 +127,7 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 /// contract says. The path errors and `FloorGone` have the prefixes of `docs/ipc-final.md`.
 #[derive(Debug, thiserror::Error)]
 pub enum TowerError {
-    #[error("NO_FLOOR: there is no floor at {}. The folder has no .swarm/ folder.", .0.display())]
+    #[error("NO_FLOOR: there is no floor at {}. The folder has no .swarm/floor.toml file.", .0.display())]
     NoFloor(PathBuf),
     #[error("REFUSED: {0}")]
     Refused(String),
@@ -173,6 +173,14 @@ fn other(message: impl Into<String>) -> TowerError {
 // ---------------------------------------------------------------------------------------------
 // Views and observers
 // ---------------------------------------------------------------------------------------------
+
+/// The result of `floor_permissions_set`: the rules that the app stored, and a warning for each
+/// rule that lets an agent run the code of the project (`model::allow_rule_warning`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionsSaved {
+    pub allow: Vec<String>,
+    pub warnings: Vec<String>,
+}
 
 /// One session as the UI sees it (`SessionView` of the contract).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,10 +393,6 @@ struct FloorHandle {
     git: Mutex<()>,
     /// The resume of the last team that runs now (memory only).
     resume: Mutex<Option<ResumeProgress>>,
-    /// The `[permissions]` value that the app read when the last setup session started. The
-    /// setup hook puts it back when the setup agent changes the table (memory only). Lock order:
-    /// `store`, then this one.
-    setup_permissions: Mutex<Option<FloorPermissions>>,
     /// The watcher told the observer that the folder is gone, and did not tell yet that it is
     /// back (see `floor_watch`).
     announced_gone: AtomicBool,
@@ -408,7 +412,6 @@ impl FloorHandle {
             logo: Mutex::default(),
             git: Mutex::new(()),
             resume: Mutex::new(None),
-            setup_permissions: Mutex::new(None),
             announced_gone: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             last_view: Mutex::new(None),
@@ -539,32 +542,6 @@ fn reload(floor: &FloorHandle) -> Result<()> {
     let mut store = locked(&floor.store);
     *store = FloorStore::open(&floor.path)?;
     Ok(())
-}
-
-/// The text of the notice when the app puts back the `[permissions]` table.
-pub const PERMISSIONS_RESTORED_TEXT: &str =
-    "The setup agent tried to change the commands with no question. The app put the old list back.";
-
-/// The setup agent runs with `acceptEdits`, so it can write `floor.toml`. If its `[permissions]`
-/// table is not the one that the app read when the setup session started, write the old table
-/// back (with the store writer) and return `true`. A `floor.toml` that does not load is left
-/// alone: the next turn checks again.
-fn put_back_permissions(floor: &FloorHandle) -> bool {
-    let mut store = locked(&floor.store);
-    let Some(expected) = locked(&floor.setup_permissions).clone() else {
-        return false;
-    };
-    let Ok(mut fresh) = FloorStore::open(&floor.path) else {
-        return false;
-    };
-    if fresh.floor().permissions == expected {
-        return false;
-    }
-    if fresh.restore_permissions(expected).is_err() {
-        return false;
-    }
-    *store = fresh;
-    true
 }
 
 /// The Codex home folder: `$CODEX_HOME`, or `$HOME/.codex`. `None` when neither is set.
@@ -757,6 +734,14 @@ impl TowerCore {
                 ));
             }
         }
+        // The rules of the operator for this floor go too. A new floor at the same path starts
+        // with no rule.
+        if settings::has_floor_rules(&self.logo_env.config_file, &key) {
+            settings::update(&self.logo_env.config_file, |table| {
+                settings::forget_floor_rules(table, &key);
+            })
+            .map_err(|e| io_message("cannot write the app config", e))?;
+        }
         locked(&self.floors).remove(&key);
         self.floor_list.remove(path)?;
         Ok(())
@@ -810,19 +795,26 @@ impl TowerCore {
         self.floor_view(&floor)
     }
 
-    /// The rules of `[permissions] allow` of `floor.toml`, as stored (M3). A rule that is not
-    /// valid can be in the list after a hand edit. The app does not use it for a session.
+    /// The rules of the floor for commands with no question, as stored in the app config (table
+    /// `[floor_permissions]`, see `settings.rs`). Empty when the operator did not set a list. A
+    /// rule that the check refuses now can be in the list (a new version can check more). The app
+    /// does not use it for a session.
     pub fn floor_permissions_get(&self, path: &Path) -> Result<Vec<String>> {
         let floor = self.floor_handle(path)?;
-        reload(&floor)?;
-        let allow = locked(&floor.store).floor().permissions.allow.clone();
-        Ok(allow)
+        Ok(settings::floor_rules(&self.logo_env.config_file, &floor.path).unwrap_or_default())
     }
 
-    /// Write `[permissions] allow` of `floor.toml`. Each rule is checked (`check_allow_rule`), and
-    /// nothing is written when one is bad. A duplicate is dropped. The new rules apply at the next
-    /// start of a session. The observer gets `floor_changed`. Returns the stored list.
-    pub fn floor_permissions_set(&self, path: &Path, allow: Vec<String>) -> Result<Vec<String>> {
+    /// Write the rules of the floor in the app config (not in the project folder, so an agent of
+    /// the floor cannot change them). Each rule is checked (`check_allow_rule`), and nothing is
+    /// written when one is bad. The text is trimmed and a duplicate is dropped. The old
+    /// `[permissions]` table of `floor.toml` is removed (the rest of the file stays). The new rules
+    /// apply at the next start of a session. The observer gets `floor_changed`. Returns the stored
+    /// list, and a warning for each rule that lets the agents run the code of the project.
+    pub fn floor_permissions_set(
+        &self,
+        path: &Path,
+        allow: Vec<String>,
+    ) -> Result<PermissionsSaved> {
         let mut clean: Vec<String> = Vec::new();
         for rule in allow {
             let rule = rule.trim().to_owned();
@@ -840,19 +832,39 @@ impl TowerCore {
             )));
         }
         let floor = self.floor_handle(path)?;
-        {
-            let mut store = locked(&floor.store);
-            let permissions = FloorPermissions {
-                allow: clean.clone(),
-            };
-            store.set_permissions(permissions.clone())?;
-            // The operator changed the list on purpose. The setup hook must not undo it.
-            if let Some(expected) = locked(&floor.setup_permissions).as_mut() {
-                *expected = permissions;
-            }
+        let mut stored = true;
+        settings::update(&self.logo_env.config_file, |table| {
+            stored = settings::set_floor_rules(table, &floor.path, &clean);
+        })
+        .map_err(|e| io_message("cannot write the app config", e))?;
+        if !stored {
+            return Err(other(format!(
+                "the path of the floor is not valid text: {}",
+                floor.path.display()
+            )));
         }
+        // The old table is not used any more. The rules of the operator are in the app config now.
+        locked(&floor.store).remove_legacy_permissions()?;
         self.notifier.floor_changed(&floor.path);
-        Ok(clean)
+        Ok(PermissionsSaved {
+            warnings: allow_rule_warnings(&clean),
+            allow: clean,
+        })
+    }
+
+    /// The rules of the old `[permissions]` table of `floor.toml` that the operator can take over.
+    /// It is empty when the app config has an entry for the floor already (the operator decided),
+    /// or when the file has no table. The rules that do not pass `check_allow_rule`, and the
+    /// duplicates, are left out. The app never imports them by itself: an agent of the floor can
+    /// have written the file. The operator reads the list and saves it with
+    /// `floor_permissions_set`, which removes the old table.
+    pub fn floor_permissions_proposed(&self, path: &Path) -> Result<Vec<String>> {
+        let floor = self.floor_handle(path)?;
+        if settings::has_floor_rules(&self.logo_env.config_file, &floor.path) {
+            return Ok(Vec::new());
+        }
+        let old = locked(&floor.store).legacy_permissions()?;
+        Ok(valid_allow_rules(&old.unwrap_or_default()))
     }
 
     /// The handle of a floor that this Tower holds. It never opens a floor.
@@ -1236,12 +1248,6 @@ impl TowerCore {
         let _reservation = self.reserve(&floor.path, slug)?;
         // The defaults are read from the current file, not from the file at app start.
         reload(&floor)?;
-        if setup_cli.is_some() {
-            // The setup agent can write `floor.toml`. Keep the value of `[permissions]` that the
-            // app has now, so the setup hook can put it back.
-            let current = locked(&floor.store).floor().permissions.clone();
-            *locked(&floor.setup_permissions) = Some(current);
-        }
 
         let (employee, previous, team, floor_allow) = {
             let store = locked(&floor.store);
@@ -1303,12 +1309,16 @@ impl TowerCore {
             } else {
                 None
             };
-            // The rules of `[permissions] allow`. A rule that does not pass the check (a hand
-            // edit of `floor.toml`) is dropped here and never reaches the CLI.
+            // The rules of the operator for this floor, from the app config (never from
+            // `floor.toml`: an agent can write that file). A rule that does not pass the check
+            // is dropped here and never reaches the CLI.
             let floor_allow = if setup_cli.is_some() {
                 Vec::new()
             } else {
-                valid_allow_rules(&store.floor().permissions.allow)
+                valid_allow_rules(
+                    &settings::floor_rules(&self.logo_env.config_file, &floor.path)
+                        .unwrap_or_default(),
+                )
             };
             (employee, previous, team, floor_allow)
         };
@@ -1494,13 +1504,6 @@ impl TowerCore {
             // old data. The observer still gets the event, because employee files may have changed.
             // The setup agent marks a file that it wants removed; the app removes it here.
             setup::remove_marked_employees(&floor.path);
-            if put_back_permissions(&floor) {
-                notifier.notice(
-                    &floor.path,
-                    "permissions_restored",
-                    PERMISSIONS_RESTORED_TEXT,
-                );
-            }
             let loaded = reload(&floor).is_ok();
             notifier.floor_changed(&floor.path);
             // The app is closing: the stop of the session must not start a request.

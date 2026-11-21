@@ -95,6 +95,7 @@ pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         commands::task_discard,
         commands::floor_permissions_get,
         commands::floor_permissions_set,
+        commands::floor_permissions_proposed,
         commands::team_resume,
     ])
 }

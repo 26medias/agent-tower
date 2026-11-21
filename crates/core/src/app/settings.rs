@@ -7,6 +7,16 @@
 //! image_model = "..."     # the image model; the default is `logo::DEFAULT_IMAGE_MODEL`
 //! ```
 //!
+//! The rules of the floors for commands with no question (since 2026-11-21) are in the table
+//! `[floor_permissions]`. Each key is the real absolute path of a floor, and the value is the
+//! list of the rules. The file is in the config folder of the app, not in a project folder, so an
+//! agent of a floor cannot change it through the project:
+//!
+//! ```toml
+//! [floor_permissions]
+//! "/home/you/my project" = ["Bash(rtk cargo test:*)", "Read(./src/**)"]
+//! ```
+//!
 //! Each writer reads the file again, changes its own table and writes the file back, so one
 //! writer keeps the tables of the other. The key never goes in a log, an error text or a view.
 
@@ -127,4 +137,77 @@ pub(crate) fn set_openai_text(table: &mut toml::Table, name: &str, text: &str) {
     if now_empty {
         table.remove("openai");
     }
+}
+
+/// The name of the table of the rules of the floors.
+const FLOOR_PERMISSIONS: &str = "floor_permissions";
+
+/// The key of a floor in the table: its path as text. `None` when the path is not valid UTF-8
+/// (TOML has only text keys).
+fn floor_key(floor: &Path) -> Option<&str> {
+    floor.to_str()
+}
+
+/// The rules of a floor, as stored. `None` when the app config has no entry for the floor (the
+/// operator did not set the list yet). An entry that is not a list of texts is an empty list.
+pub(crate) fn floor_rules(file: &Path, floor: &Path) -> Option<Vec<String>> {
+    let table = read_table(file);
+    let value = table
+        .get(FLOOR_PERMISSIONS)?
+        .as_table()?
+        .get(floor_key(floor)?)?;
+    Some(
+        value
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+/// Store the rules of a floor. An empty list is an entry too: the operator chose no rule.
+/// `false` when the path has no text form (nothing is stored then).
+pub(crate) fn set_floor_rules(table: &mut toml::Table, floor: &Path, rules: &[String]) -> bool {
+    let Some(key) = floor_key(floor) else {
+        return false;
+    };
+    let section = table
+        .entry(FLOOR_PERMISSIONS)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if !section.is_table() {
+        *section = toml::Value::Table(toml::Table::new());
+    }
+    if let Some(section) = section.as_table_mut() {
+        section.insert(
+            key.to_owned(),
+            toml::Value::Array(rules.iter().cloned().map(toml::Value::String).collect()),
+        );
+    }
+    true
+}
+
+/// Remove the entry of a floor. The table goes too when it is empty.
+pub(crate) fn forget_floor_rules(table: &mut toml::Table, floor: &Path) {
+    let Some(key) = floor_key(floor) else { return };
+    let now_empty = match table
+        .get_mut(FLOOR_PERMISSIONS)
+        .and_then(toml::Value::as_table_mut)
+    {
+        Some(section) => {
+            section.remove(key);
+            section.is_empty()
+        }
+        None => false,
+    };
+    if now_empty {
+        table.remove(FLOOR_PERMISSIONS);
+    }
+}
+
+/// Does the app config have an entry for this floor?
+pub(crate) fn has_floor_rules(file: &Path, floor: &Path) -> bool {
+    floor_rules(file, floor).is_some()
 }

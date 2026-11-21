@@ -296,7 +296,7 @@ Each role has a policy. The adapter maps the policy to the settings of the CLI a
 | Policy | Meaning | Default for |
 |---|---|---|
 | `read_only` | Can read and use the MCP tools. No file edits, except the report files in `.swarm/reports/`. | CEO, Project Manager |
-| `edit_in_worktree` | Edits inside its task worktree and the report files without a prompt. An edit of a file of the main checkout prompts. Other actions prompt, unless a rule of `[permissions]` allows them. | Engineer, other workers |
+| `edit_in_worktree` | Edits inside its task worktree and the report files without a prompt. An edit of a file of the main checkout prompts. Other actions prompt, unless a rule that the operator set for the floor allows them (changed 2026-11-21, see below). | Engineer, other workers |
 | `ask_always` | Each action prompts. | Operator choice. Claude only |
 
 A prompt sets the status to `question`. The operator answers it in the terminal tab. Version 1 has no approval by a manager agent.
@@ -304,12 +304,12 @@ A prompt sets the status to `question`. The operator answers it in the terminal 
 **Claude mapping (item N12, closed in M3, 2026-11-21).** The modes of `--permission-mode` are `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan` (PROBED list).
 Changed in M3 (2026-11-21): the app uses `manual` for each policy, and `acceptEdits` only for `edit_in_worktree` in a floor that is not a git repository (no worktree exists there, so the old rule stays). The allow rules go in the `--settings` JSON, with the rule `mcp__tower`:
 
-| Policy | `--permission-mode` | Allow rules besides `mcp__tower` and the rules of `[permissions]` |
+| Policy | `--permission-mode` | Allow rules besides `mcp__tower` and the rules of the floor (app config) |
 |---|---|---|
 | `read_only` | `manual` | `Edit(//<floor>/.swarm/reports/**)` and `Edit(./.swarm/reports/**)` |
 | `edit_in_worktree`, floor is a git repository | `manual` | the same two rules for `.swarm/worktrees/**` and for `.swarm/reports/**` |
 | `edit_in_worktree`, no git repository | `acceptEdits` | none |
-| `ask_always` | `manual` | none (also not the rules of `[permissions]`) |
+| `ask_always` | `manual` | none (also not the rules of the floor) |
 
 The deny rules for `.swarm/floor.toml`, `.gitignore`, `employees/**`, `assets/**` and `state/**` stay for all policies. The setup session has no app server and no rule, and it keeps `acceptEdits`.
 
@@ -319,9 +319,11 @@ PROBED with `claude -p --model haiku` (2.1.330, six calls; evidence in `/tmp/age
 3. Control, no allow rule: each edit and each write is refused. So the allow rule is what opens the folders.
 4. `read_only` shape (only the `reports` rules): a report file is written, the worktree files and the main checkout files are not.
 5. A rule for `.swarm/worktrees/**` does not open `.swarm/employees/` of the main floor (a different path). It opens `.swarm/worktrees/<task>/.swarm/employees/d.md`: that is a file of the task branch (a copy of the tracked file), and its merge is a decision of the `pm` and of the operator.
-6. `Bash(touch:*)` in `allow`: `touch p5a.txt` runs, `mkdir p5b` is refused. So a rule of `[permissions]` of the form `Bash(command:*)` works. (A first try with `git status` was muddied by the RTK hook of the operator, which rewrites the command to `rtk git status`: a rule must match the command after the hooks.)
+6. `Bash(touch:*)` in `allow`: `touch p5a.txt` runs, `mkdir p5b` is refused. So a rule of the floor of the form `Bash(command:*)` works. (A first try with `git status` was muddied by the RTK hook of the operator, which rewrites the command to `rtk git status`: a rule must match the command after the hooks.)
 
-**Commands with no question (changed in M3, 2026-11-21).** `floor.toml` has an optional table `[permissions]` with `allow = [...]`: Claude permission rules, for example `Bash(cargo test:*)`. The app adds them to the allow list of each Claude employee of the floor, except an `ask_always` employee. Each rule is checked (changed on 2026-11-21, see `docs/ipc-m3.md`, "The check of a rule"): 1 to 200 printable ASCII characters, one entry is exactly one rule, and `Bash`, `Read`, `Glob`, `Grep`, `WebFetch` need a pattern in brackets (`WebSearch` is bare). A `Bash` rule needs a plain program name as its first word, and the programs that run other commands or destroy data (`sh`, `env`, `xargs`, `rm`, `curl`, `git` with no subcommand, and others) are refused. `Read`, `Glob` and `Grep` need a relative path with no `..`. `WebFetch` takes only `domain:<host>`. A rule must match the command after the hooks of the operator (with the RTK hook, `cargo test` is `rtk cargo test`). The operator sets the table in the settings panel (section "Commands with no question"); the commands are `floor_permissions_get` and `floor_permissions_set`. The setup agent must not write it, and the deny rule for `floor.toml` blocks the employees. A rule applies at the next start of a session.
+**Commands with no question (changed in M3, 2026-11-21; moved out of the project folder, 2026-11-21).** The operator lists Claude permission rules for a floor, for example `Bash(rtk cargo test:*)`. The app adds them to the allow list of each Claude employee of the floor, except an `ask_always` employee. **The list is in the app config, not in the project folder.** The first version kept it in `[permissions]` of `floor.toml`. A review showed that this is not safe: `floor.toml` is in the project folder, so a Codex employee (no enforced limits on this machine) or any shell command that is allowed can write it, and then each Claude employee of the floor gets those rules at its next start. So the list is now the table `[floor_permissions]` of the app config file (`programs.toml` in the config folder, mode 0600). Each key is the real absolute path of a floor, and the value is the array of its rules. An agent of the floor cannot change the file through the project. The app does not read `[permissions]` of `floor.toml` for a session any more. When a floor has no entry in the app config and its `floor.toml` has the old table, the app does not import it (an agent can have written it). It offers the rules that pass the check as a proposal (`floor_permissions_proposed`), and the operator saves them with one click. `floor_permissions_set` writes the app config and removes the old table from `floor.toml` (the rest of the file stays). `floor_forget` removes the entry of the floor. The setup session has no guard for this list any more, because the list is not in the project (the notice `permissions_restored` is removed).
+
+The check of a rule is a guard against the mistakes of the operator. It cannot be complete, so it does not try to block each dangerous program. See `docs/ipc-m3.md`, "The check of a rule". In short: 1 to 200 printable ASCII characters, one entry is exactly one rule. The check unwraps `rtk` and applies to the words after it (`rtk` alone, `rtk proxy` and the other `rtk` commands that run a command are refused). A list of programs that run other commands, change or destroy data, or send data out is refused (also a versioned name like `python3.12`). `git` has an allow list of subcommands that only read. The build and package tools (`cargo`, `npm`, `make` and others) are allowed, because the operator wants `cargo test` with no question. They run the code of the project, so `floor_permissions_set` returns a warning for each such rule. `Read`, `Glob` and `Grep` need a relative path with no `..` and not `.swarm/state`. `WebFetch` takes only `domain:<host>`, and not an IP address, `localhost`, `.local` or `.internal`. A rule must match the command after the hooks of the operator (with the RTK hook, `cargo test` is `rtk cargo test`). The operator sets the list in the settings panel (section "Commands with no question"); the commands are `floor_permissions_get`, `floor_permissions_set` and `floor_permissions_proposed`. A rule applies at the next start of a session. The limit that stays: a Codex employee has no enforced limits on this machine, so it can also write the app config file if it tries. The move takes the list out of the project folder, and it does not sandbox Codex.
 
 **Codex mapping: decision O7 (see section 9).** M3 changes nothing here: option B stays, and option A (the AppArmor profile for `bwrap`, one `sudo` step) was NOT tested. Only the instructions limit a Codex employee, and they carry the worktree rules too. The Codex sandbox does not work on this machine (PROBED): `bwrap` fails because Ubuntu
 blocks unprivileged user namespaces (`apparmor_restrict_unprivileged_userns` = 1). With the sandbox on, each shell command fails and then asks for approval.
@@ -350,7 +352,7 @@ Changed in M3 (2026-11-21). The first draft let the session of an employee run i
 
 ### 4.9 Persistence
 
-Each floor keeps its data in its own folder. The app keeps only the list of floor paths in its own config folder.
+Each floor keeps its data in its own folder. The app keeps only the list of floor paths, and the settings that an agent of a floor must not change, in its own config folder. Changed 2026-11-21: the settings are the program paths, the logo key, the model names, and the rules of each floor for commands with no question (table `[floor_permissions]` of `programs.toml`, see 4.7).
 
 ```
 {CWD}/.swarm/

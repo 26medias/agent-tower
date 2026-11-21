@@ -257,6 +257,30 @@ fn counts(db: &Database) -> (usize, usize, usize) {
     )
 }
 
+/// The row count of each table of a database file, by table name. The test reads the file with
+/// its own connection, so it does not depend on a handle of the app.
+fn table_counts(file: &Path) -> std::collections::BTreeMap<String, i64> {
+    let conn = rusqlite::Connection::open(file).unwrap();
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let count = conn
+                .query_row(&format!("SELECT count(*) FROM \"{name}\""), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            (name, count)
+        })
+        .collect()
+}
+
 fn move_to(rig: &Rig, name: &str) -> PathBuf {
     let moved = rig.root.path().join(name);
     fs::rename(&rig.cwd, &moved).unwrap();
@@ -290,6 +314,7 @@ fn a_moved_floor_is_gone_for_each_command_and_nothing_is_written() {
     let (rig, ceo) = live_rig();
     let before = counts(&Database::open(&rig.cwd.join(".swarm/state/floor.db")).unwrap());
     assert_eq!(before, (1, 0, 0));
+    let table_before = table_counts(&rig.cwd.join(".swarm/state/floor.db"));
     assert!(!rig.tower.floor_list().unwrap()[0].missing);
     assert!(!rig.tower.floor_open(&rig.cwd).unwrap().gone);
 
@@ -380,12 +405,47 @@ fn a_moved_floor_is_gone_for_each_command_and_nothing_is_written() {
         "the stop did not clear the mark: the app wrote nothing through its handle"
     );
 
-    // Nothing was written: the database of the moved folder has the same rows.
+    // The commands wrote nothing: the database of the moved folder has the same rows. One table
+    // is the exception. A live session still holds its database handle, and the handle follows
+    // the moved file (`live.rs`, `record_status`). So the status events of that session (the
+    // stop above made one) are written into the moved file. No other table can grow: all the
+    // other tables must have the same row count as before the move.
     let after = counts(&Database::open(&moved.join(".swarm/state/floor.db")).unwrap());
     assert_eq!(after, before);
+    let mut table_after = table_counts(&moved.join(".swarm/state/floor.db"));
+    let events_after = table_after.remove("status_events").expect("status_events");
+    let mut table_before = table_before;
+    let events_before = table_before.remove("status_events").expect("status_events");
+    assert_eq!(
+        table_after, table_before,
+        "only status_events may grow after the move"
+    );
+    assert!(
+        events_after > events_before,
+        "the live session writes its status events into the moved file: {events_before} then {events_after}"
+    );
     assert_eq!(rig.calls().len(), 1, "no session of `eng` started");
 
     rig.tower.floor_forget(&rig.cwd).unwrap();
+    assert!(rig.tower.floor_list().unwrap().is_empty());
+}
+
+/// A `.swarm` that is a link to a folder with no `floor.toml` is not a floor. The answer is
+/// `NO_FLOOR:`, as for a folder with no `.swarm` (and as for a link that points nowhere). It is
+/// not a raw I/O error.
+#[test]
+fn a_swarm_link_to_a_folder_with_no_floor_file_is_no_floor() {
+    let rig = Rig::new();
+    let target = tempfile::TempDir::new().unwrap();
+    std::os::unix::fs::symlink(target.path(), rig.cwd.join(".swarm")).unwrap();
+    let error = rig.tower.floor_open(&rig.cwd).unwrap_err();
+    assert!(matches!(error, TowerError::NoFloor(_)), "{error}");
+    let message = text(error);
+    assert!(
+        message.starts_with("NO_FLOOR: there is no floor at"),
+        "{message}"
+    );
+    assert!(!message.contains("I/O error"), "{message}");
     assert!(rig.tower.floor_list().unwrap().is_empty());
 }
 

@@ -18,8 +18,7 @@
 //! The caller gives all times (Unix milliseconds). The store has no clock.
 
 use crate::model::{
-    Brand, CliKind, Employee, Floor, FloorDefaults, FloorPermissions, PermissionPolicy,
-    SessionRecord, check_allow_rule,
+    Brand, CliKind, Employee, Floor, FloorDefaults, PermissionPolicy, SessionRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -48,7 +47,7 @@ pub enum StoreError {
     Invalid { path: PathBuf, message: String },
     #[error("a floor already exists at {}", .0.display())]
     FloorExists(PathBuf),
-    #[error("there is no floor at {}: the folder {SWARM_DIR}/ does not exist", .0.display())]
+    #[error("there is no floor at {}: the file {SWARM_DIR}/{FLOOR_FILE} does not exist", .0.display())]
     NoFloor(PathBuf),
     #[error(
         "{} has version {found}, and this app knows version {known} at most. Update the app. Nothing was changed.",
@@ -154,12 +153,6 @@ struct FloorFile {
     defaults: FloorDefaults,
     #[serde(default, skip_serializing_if = "brand_is_empty")]
     brand: Brand,
-    #[serde(default, skip_serializing_if = "permissions_is_empty")]
-    permissions: FloorPermissions,
-}
-
-fn permissions_is_empty(permissions: &FloorPermissions) -> bool {
-    *permissions == FloorPermissions::default()
 }
 
 fn brand_is_empty(brand: &Brand) -> bool {
@@ -181,7 +174,6 @@ fn read_floor_file(path: &Path) -> Result<Floor, StoreError> {
         name: file.name,
         defaults: file.defaults,
         brand: file.brand,
-        permissions: file.permissions,
     })
 }
 
@@ -191,7 +183,6 @@ fn write_floor_file(path: &Path, floor: &Floor) -> Result<(), StoreError> {
         name: floor.name.clone(),
         defaults: floor.defaults.clone(),
         brand: floor.brand.clone(),
-        permissions: floor.permissions.clone(),
     };
     let text = toml::to_string(&file).map_err(|e| invalid(path, e))?;
     write_atomic(path, text.as_bytes())
@@ -1309,7 +1300,6 @@ impl FloorStore {
             name: name.to_owned(),
             defaults: FloorDefaults::default(),
             brand: Brand::default(),
-            permissions: FloorPermissions::default(),
         };
         write_floor_file(&swarm.join(FLOOR_FILE), &floor)?;
         write_atomic(&swarm.join(".gitignore"), GITIGNORE.as_bytes())?;
@@ -1329,7 +1319,14 @@ impl FloorStore {
         if !swarm.is_dir() {
             return Err(StoreError::NoFloor(cwd.to_path_buf()));
         }
-        let floor = read_floor_file(&swarm.join(FLOOR_FILE))?;
+        // A `.swarm` that is a folder (or a link to a folder) with no `floor.toml` is not a
+        // floor. It gets the same answer as a folder with no `.swarm`, not a raw I/O error.
+        let floor = match read_floor_file(&swarm.join(FLOOR_FILE)) {
+            Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::NoFloor(cwd.to_path_buf()));
+            }
+            other => other?,
+        };
         ensure_folders(&swarm)?;
         let db = Database::open(&swarm.join("state").join("floor.db"))?;
         Ok(FloorStore {
@@ -1393,37 +1390,43 @@ impl FloorStore {
         Ok(())
     }
 
-    /// Write the `[permissions]` table of `floor.toml`. The rest of the file stays (see
-    /// `set_brand`). Each rule is checked first (`check_allow_rule`), and nothing is written when
-    /// one is bad. A list with no rule removes the table.
-    pub fn set_permissions(&mut self, permissions: FloorPermissions) -> Result<(), StoreError> {
-        for rule in &permissions.allow {
-            check_allow_rule(rule).map_err(StoreError::Rule)?;
-        }
-        self.write_permissions(permissions)
+    /// The `allow` list of the old `[permissions]` table of `floor.toml`, as written, with no
+    /// check. `None` when the file has no such table. Since 2026-11-21 the app does not use this
+    /// table for a session: the rules are in the app config. An agent can write this file, so the
+    /// app only shows these rules to the operator as a proposal (`floor_permissions_proposed`).
+    /// The file is read again at each call. A value of another type than a list of texts counts as
+    /// an empty list.
+    pub fn legacy_permissions(&self) -> Result<Option<Vec<String>>, StoreError> {
+        let path = self.swarm_dir().join(FLOOR_FILE);
+        let text = read_text(&path)?;
+        let table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;
+        let Some(permissions) = table.get("permissions") else {
+            return Ok(None);
+        };
+        let allow = permissions
+            .get("allow")
+            .and_then(toml::Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Some(allow))
     }
 
-    /// Write the `[permissions]` table with NO check of the rules. The app uses it for one
-    /// thing: to put back the value that the setup agent changed. That value can hold a rule
-    /// that a hand edit wrote, and that the check refuses now. The app does not drop it here.
-    pub fn restore_permissions(&mut self, permissions: FloorPermissions) -> Result<(), StoreError> {
-        self.write_permissions(permissions)
-    }
-
-    fn write_permissions(&mut self, permissions: FloorPermissions) -> Result<(), StoreError> {
+    /// Remove the old `[permissions]` table from `floor.toml`. The rest of the file stays (see
+    /// `set_brand`). Returns `true` when a table was there. Nothing is written when it was not.
+    pub fn remove_legacy_permissions(&mut self) -> Result<bool, StoreError> {
         let path = self.swarm_dir().join(FLOOR_FILE);
         let text = read_text(&path)?;
         let mut table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;
-        if permissions_is_empty(&permissions) {
-            table.remove("permissions");
-        } else {
-            let value = toml::Value::try_from(&permissions).map_err(|e| invalid(&path, e))?;
-            table.insert("permissions".to_owned(), value);
+        if table.remove("permissions").is_none() {
+            return Ok(false);
         }
         let text = toml::to_string(&table).map_err(|e| invalid(&path, e))?;
         write_atomic(&path, text.as_bytes())?;
-        self.floor.permissions = permissions;
-        Ok(())
+        Ok(true)
     }
 
     fn employees_dir(&self) -> PathBuf {
@@ -1689,7 +1692,6 @@ mod tests {
                 permission: Some(PermissionPolicy::EditInWorktree),
             },
             brand: Brand::default(),
-            permissions: FloorPermissions::default(),
         };
         let path = dir.path().join(".swarm/floor.toml");
         write_floor_file(&path, &floor).unwrap();

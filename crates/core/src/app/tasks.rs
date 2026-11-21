@@ -678,6 +678,23 @@ impl TowerCore {
             )?),
             None => None,
         };
+        // A discarded task stays discarded: only the operator can set it to `done`. This is the
+        // same rule as in `task_merge`. The guard of `may_change_status` comes first.
+        if !actor.operator && status == TaskStatus::Done {
+            let current = locked(&floor.store).db().get_task(id).map_err(db_error)?;
+            if let Some(task) = current.filter(|t| Self::may_change_status(actor, t)) {
+                let events = locked(&floor.store)
+                    .db()
+                    .task_events(id)
+                    .map_err(db_error)?;
+                if super::merge::was_discarded(&task, &events) {
+                    return Err(format!(
+                        "Task T-{id} was discarded by the operator: discarded, so you cannot set it to done. The status stays {}.",
+                        task.status.as_str()
+                    ));
+                }
+            }
+        }
         // The status `review` of a task with a worktree: the app commits the worktree first.
         // The rule of the guard is checked before, so a caller that may not change the task
         // makes no commit.

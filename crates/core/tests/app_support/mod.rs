@@ -215,7 +215,7 @@ pub struct Call {
     pub mcp: Option<McpAccess>,
     /// `StartContext::worktrees`: the floor is a git repository with worktrees.
     pub worktrees: bool,
-    /// `StartContext::floor_allow`: the rules of `[permissions] allow` that the app gave.
+    /// `StartContext::floor_allow`: the rules of the floor (from the app config) that the app gave.
     pub floor_allow: Vec<String>,
 }
 

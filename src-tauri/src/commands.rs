@@ -14,8 +14,8 @@
 
 use crate::views::{
     AttachResult, Cli, Employee, FloorDefaults, FloorEntry, FloorView, ModelCatalog, OutputMessage,
-    Programs, ResumeProgress, SessionView, Settings, TaskDetail, TaskDiff, TaskMerge, TaskStatus,
-    TaskView,
+    PermissionsSaved, Programs, ResumeProgress, SessionView, Settings, TaskDetail, TaskDiff,
+    TaskMerge, TaskStatus, TaskView,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -487,7 +487,7 @@ pub async fn task_discard(
     .await
 }
 
-/// The rules of `[permissions] allow` of `floor.toml`.
+/// The rules of the floor for commands with no question, from the app config (`docs/ipc-m3.md`).
 #[tauri::command]
 pub async fn floor_permissions_get(
     tower: State<'_, Shared>,
@@ -496,15 +496,29 @@ pub async fn floor_permissions_get(
     blocking(&tower, move |t| t.floor_permissions_get(&path_of(&path))).await
 }
 
-/// Write `[permissions] allow`. A bad rule refuses the whole call.
+/// Write the rules of the floor in the app config. A bad rule refuses the whole call. The result
+/// has the stored rules and a warning for each rule that runs the code of the project.
 #[tauri::command]
 pub async fn floor_permissions_set(
     tower: State<'_, Shared>,
     path: String,
     allow: Vec<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<PermissionsSaved, String> {
     blocking(&tower, move |t| {
         t.floor_permissions_set(&path_of(&path), allow)
+            .map(PermissionsSaved::from)
+    })
+    .await
+}
+
+/// The rules of the old `[permissions]` table of `floor.toml` that the operator can take over.
+#[tauri::command]
+pub async fn floor_permissions_proposed(
+    tower: State<'_, Shared>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    blocking(&tower, move |t| {
+        t.floor_permissions_proposed(&path_of(&path))
     })
     .await
 }

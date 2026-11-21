@@ -120,7 +120,7 @@ pub struct StartContext {
     /// asks the operator for an edit in the main checkout. With `false` (no repository), the
     /// mode `acceptEdits` stays for that policy, as in M1.
     pub worktrees: bool,
-    /// The rules of `[permissions] allow` of the floor. The caller has checked them
+    /// The rules of the floor for commands with no question (from the app config). The caller has checked them
     /// (`model::valid_allow_rules`). Claude only. They are not used for the policy `ask-always`.
     pub floor_allow: Vec<String>,
 }

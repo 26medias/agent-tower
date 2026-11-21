@@ -214,6 +214,24 @@ impl From<app::ResumeProgress> for ResumeProgress {
     }
 }
 
+/// The result of `floor_permissions_set` (`docs/ipc-m3.md`): the stored rules, and a warning for
+/// each rule that lets an agent run the code of the project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsSaved {
+    pub allow: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl From<app::PermissionsSaved> for PermissionsSaved {
+    fn from(saved: app::PermissionsSaved) -> PermissionsSaved {
+        PermissionsSaved {
+            allow: saved.allow,
+            warnings: saved.warnings,
+        }
+    }
+}
+
 /// `FloorDefaults`: the `[defaults]` of `floor.toml`. It goes in both directions. A missing field
 /// and a null are both `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -875,6 +893,17 @@ mod tests {
                 resumed: false,
             }),
             json!({"path": "/p", "sessionId": "s2", "slug": "eng", "name": "Kenji", "bySlug": "pm", "byName": "Tomas", "resumed": false})
+        );
+    }
+
+    #[test]
+    fn the_permissions_result_has_the_allow_and_warnings_fields() {
+        assert_eq!(
+            to_json(&PermissionsSaved::from(app::PermissionsSaved {
+                allow: vec!["Bash(ls:*)".into()],
+                warnings: vec!["w".into()],
+            })),
+            json!({"allow": ["Bash(ls:*)"], "warnings": ["w"]})
         );
     }
 
