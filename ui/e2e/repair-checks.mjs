@@ -1202,6 +1202,8 @@ export async function repairChecks({ page, check, url, shots }) {
     const setCalls = () => calls("floor_permissions_set");
     const WARN = "This rule lets each agent of the floor run the project's own code with no question.";
     const WILD = "This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.";
+    const PATH_WILD = "This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.";
+    const WEB = "This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.";
     check("G4: the section says that the app stores the rules outside the project folder, so an agent cannot change them through the project",
         /stores these rules in its own config folder, outside the project folder/.test(await secText("rules-storage")) && /cannot change them through the project/.test(await secText("rules-storage")), await secText("rules-storage"));
     check("G4: the fixed warning says what a rule with * gives, and that an exact rule is better, and it is always visible",
@@ -1224,7 +1226,7 @@ export async function repairChecks({ page, check, url, shots }) {
     const w1 = await warnOn("Bash(cargo test:*)");
     const w2 = await warnOn("Read(./src/**)");
     check("G4: the warning of the server shows on the rule that it is about (a mark and the text)", w1.mark === 1 && w1.text === WARN, JSON.stringify(w1));
-    check("G4: a rule with no warning has no mark", w2.mark === 0 && w2.text === null, JSON.stringify(w2));
+    check("G4: a Read rule with a wildcard, Read(./src/**), shows the path warning (a mark and the text)", w2.mark === 1 && w2.text === PATH_WILD, JSON.stringify(w2));
     // Bash(rtk cargo test:*) is accepted and saved, with the project-code warning. Bash(ls:*) has the wildcard warning.
     // The exact rule Bash(rtk git status) has none.
     const g4In = sec.locator('input[aria-label="New rule"]');
@@ -1242,7 +1244,7 @@ export async function repairChecks({ page, check, url, shots }) {
     const w4 = await warnOn("Bash(ls:*)");
     const w5 = await warnOn("Bash(rtk git status)");
     check("G4: Bash(rtk cargo test:*) is accepted and saved with the project-code warning on that rule", w3.mark === 1 && w3.text === WARN && (await setCalls()).pop().args.allow.includes("Bash(rtk git status)"), JSON.stringify(w3));
-    check("G4: a wildcard rule of a plain program, Bash(ls:*), is saved with the wildcard warning, and the warnings of the other rules stay", w4.mark === 1 && w4.text === WILD && (await sec.locator("li[data-rule] .mark").count()) === 3, JSON.stringify(w4));
+    check("G4: a wildcard rule of a plain program, Bash(ls:*), is saved with the wildcard warning, and the warnings of the other rules stay", w4.mark === 1 && w4.text === WILD && (await sec.locator("li[data-rule] .mark").count()) === 4, JSON.stringify(w4));
     check("G4: an exact rule, Bash(rtk git status), is saved with no warning", w5.mark === 0 && w5.text === null, JSON.stringify(w5));
     // Refused by the client check of the new rules, with no call to the app.
     const setsNow = (await setCalls()).length;
@@ -1255,6 +1257,9 @@ export async function repairChecks({ page, check, url, shots }) {
         ["Bash(git commit:*)", /"git commit" is not allowed/],
         ["Bash(git log --output=x)", /--output/],
         ["Bash(git diff --ext-diff)", /--ext-diff/],
+        ["Bash(ls && rm)", /shell character &/],
+        ["Bash(ls | sh)", /shell character \|/],
+        ["Bash(echo $(rm))", /shell character \$/],
         ["Read(.swarm/state)", /\.swarm/],
         ["Grep(.swarm/**)", /\.swarm/],
         ["WebFetch(domain:127.0.0.1)", /IP address/],
@@ -1280,6 +1285,9 @@ export async function repairChecks({ page, check, url, shots }) {
         await sec.locator(`li[data-rule="${rule}"]`).waitFor();
     }
     check("G4: the exact git rules and the good paths and hosts are accepted", (await setCalls()).length === setsNow + 5);
+    const w6 = await warnOn("WebFetch(domain:docs.rs)");
+    const w7 = await warnOn("Bash(git status)");
+    check("G4: each WebFetch rule shows the web warning, and an exact Bash rule shows none", w6.mark === 1 && w6.text === WEB && w7.mark === 0 && w7.text === null, JSON.stringify([w6, w7]));
     // The staged state for the screenshot: a warning on a rule, and a proposal of the project (the app config entry is gone).
     await g4In.fill("");
     await page.keyboard.press("Escape");
@@ -1289,7 +1297,7 @@ export async function repairChecks({ page, check, url, shots }) {
     await sec.scrollIntoViewIfNeeded();
     await sec.locator("h3").scrollIntoViewIfNeeded();
     await page.waitForTimeout(250);
-    check("G4: the proposal and the warnings show together in the section", (await sec.locator('[data-testid="rules-proposal"]').count()) === 1 && (await sec.locator("li[data-rule] .mark").count()) === 3);
+    check("G4: the proposal and the warnings show together in the section", (await sec.locator('[data-testid="rules-proposal"]').count()) === 1 && (await sec.locator("li[data-rule] .mark").count()) === 6);
     await shot("gone-permissions-1280.png");
     const before = (await setCalls()).pop().args.allow;
     await sec.getByRole("button", { name: "Use these rules" }).click();

@@ -98,6 +98,20 @@ describe("mock: the rules for commands with no question", () => {
         expect(await b.invoke("floor_permissions_get", { path: FLOOR })).toEqual(saved.allow);
     });
 
+    it("floor_permissions_set gives the path warning and the web warning, and refuses a shell character", async () => {
+        const b = createMockBackend();
+        const saved = await b.invoke<{ allow: string[]; warnings: string[] }>("floor_permissions_set", {
+            path: FLOOR,
+            allow: ["Read(./src/**)", "Read(./README.md)", "WebFetch(domain:example.com)"],
+        });
+        expect(saved.warnings).toEqual([
+            "Read(./src/**): This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.",
+            "WebFetch(domain:example.com): This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.",
+        ]);
+        expect(await rejected(b.invoke("floor_permissions_set", { path: FLOOR, allow: ["Bash(ls && rm)"] }))).toMatch(/shell character &/);
+        expect(await b.invoke("floor_permissions_get", { path: FLOOR })).toEqual(saved.allow);
+    });
+
     it("refuses Bash(rtk proxy:*) and writes nothing", async () => {
         const b = createMockBackend();
         expect(await rejected(b.invoke("floor_permissions_set", { path: FLOOR, allow: ["Bash(rtk proxy:*)"] }))).toMatch(/refused/);

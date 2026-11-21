@@ -283,7 +283,9 @@ pub const GIT_WILDCARD_REFUSAL: &str = "A git rule must be the exact command, fo
 ///   `GIT_ALLOWED_SUBCOMMANDS`, and the pattern has no `--output`, `--exec`, `--ext-diff`,
 ///   `--textconv` or `-c`. Each other program is allowed. Each rule with a `*` gets a warning
 ///   (`allow_rule_warning`), a stronger one for the build tools and for a script of the project.
-///   The pattern does not start with a space.
+///   The pattern does not start with a space. The pattern has none of the shell characters
+///   `; & | < > ` $` (`BASH_SHELL_CHARACTERS`): a rule is one command, and shell text in it would
+///   hide a program from these checks. This check is before the check of the brackets.
 /// - `Read`, `Glob`, `Grep`: a path that is relative to the project (it does not start with `/`
 ///   or `~`), has no `..` part, and does not name `.swarm/state`. These tools alone (no pattern)
 ///   are refused: they open the whole disk.
@@ -337,6 +339,10 @@ pub fn check_allow_rule(rule: &str) -> Result<(), String> {
     let Some(pattern) = rest.strip_suffix(')') else {
         return Err(format!("\"{rule}\" is not a rule. {form}"));
     };
+    // This check is before the check of the brackets, so that `Bash(echo $(rm))` gets this text.
+    if tool == "Bash" {
+        check_bash_shell_characters(rule, pattern)?;
+    }
     if pattern.contains('(') || pattern.contains(')') {
         return Err(format!(
             "\"{rule}\" has a bracket inside the pattern. One entry is one rule: Tool(pattern)"
@@ -368,8 +374,26 @@ pub fn check_allow_rule(rule: &str) -> Result<(), String> {
 ///   blocked programs cannot be complete, so this warning is the real control.
 ///
 /// An exact `Bash` rule (no `*`) of another program gets none: it allows only that command. A rule
-/// of another tool gets none. A rule that `check_allow_rule` refuses gets none.
+/// that `check_allow_rule` refuses gets none. Two more warnings are for other tools:
+/// - `PATH_WILDCARD_WARNING` for a `Read`, `Glob` or `Grep` rule with a wildcard (`*`, `?`, `[`).
+///   The refusal of `.swarm/state` is a best effort, and a wildcard such as `**` can reach it;
+/// - `WEB_FETCH_WARNING` for each `WebFetch` rule: the app does not resolve the host name, so it
+///   can point at a local address.
 pub fn allow_rule_warning(rule: &str) -> Option<String> {
+    // A rule that the check refuses has no warning.
+    check_allow_rule(rule).ok()?;
+    for tool in ["Read(", "Glob(", "Grep("] {
+        if let Some(pattern) = rule.strip_prefix(tool).and_then(|r| r.strip_suffix(')')) {
+            // The refusal of `.swarm/state` is a best effort: a wildcard can match it in other
+            // ways (`**`, `*/state/**`). So each wildcard rule of these tools gets a warning.
+            return pattern
+                .contains(['*', '?', '['])
+                .then(|| format!("{rule}: {PATH_WILDCARD_WARNING}"));
+        }
+    }
+    if rule.starts_with("WebFetch(") {
+        return Some(format!("{rule}: {WEB_FETCH_WARNING}"));
+    }
     let pattern = rule.strip_prefix("Bash(")?.strip_suffix(')')?;
     let program = check_bash_pattern(rule, pattern).ok()?;
     if is_build_tool(&program.name) || program.runs_project_file {
@@ -378,6 +402,26 @@ pub fn allow_rule_warning(rule: &str) -> Option<String> {
     pattern
         .contains('*')
         .then(|| format!("{rule}: {WILDCARD_WARNING}"))
+}
+
+/// The warning for a `Read`, `Glob` or `Grep` rule with a wildcard.
+pub const PATH_WILDCARD_WARNING: &str = "This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.";
+
+/// The warning for each `WebFetch` rule.
+pub const WEB_FETCH_WARNING: &str = "This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.";
+
+/// Shell characters that a `Bash` rule must not have.
+const BASH_SHELL_CHARACTERS: [char; 7] = [';', '&', '|', '<', '>', '`', '$'];
+
+/// A rule is one command. Shell text in it (a second command, a pipe, a redirect, a substitution)
+/// would hide a program from the checks of `check_bash_pattern`.
+fn check_bash_shell_characters(rule: &str, pattern: &str) -> Result<(), String> {
+    match pattern.chars().find(|c| BASH_SHELL_CHARACTERS.contains(c)) {
+        Some(bad) => Err(format!(
+            "\"{rule}\" has the shell character {bad}. A rule is one command: write no ; & | < > ` or $ in it"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Is `name` a build or package tool, or a versioned name of one (`pip3`, `go1.22`)?
@@ -769,10 +813,14 @@ mod tests {
         Warn,
         /// Allowed, with the warning about a wildcard.
         Wild,
+        /// Allowed, with the warning about a wildcard in a path (`Read`, `Glob`, `Grep`).
+        Path,
+        /// Allowed, with the warning for a `WebFetch` rule.
+        Web,
         /// Refused.
         No,
     }
-    use Expect::{No, Pass, Warn, Wild};
+    use Expect::{No, Pass, Path, Warn, Web, Wild};
 
     fn outcome(rule: &str) -> Expect {
         match (check_allow_rule(rule), allow_rule_warning(rule)) {
@@ -783,6 +831,10 @@ mod tests {
             (Ok(()), None) => Pass,
             (Ok(()), Some(warning)) if warning == format!("{rule}: {PROJECT_CODE_WARNING}") => Warn,
             (Ok(()), Some(warning)) if warning == format!("{rule}: {WILDCARD_WARNING}") => Wild,
+            (Ok(()), Some(warning)) if warning == format!("{rule}: {PATH_WILDCARD_WARNING}") => {
+                Path
+            }
+            (Ok(()), Some(warning)) if warning == format!("{rule}: {WEB_FETCH_WARNING}") => Web,
             (Ok(()), Some(warning)) => panic!("{rule}: an unknown warning: {warning}"),
         }
     }
@@ -855,8 +907,16 @@ mod tests {
             ("Bash(cargo test *)", Warn),
             ("Bash(cargo *)", Warn),
             ("Bash(cargo:* *)", Warn),
-            ("Bash(cargo test;*)", Warn),
-            ("Bash(cargo test && *)", Warn),
+            // A shell character is refused (the review of 2026-11-21: `Bash(ls && rm)` hid `rm`).
+            ("Bash(cargo test;*)", No),
+            ("Bash(cargo test && *)", No),
+            ("Bash(ls && rm)", No),
+            ("Bash(ls | sh)", No),
+            ("Bash(ls `rm`)", No),
+            ("Bash(ls > x)", No),
+            ("Bash(ls; rm)", No),
+            ("Bash(echo $(rm))", No),
+            ("Bash(a < b)", No),
             ("Bash(uv run:*)", Warn),
             ("Bash(rtk cargo test:*)", Warn),
             ("Bash(rtk npm run build)", Warn),
@@ -1022,19 +1082,25 @@ mod tests {
             ("Grep(./.swarm/state)", No),
             ("Read(.swarm/**)", No),
             ("Read(.swarm/*)", No),
-            ("Read(.swarm/reports/**)", Pass),
-            ("Read(.swarm/employees/**)", Pass),
-            ("Read(*/state/**)", Pass),
-            ("Read(.sw*/state/**)", Pass),
-            ("Read(**)", Pass),
-            ("Read(*)", Pass),
-            ("Read(.ssh/**)", Pass),
+            ("Read(.swarm/reports/**)", Path),
+            ("Read(.swarm/employees/**)", Path),
+            ("Read(*/state/**)", Path),
+            ("Read(.sw*/state/**)", Path),
+            ("Read(**)", Path),
+            ("Read(*)", Path),
+            ("Read(.ssh/**)", Path),
             ("Read(.)", Pass),
-            ("Grep(**)", Pass),
-            ("Glob(**/*)", Pass),
+            ("Read(./README.md)", Pass),
+            ("Read(./src/**)", Path),
+            ("Glob(src/*.rs)", Path),
+            ("Grep(src/[a-z]*)", Path),
+            ("Glob(src/?.rs)", Path),
+            ("Grep(**)", Path),
+            ("Glob(**/*)", Path),
             // The web.
-            ("WebFetch(domain:a.b)", Pass),
-            ("WebFetch(domain:docs.rs)", Pass),
+            ("WebFetch(domain:example.com)", Web),
+            ("WebFetch(domain:a.b)", Web),
+            ("WebFetch(domain:docs.rs)", Web),
             ("WebFetch(domain:com.)", No),
             ("WebFetch(domain:localhost.localdomain)", No),
             ("WebFetch(domain:169.254.169.254)", No),
@@ -1045,13 +1111,14 @@ mod tests {
             ("WebFetch(domain:printer.local)", No),
             ("WebFetch(domain:Wiki.INTERNAL)", No),
             ("WebFetch(domain:a.localhost)", No),
-            ("WebFetch(domain:1password.com)", Pass),
+            ("WebFetch(domain:1password.com)", Web),
             ("WebFetch(domain:127.0.0.1)", No),
             ("WebFetch(domain:metadata.google.internal)", No),
-            // Known limit: the check does not resolve a name. These names point at 127.0.0.1.
-            ("WebFetch(domain:nip.io)", Pass),
-            ("WebFetch(domain:127.0.0.1.nip.io)", Pass),
-            ("WebFetch(domain:localtest.me)", Pass),
+            // Known limit: the check does not resolve a name. These names point at 127.0.0.1. So
+            // each WebFetch rule has the web warning.
+            ("WebFetch(domain:nip.io)", Web),
+            ("WebFetch(domain:127.0.0.1.nip.io)", Web),
+            ("WebFetch(domain:localtest.me)", Web),
             ("WebSearch", Pass),
             // Other tools.
             ("Edit(./x)", No),
@@ -1171,12 +1238,19 @@ mod tests {
             "Bash(rtk git status)",
             "Bash(cargo fmt --check)",
             "Bash(sort *)",
+            "Read(./src/**)",
+            "Read(./README.md)",
+            "WebFetch(domain:example.com)",
+            "Read(.swarm/state/**)",
+            "Bash(ls && rm)",
         ]
         .iter()
         .map(|r| (*r).to_owned())
         .collect();
         // One warning for each rule, in the order of the rules. The refused rule `git log:*` and
-        // the exact rule `rtk git status` have none. A build tool gets the stronger text.
+        // the exact rule `rtk git status` have none. A build tool gets the stronger text. A path
+        // rule with a wildcard and each WebFetch rule get a warning. The exact path rule has none.
+        // A refused rule (`Read(.swarm/state/**)`, `Bash(ls && rm)`) has none.
         assert_eq!(
             allow_rule_warnings(&rules),
             [
@@ -1184,11 +1258,77 @@ mod tests {
                 "Bash(rtk cargo test:*): This rule lets each agent of the floor run the project's own code with no question.",
                 "Bash(cargo fmt --check): This rule lets each agent of the floor run the project's own code with no question.",
                 "Bash(sort *): This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.",
+                "Read(./src/**): This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.",
+                "WebFetch(domain:example.com): This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.",
             ]
         );
         assert_eq!(allow_rule_warning("Bash(sh:*)"), None);
         assert_eq!(allow_rule_warning("WebSearch"), None);
-        assert_eq!(allow_rule_warning("Read(./src/**)"), None);
+        assert_eq!(allow_rule_warning("Read(./README.md)"), None);
+        assert_eq!(allow_rule_warning("Read(.swarm/state/**)"), None);
+        assert_eq!(allow_rule_warning("Bash(ls && rm)"), None);
+    }
+
+    #[test]
+    fn a_path_rule_with_a_wildcard_and_each_web_fetch_rule_get_their_warning() {
+        for rule in [
+            "Read(**)",
+            "Read(*/state/**)",
+            "Glob(src/*.rs)",
+            "Grep(src/[a-z]*)",
+            "Read(./src/?.rs)",
+        ] {
+            assert_eq!(check_allow_rule(rule), Ok(()), "{rule}");
+            assert_eq!(
+                allow_rule_warning(rule),
+                Some(format!("{rule}: {PATH_WILDCARD_WARNING}")),
+                "{rule}"
+            );
+        }
+        for rule in ["Read(./README.md)", "Glob(src/main.rs)", "Grep(Cargo.toml)"] {
+            assert_eq!(check_allow_rule(rule), Ok(()), "{rule}");
+            assert_eq!(allow_rule_warning(rule), None, "{rule}");
+        }
+        // A name can point at a local address, and the app does not resolve names.
+        for rule in [
+            "WebFetch(domain:example.com)",
+            "WebFetch(domain:127.0.0.1.nip.io)",
+        ] {
+            assert_eq!(check_allow_rule(rule), Ok(()), "{rule}");
+            assert_eq!(
+                allow_rule_warning(rule),
+                Some(format!("{rule}: {WEB_FETCH_WARNING}")),
+                "{rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bash_rule_with_a_shell_character_is_refused_with_the_text_for_it() {
+        for (rule, bad) in [
+            ("Bash(ls && rm)", '&'),
+            ("Bash(ls | sh)", '|'),
+            ("Bash(ls `rm`)", '`'),
+            ("Bash(ls > x)", '>'),
+            ("Bash(ls; rm)", ';'),
+            ("Bash(echo $(rm))", '$'),
+            ("Bash(a < b)", '<'),
+            ("Bash(rtk ls && rm)", '&'),
+            ("Bash(cargo test;*)", ';'),
+        ] {
+            assert_eq!(
+                check_allow_rule(rule),
+                Err(format!(
+                    "\"{rule}\" has the shell character {bad}. A rule is one command: write no ; & | < > ` or $ in it"
+                )),
+                "{rule}"
+            );
+            assert_eq!(allow_rule_warning(rule), None, "{rule}");
+        }
+        // The shell characters are for the tool `Bash` only. A path or a glob may use them.
+        assert_eq!(check_allow_rule("Read(./a&b.txt)"), Ok(()));
+        // A plain rule still passes.
+        assert_eq!(check_allow_rule("Bash(ls -la:*)"), Ok(()));
     }
 
     #[test]

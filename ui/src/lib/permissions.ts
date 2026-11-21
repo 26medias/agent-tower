@@ -12,8 +12,9 @@
 //   - only printable ASCII;
 //   - the entry is `WebSearch` alone, or `Tool(pattern)` with Tool one of Bash, Read, Glob, Grep,
 //     WebFetch, and a pattern with no `(` or `)`;
-//   - `Bash`: the pattern does not start with a space. The first word (up to the first space or `:`)
-//     has only A-Z a-z 0-9 . _ / + - . `rtk` is unwrapped first (the check applies to the words after
+//   - `Bash`: the pattern has none of the shell characters ; & | < > ` and $ (a rule is one command;
+//     this check is before the check of the brackets). The pattern does not start with a space. The
+//     first word (up to the first space or `:`) has only A-Z a-z 0-9 . _ / + - . `rtk` is unwrapped first (the check applies to the words after
 //     it; `rtk` alone, `rtk` with an option and `rtk proxy` and the like are refused). The program is
 //     not on the list of programs that run other programs, change or destroy data, or send data out.
 //     `git` rules must be exact (no `*`: a wildcard lets the agent add `--output`, which writes a
@@ -21,8 +22,10 @@
 //     and `-c` are refused.
 //     Each other program is allowed. A rule with a `*` gets a warning from the server, a stronger
 //     one for the build tools and for a script of the project (`ruleWarning` gives the same texts);
-//   - `Read`, `Glob`, `Grep`: a relative pattern with no `..`, and not the folder `.swarm/state`;
-//   - `WebFetch`: only `domain:<host>`, with a dot. No IP address, `localhost`, `.local`, `.internal`;
+//   - `Read`, `Glob`, `Grep`: a relative pattern with no `..`, and not the folder `.swarm/state`. A
+//     pattern with a `*`, `?` or `[` gets a warning from the server (`ruleWarning` gives the same text);
+//   - `WebFetch`: only `domain:<host>`, with a dot. No IP address, `localhost`, `.local`, `.internal`.
+//     Each WebFetch rule gets a warning from the server: the app does not resolve the host name;
 //   - `WebSearch`: the bare name only.
 
 export const ALLOW_RULE_MAX_CHARS = 200;
@@ -96,6 +99,12 @@ export function checkAllowRule(rule: string): string | null {
     const tool = rule.slice(0, open);
     const pattern = rule.slice(open + 1, -1);
     if (!RULE_TOOLS.includes(tool)) return `"${tool}" is not a tool that a rule can name. ${FORM}`;
+    if (tool === "Bash") {
+        // A rule is one command. Shell text in it would hide a program from the checks of `checkBash`.
+        // This check is before the check of the brackets, so that `Bash(echo $(rm))` gets this text.
+        const shell = /[;&|<>`$]/.exec(pattern);
+        if (shell) return `"${rule}" has the shell character ${shell[0]}. A rule is one command: write no ; & | < > \` or $ in it`;
+    }
     if (pattern.includes("(") || pattern.includes(")")) return `The pattern of "${rule}" must not have a ( or a ) inside.`;
     if (pattern.trim() === "") return `"${rule}" has an empty pattern.`;
     switch (tool) {
@@ -186,16 +195,32 @@ function checkBash(rule: string, pattern: string): string | null {
     return null;
 }
 
+/** The text of the warning of the server for a `Read`, `Glob` or `Grep` rule with a wildcard, without the rule. */
+export const PATH_WILDCARD_WARNING_TEXT =
+    "This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.";
+/** The text of the warning of the server for each `WebFetch` rule, without the rule. */
+export const WEB_FETCH_WARNING_TEXT =
+    "This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.";
+
 /**
  * The warning that the server gives for a rule, or `null`. The server is the judge; the mock uses this to
  * give the same warning. One warning at most for each rule, and the stronger one wins:
  *   - `<rule>: <WARNING_TEXT>` for a build tool (also an exact rule, also after `rtk`) and for a script
  *     of the project (a relative path);
- *   - `<rule>: <WILDCARD_WARNING_TEXT>` for each other `Bash` rule with a `*`.
+ *   - `<rule>: <WILDCARD_WARNING_TEXT>` for each other `Bash` rule with a `*`;
+ *   - `<rule>: <PATH_WILDCARD_WARNING_TEXT>` for a `Read`, `Glob` or `Grep` rule with a `*`, `?` or `[`;
+ *   - `<rule>: <WEB_FETCH_WARNING_TEXT>` for each `WebFetch` rule.
  * An exact rule of another program has none. A rule that is refused has none.
  */
 export function ruleWarning(rule: string): string | null {
-    if (checkAllowRule(rule) !== null || !rule.startsWith("Bash(") || !rule.endsWith(")")) return null;
+    if (checkAllowRule(rule) !== null || !rule.endsWith(")")) return null;
+    for (const tool of ["Read(", "Glob(", "Grep("]) {
+        if (rule.startsWith(tool)) {
+            return /[*?[]/.test(rule.slice(tool.length, -1)) ? `${rule}: ${PATH_WILDCARD_WARNING_TEXT}` : null;
+        }
+    }
+    if (rule.startsWith("WebFetch(")) return `${rule}: ${WEB_FETCH_WARNING_TEXT}`;
+    if (!rule.startsWith("Bash(")) return null;
     const pattern = rule.slice("Bash(".length, -1);
     const unwrapped = unwrapRtk(pattern);
     if (unwrapped.error) return null;

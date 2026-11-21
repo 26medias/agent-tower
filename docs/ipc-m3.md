@@ -73,21 +73,32 @@ refused: ...`, `there is no session of the last team to resume`, `the last team 
 ```ts
 interface PermissionsSaved {
   allow: string[];     // the stored rules, trimmed, with no duplicate
-  warnings: string[];  // one text for each rule that runs the code of the project, and for each Bash rule with a *
+  warnings: string[];  // one text for each rule that runs the code of the project, each Bash rule with a *, each Read/Glob/Grep rule with a wildcard, and each WebFetch rule
 }
 ```
 
 `floor_permissions_set` returned `string[]` before. It returns `PermissionsSaved` now. The old
 array is the field `allow`. A warning is `<rule>: <text>`. The rule is saved. The warning is for
-the operator to read. The UI shows each warning next to the saved list. There are two texts, and a
-rule gets one at most (the stronger one):
+the operator to read. The UI shows each warning next to the saved list. There are four texts, and a
+rule gets one at most (for a `Bash` rule, the stronger one):
 
 - For a build or package tool, and for a script of the project (also an exact rule):
   `This rule lets each agent of the floor run the project's own code with no question.`
 - For each other `Bash` rule that has a `*` in it:
   `This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.`
 
-An exact `Bash` rule of another program (no `*`) has no warning: it allows only that command.
+- For each `Read`, `Glob` or `Grep` rule that has a wildcard (`*`, `?` or `[`) in its pattern:
+  `This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.`
+  The refusal of `.swarm/state` (below) is a best effort. A wildcard can reach that folder in other
+  ways (`Read(**)`, `Read(*/state/**)`), so each wildcard rule of these tools has the warning.
+- For each `WebFetch` rule:
+  `This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.`
+  The app does not resolve a host name, so a name can point at a local address
+  (`WebFetch(domain:127.0.0.1.nip.io)`).
+
+An exact `Bash` rule of another program (no `*`) has no warning: it allows only that command. A
+`Read`, `Glob` or `Grep` rule with no wildcard (`Read(./README.md)`) has no warning. A rule that
+the check refuses has no warning.
 
 The rules are in the app config file (`programs.toml` in the config folder, mode 0600), in the
 table `[floor_permissions]`. Each key is the real absolute path of a floor (symbolic links
@@ -122,14 +133,21 @@ two things:
 
 1. It refuses what it can name: the programs and forms below. The list of blocked programs is a
    best effort, and it is not complete.
-2. It gives a warning for each `Bash` rule that has a `*` in it (the texts are above). This
-   warning is the real control. The list is the choice of the operator, and an agent cannot write
+2. It gives a warning for each `Bash` rule that has a `*` in it, for each `Read`, `Glob` or `Grep`
+   rule that has a wildcard, and for each `WebFetch` rule (the texts are above). This warning is
+   the real control. The list is the choice of the operator, and an agent cannot write
    it.
 
 The pattern must not be empty, and it depends on the tool:
 
-- `Bash`: the pattern does not start with a space. The first word (up to the first space or `:`)
-  is not empty and has only `[A-Za-z0-9._/+-]`, so `Bash(*)`, `Bash(* *)`, `Bash(?*)`, `Bash(*.sh)`
+- `Bash`: the pattern has none of the shell characters `;` `&` `|` `<` `>` `` ` `` and `$`. A rule is
+  one command, and shell text in it would hide a program from the checks below. So
+  `Bash(ls && rm)`, `Bash(ls | sh)`, ``Bash(ls `rm`)``, `Bash(ls > x)`, `Bash(ls; rm)`,
+  `Bash(echo $(rm))` and `Bash(a < b)` are refused, each with the text
+  ``"<rule>" has the shell character <c>. A rule is one command: write no ; & | < > ` or $ in it``.
+  This check is before the check of the brackets, so `Bash(echo $(rm))` gets this text. The shell
+  characters are for the tool `Bash` only. The pattern does not start with a space. The first
+  word (up to the first space or `:`) is not empty and has only `[A-Za-z0-9._/+-]`, so `Bash(*)`, `Bash(* *)`, `Bash(?*)`, `Bash(*.sh)`
   and `Bash(:*)` are refused.
   - `rtk` is unwrapped first: the check applies to the words after `rtk`. `Bash(rtk:*)`, `rtk`
     with an option after it (`rtk -v ...`), and `rtk` with `proxy`, `run`, `err`, `test`,
@@ -194,7 +212,7 @@ agent of the floor can write the code of its own worktree. So a rule for them le
 code with no question. The warning says this. The app config is outside the project, but a Codex
 employee has no enforced limits on this machine, so it can write the file if it tries. The list of
 blocked programs is not complete, and it cannot be: the warning of each wildcard rule is the
-control. The check does not resolve a host name, so `WebFetch(domain:127.0.0.1.nip.io)` passes.
+control. The check does not resolve a host name, so `WebFetch(domain:127.0.0.1.nip.io)` passes, with the web warning.
 
 Known limit: the rules of a floor are stored by the path of the floor. If another floor takes that
 path (for example a folder is moved away and another folder is renamed to the same path), that

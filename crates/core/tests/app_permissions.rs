@@ -105,11 +105,14 @@ fn the_operator_sets_and_reads_the_rules_in_the_app_config() {
             "Read(./src/**)"
         ]
     );
-    // One warning for each rule that runs the code of the project, with the rule in front. The
-    // exact rule `Bash(git status)` has none.
+    // One warning for each rule that runs the code of the project, and one for the path rule with
+    // a wildcard, with the rule in front. The exact rule `Bash(git status)` has none.
     assert_eq!(
         saved.warnings,
-        [format!("Bash(rtk cargo test:*): {WARNING}")]
+        [
+            format!("Bash(rtk cargo test:*): {WARNING}"),
+            format!("Read(./src/**): {PATH_WILDCARD_WARNING}"),
+        ]
     );
     assert_eq!(
         rig.tower.floor_permissions_get(&rig.cwd).unwrap(),
@@ -227,6 +230,10 @@ fn two_floors_keep_separate_lists_and_forget_removes_the_entry() {
     assert!(!config_text(&rig).contains("floor_permissions"));
 }
 
+const PATH_WILDCARD_WARNING: &str = "This rule lets each agent of the floor read every file that the pattern matches, with no question. A pattern with a wildcard can match more files than you expect.";
+
+const WEB_FETCH_WARNING: &str = "This rule lets each agent of the floor get pages from this host with no question. The app does not check where the host name points.";
+
 const WILDCARD_WARNING: &str = "This rule lets each agent of the floor run this program with any arguments and no question. Many programs can write files or run other commands through their options.";
 
 /// The check is informed consent, not a wall: a wildcard rule of a plain program is stored with a
@@ -247,10 +254,12 @@ fn a_wildcard_rule_of_a_plain_program_has_a_warning_and_an_exact_rule_has_none()
                 "Bash(rtk cargo test:*)",
                 "Bash(cat README.md)",
                 "Read(./src/**)",
+                "Read(./README.md)",
+                "WebFetch(domain:example.com)",
             ]),
         )
         .unwrap();
-    assert_eq!(saved.allow.len(), 7);
+    assert_eq!(saved.allow.len(), 9);
     assert_eq!(
         saved.warnings,
         [
@@ -258,7 +267,20 @@ fn a_wildcard_rule_of_a_plain_program_has_a_warning_and_an_exact_rule_has_none()
             format!("Bash(sort *): {WILDCARD_WARNING}"),
             format!("Bash(cargo fmt --check): {WARNING}"),
             format!("Bash(rtk cargo test:*): {WARNING}"),
+            format!("Read(./src/**): {PATH_WILDCARD_WARNING}"),
+            format!("WebFetch(domain:example.com): {WEB_FETCH_WARNING}"),
         ]
+    );
+    // A shell character is refused, and nothing is stored for it.
+    let error = rig
+        .tower
+        .floor_permissions_set(&rig.cwd, rules(&["Bash(ls && rm)"]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("has the shell character &"), "{error}");
+    assert_eq!(
+        rig.tower.floor_permissions_get(&rig.cwd).unwrap(),
+        saved.allow
     );
     // A git rule with a wildcard is refused, and nothing is stored for it.
     let error = rig
@@ -413,7 +435,8 @@ fn the_old_table_is_only_a_proposal_and_set_removes_it_and_keeps_the_rest() {
     let proposed = rig.tower.floor_permissions_proposed(&rig.cwd).unwrap();
     let saved = rig.tower.floor_permissions_set(&rig.cwd, proposed).unwrap();
     assert_eq!(saved.allow, ["Bash(cargo test:*)", "Read(./src/**)"]);
-    assert_eq!(saved.warnings.len(), 1);
+    // The build tool rule and the path rule with a wildcard each have a warning.
+    assert_eq!(saved.warnings.len(), 2);
     let text = floor_toml(&rig);
     assert!(
         !text.contains("permissions") && !text.contains("cargo"),

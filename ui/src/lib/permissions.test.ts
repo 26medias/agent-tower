@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALLOW_RULES_MAX, EXAMPLE_RULES, GIT_WILDCARD_REFUSAL, WARNING_TEXT, WILDCARD_WARNING_TEXT, addRule, checkAllowRule, mergeRules, removeRule, ruleWarning } from "./permissions";
+import { ALLOW_RULES_MAX, EXAMPLE_RULES, GIT_WILDCARD_REFUSAL, PATH_WILDCARD_WARNING_TEXT, WARNING_TEXT, WEB_FETCH_WARNING_TEXT, WILDCARD_WARNING_TEXT, addRule, checkAllowRule, mergeRules, removeRule, ruleWarning } from "./permissions";
 
 describe("checkAllowRule", () => {
     it("accepts the good forms", () => {
@@ -47,7 +47,14 @@ describe("checkAllowRule", () => {
             ["Bash(echo (hi))", /\( or a \)/],
             ["Bash( ls:*)", /start with a space/],
             ["Bash(*.sh)", /first word/],
-            ["Bash(ls;rm:*)", /first word/],
+            ["Bash(ls;rm:*)", /shell character ;/],
+            ["Bash(ls && rm)", /shell character &/],
+            ["Bash(ls | sh)", /shell character \|/],
+            ["Bash(ls `rm`)", /shell character `/],
+            ["Bash(ls > x)", /shell character >/],
+            ["Bash(ls; rm)", /shell character ;/],
+            ["Bash(echo $(rm))", /shell character \$/],
+            ["Bash(a < b)", /shell character </],
             ["Bash(sh -c x)", /"sh" is not allowed/],
             ["Bash(rm:*)", /"rm" is not allowed/],
             ["Bash(sudo ls)", /"sudo" is not allowed/],
@@ -181,8 +188,22 @@ describe("ruleWarning", () => {
     });
 
     it("gives no warning for an exact rule of a plain program, for the other tools, and for a rule that is refused", () => {
-        for (const rule of ["Bash(ls)", "Bash(rtk git status)", "Bash(cat README.md)", "Bash(/usr/bin/ls -l)", "Read(./src/**)", "Read(**)", "WebSearch", "Bash(rtk:*)", "Bash(sh x)", "Bash(sh:*)", "Bash(git status:*)", "Bash(sqlite3:*)"]) {
+        for (const rule of ["Bash(ls)", "Bash(rtk git status)", "Bash(cat README.md)", "Bash(/usr/bin/ls -l)", "Read(./README.md)", "Glob(src/main.rs)", "WebSearch", "Read(.swarm/state/**)", "Bash(ls && rm)", "Bash(rtk:*)", "Bash(sh x)", "Bash(sh:*)", "Bash(git status:*)", "Bash(sqlite3:*)"]) {
             expect(ruleWarning(rule), rule).toBeNull();
+        }
+    });
+
+    it("warns about the wildcard of a Read, Glob or Grep rule", () => {
+        for (const rule of ["Read(**)", "Read(*/state/**)", "Read(./src/**)", "Glob(src/*.rs)", "Grep(src/[a-z]*)", "Read(./src/?.rs)"]) {
+            expect(checkAllowRule(rule), rule).toBeNull();
+            expect(ruleWarning(rule), rule).toBe(`${rule}: ${PATH_WILDCARD_WARNING_TEXT}`);
+        }
+    });
+
+    it("warns about each WebFetch rule", () => {
+        for (const rule of ["WebFetch(domain:example.com)", "WebFetch(domain:127.0.0.1.nip.io)"]) {
+            expect(checkAllowRule(rule), rule).toBeNull();
+            expect(ruleWarning(rule), rule).toBe(`${rule}: ${WEB_FETCH_WARNING_TEXT}`);
         }
     });
 
