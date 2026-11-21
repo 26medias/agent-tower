@@ -689,3 +689,111 @@ fn the_logo_does_not_start_by_itself_without_a_key() {
     assert!(!view(&rig).logo_busy);
     rig.stop_and_wait(&id);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The setup session: the project listing and the removal mark
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_setup_instructions_end_with_the_listing_of_the_project_and_of_the_employees() {
+    let rig = Rig::new();
+    rig.create_floor();
+    std::fs::write(rig.cwd.join("README.md"), "# Demo\n").unwrap();
+    std::fs::create_dir_all(rig.cwd.join("crates/demo_sim")).unwrap();
+    std::fs::create_dir_all(rig.cwd.join("node_modules/left-pad")).unwrap();
+    std::fs::create_dir_all(rig.cwd.join(".git/objects")).unwrap();
+    let id = rig
+        .tower
+        .setup_start(&rig.cwd, CliKind::Codex, 24, 80)
+        .unwrap()
+        .session_id;
+    rig.wait_first_turn(&id);
+    let calls = rig.calls();
+    let text = calls[0].instructions.as_deref().unwrap();
+    let section = &text[text.find("## The project now").expect("the section")..];
+    // The section comes after the fixed text.
+    assert!(text.find(FLOOR_INIT.trim()).unwrap() < text.find("## The project now").unwrap());
+    assert!(section.contains("You run in the CLI `codex`."), "{section}");
+    assert!(section.contains("\nREADME.md\n"), "{section}");
+    assert!(section.contains("\ncrates/\n    demo_sim/\n"), "{section}");
+    // The content of build folders and of hidden folders is not shown.
+    assert!(section.contains("\nnode_modules/\n"), "{section}");
+    assert!(!section.contains("left-pad"), "{section}");
+    assert!(section.contains("\n.git/\n"), "{section}");
+    assert!(!section.contains("objects"), "{section}");
+    // The two employees of a new floor, with their roles.
+    assert!(section.contains("has 2 employee files"), "{section}");
+    assert!(section.contains("ceo.md (role: CEO)"), "{section}");
+    assert!(
+        section.contains("pm.md (role: Project Manager)"),
+        "{section}"
+    );
+}
+
+#[test]
+fn a_floor_with_no_employee_file_says_so_in_the_setup_instructions() {
+    let rig = Rig::new();
+    rig.create_floor();
+    for slug in ["ceo", "pm"] {
+        std::fs::remove_file(rig.cwd.join(format!(".swarm/employees/{slug}.md"))).unwrap();
+    }
+    let id = rig
+        .tower
+        .setup_start(&rig.cwd, CliKind::Claude, 24, 80)
+        .unwrap()
+        .session_id;
+    rig.wait_first_turn(&id);
+    let calls = rig.calls();
+    let text = calls[0].instructions.as_deref().unwrap();
+    assert!(text.contains("has no employee file"), "{text}");
+    assert!(text.contains("You run in the CLI `claude`."));
+}
+
+#[test]
+fn an_employee_file_with_the_delete_mark_is_removed_at_the_end_of_a_setup_turn() {
+    let rig = Rig::new();
+    rig.create_floor();
+    let dir = rig.cwd.join(".swarm/employees");
+    let file = |slug: &str, role_text: &str| {
+        std::fs::write(
+            dir.join(format!("{slug}.md")),
+            format!("+++\nname = \"Eli\"\nrole = \"Engineer\"\ncli = \"claude\"\npermission = \"read-only\"\n+++\n{role_text}\n"),
+        )
+        .unwrap();
+    };
+    file("eng-1", "Write code.");
+    file("eng-2", "DELETE");
+    let id = rig
+        .tower
+        .setup_start(&rig.cwd, CliKind::Claude, 24, 80)
+        .unwrap()
+        .session_id;
+    rig.wait_first_turn(&id);
+    wait_for("the floor-changed of the first turn", || {
+        floor_events(&rig) >= 1
+    });
+    assert_eq!(view(&rig).employees.len(), 4);
+
+    // The agent marks one file. A file that only has the word in its role text is not a mark.
+    std::fs::write(dir.join("eng-1.md"), "DELETE\n").unwrap();
+    setup_turn(&rig, &id, "next");
+    let floor = view(&rig);
+    let slugs: Vec<&str> = floor.employees.iter().map(|e| e.slug.as_str()).collect();
+    assert_eq!(slugs, ["ceo", "eng-2", "pm"]);
+    assert_eq!(floor.employee_errors, Vec::<String>::new());
+    assert!(!dir.join("eng-1.md").exists());
+    assert!(dir.join("eng-2.md").exists());
+}
+
+#[test]
+fn the_delete_mark_does_nothing_outside_a_setup_session() {
+    let rig = Rig::new();
+    rig.create_floor();
+    let marked = rig.cwd.join(".swarm/employees/eng-1.md");
+    std::fs::write(&marked, "DELETE").unwrap();
+    let id = rig.start("ceo").session_id;
+    rig.wait_first_turn(&id);
+    rig.stop_and_wait(&id);
+    assert!(marked.exists());
+    assert_eq!(view(&rig).employee_errors.len(), 1);
+}

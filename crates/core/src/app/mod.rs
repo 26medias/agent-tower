@@ -37,6 +37,7 @@ mod live;
 mod logo_run;
 mod models;
 mod settings;
+mod setup;
 mod tools;
 
 use crate::adapter::{
@@ -866,7 +867,7 @@ impl Tower {
         let (employee, previous) = {
             let store = locked(&floor.store);
             let mut employee = match setup_cli {
-                Some(cli) => setup_employee(cli),
+                Some(cli) => setup_employee(cli, &floor.path),
                 None => store
                     .read_employees()?
                     .employees
@@ -1036,6 +1037,8 @@ impl Tower {
         Arc::new(move || {
             // A `floor.toml` that does not load (the agent is in the middle of an edit) keeps the
             // old data. The observer still gets the event, because employee files may have changed.
+            // The setup agent marks a file that it wants removed; the app removes it here.
+            setup::remove_marked_employees(&floor.path);
             let loaded = reload(&floor).is_ok();
             notifier.floor_changed(&floor.path);
             // The app is closing: the stop of the session must not start a request.
@@ -1350,8 +1353,9 @@ fn instructions(employee: &Employee) -> String {
     text
 }
 
-/// The employee record of the setup session. No file has it. Its role text is `FLOOR_INIT`.
-fn setup_employee(cli: CliKind) -> Employee {
+/// The employee record of the setup session. No file has it. Its role text is `FLOOR_INIT`, then
+/// the section "The project now" for this folder.
+fn setup_employee(cli: CliKind, cwd: &Path) -> Employee {
     Employee {
         name: "Setup".to_owned(),
         slug: SETUP_SLUG.to_owned(),
@@ -1361,7 +1365,11 @@ fn setup_employee(cli: CliKind) -> Employee {
         model: None,
         effort: None,
         permission: PermissionPolicy::EditInWorktree,
-        role_text: FLOOR_INIT.to_owned(),
+        role_text: format!(
+            "{}\n\n{}",
+            FLOOR_INIT.trim(),
+            setup::project_section(cwd, cli)
+        ),
     }
 }
 

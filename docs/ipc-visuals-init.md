@@ -77,10 +77,14 @@ The existing session commands (`session_stop`, `session_attach`, `pty_write`, `p
   effort come from `[defaults]` of `floor.toml`.
 - The instructions (the "floor-init skill") go in through the same path as the role text of an
   employee. Their text is in `crates/core/src/app/floor_init.md` (included with `include_str!`). They tell the agent:
-    1. Read `CLAUDE.md`, `AGENTS.md`, `README*` and the top-level layout of the project. Use the file read and search tools, not shell commands. Do not change project files outside `.swarm/`.
-    2. Tell the operator in a few lines what the project is, and propose a team: always one `ceo` and one `pm`, plus 1 to 6 other employees with a role, a CLI and a policy for each (a model and an effort only if the operator asks for them or the project documents state them; otherwise "floor default" and the fields stay out of the file). Say what will be written, and write nothing before the operator agrees. Ask the operator to confirm or change it. Wait for the answer.
-    3. After the operator agrees: write one file `.swarm/employees/<slug>.md` for each employee, in the exact format that the instructions show (the format of the store), and delete employee files that are no longer wanted. Write `[brand] description` and `[brand] logo_prompt` into `.swarm/floor.toml` and keep the other content of that file.
-    4. Tell the operator that the setup is complete and that they can stop this session.
+    1. Read the project documents and find what the product is and who uses it. Do not change project files outside `.swarm/`.
+    2. Design the company from the product, with a checklist of disciplines (direction, design, art and audio, engineering with one generalist, quality, users, operations). There is no fixed team size. A floor that already has employees gets an audit first.
+    3. Propose the full team and a smaller version, show conflicts between project documents, and write nothing before the operator agrees.
+    4. After the operator agrees: write one file `.swarm/employees/<slug>.md` for each employee. The `pm` text lists the team and the routing rules; the `ceo` text names its direct reports. Write `[brand] description` and `[brand] logo_prompt` into `.swarm/floor.toml` and keep the other content of that file.
+    5. Tell the operator that the setup is complete.
+- The text also gives the facts of the app that the agent cannot see: no maximum team size, the cost of an idle employee, the effect of `manager`, what each permission value does for each CLI, and which tools an employee has.
+- The app adds a section "The project now" at the end of the instructions: the CLI of the session, the employee files that exist (with their roles), and the top two levels of the project folder. The content of hidden folders and of build folders is not listed.
+- To remove an employee, the agent replaces the full content of its file with the word `DELETE`. At the end of each turn of the setup session and at its stop, before the reload, the app removes each such file. The mark does nothing outside a setup session.
 - The first message of the session is a fixed short text: `Start the floor setup.`
 - After each turn of the setup session ends (status goes to `idle` or `done`) and when it stops, the
   app reads the floor again and sends `floor-changed`. Employee files that do not load show in
