@@ -5,7 +5,9 @@
 // `window.__towerMockConfig.sandboxProbe`. The real probe needs `bwrap` and the desktop app.
 import { join } from "node:path";
 
-const HELP = "Codex needs an AppArmor profile that lets bwrap use user namespaces. See docs/spec.md, decision O7.";
+const HELP = "On Ubuntu 24.04 and later, AppArmor blocks bwrap by default. Add an AppArmor profile that lets /usr/bin/bwrap use user namespaces, then press Test again.";
+const NETWORK = "With the sandbox on, the commands of a Codex employee have no network access (for example a package install fails).";
+const DOWN = "The setting is on, but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or turn the setting off.";
 const UID_ERROR = "bwrap: setting up uid map: Permission denied";
 
 export async function sandboxChecks({ page, check, url, shots }) {
@@ -51,6 +53,10 @@ export async function sandboxChecks({ page, check, url, shots }) {
     check("sandbox: the switch has its text, it is off by default and it is enabled",
         (await text()).includes("Use the Codex sandbox for Codex employees") && !(await sw.isChecked()) && (await sw.isEnabled()));
     check("sandbox: no reason line shows while the switch is enabled", (await section.locator('[data-testid="sandbox-reason"]').count()) === 0);
+    check("sandbox: state (a) off: the section is in the mode off, with no red line, and the network line shows",
+        (await section.getAttribute("data-mode")) === "off" && (await section.locator('[data-testid="sandbox-down"]').count()) === 0 &&
+            (await section.locator('[data-testid="sandbox-network"]').innerText()) === NETWORK);
+    check("sandbox: the old help line no longer says the commands have no network (the new line says it)", !(await text()).includes("The commands have no network access."));
     const note = await text();
     check("sandbox: a line says what the switch changes, and that it applies at the next start of a session",
         note.includes("the Codex CLI enforces the policy of each Codex employee") &&
@@ -70,6 +76,8 @@ export async function sandboxChecks({ page, check, url, shots }) {
     await openSettings();
     await settled();
     check("sandbox: the switch is still on after the panel is closed and opened again", await sw.isChecked());
+    check("sandbox: state (b) on and the probe works: the mode is on-works, with no red line",
+        (await section.getAttribute("data-mode")) === "on-works" && (await section.locator('[data-testid="sandbox-down"]').count()) === 0);
     await shot("sandbox-works-on.png");
     await sw.uncheck();
     await page.waitForFunction(() => window.__towerMockCalls.filter((c) => c.command === "settings_set").pop()?.args.codexSandbox === false);
@@ -84,6 +92,10 @@ export async function sandboxChecks({ page, check, url, shots }) {
     check("sandbox: fails shows the first line of the error", (await state.innerText()).includes(UID_ERROR) && (await state.getAttribute("data-state")) === "fails");
     check("sandbox: fails shows the line about the AppArmor profile",
         (await section.locator('[data-testid="sandbox-help"]').innerText()) === HELP);
+    check("sandbox: the network line shows also when the probe fails, and there is no red line while the setting is off",
+        (await section.locator('[data-testid="sandbox-network"]').innerText()) === NETWORK && (await section.locator('[data-testid="sandbox-down"]').count()) === 0 &&
+            (await section.getAttribute("data-mode")) === "off");
+    check("sandbox: the help line has no file reference", !(await section.locator('[data-testid="sandbox-help"]').innerText()).includes("docs/spec.md"));
     check("sandbox: the switch is disabled and off, with its reason",
         !(await sw.isEnabled()) && !(await sw.isChecked()) &&
             (await section.locator('[data-testid="sandbox-reason"]').innerText()) === "The switch stays off because the test did not pass.");
@@ -134,7 +146,7 @@ export async function sandboxChecks({ page, check, url, shots }) {
     await shot("sandbox-refused.png");
     await closeSettings();
 
-    // ================= The switch is on, and the machine changes =================
+    // ================= The switch is on, and the machine changes (state c) =================
     await fresh({ state: "works" });
     await openSettings();
     await settled();
@@ -142,12 +154,85 @@ export async function sandboxChecks({ page, check, url, shots }) {
     await page.waitForFunction(() => window.__towerMockCalls.filter((c) => c.command === "settings_set").pop()?.args.codexSandbox === true);
     await closeSettings();
     await config({ sandboxProbe: { state: "fails", detail: UID_ERROR } });
+    const setCalls = (await calls("settings_set")).length;
     await openSettings();
     await settled();
+    const down = section.locator('[data-testid="sandbox-down"]');
+    check("sandbox: state (c) on and the probe fails: a red line says the sandbox does not work and what to do",
+        (await down.count()) === 1 && (await down.innerText()).replace(/\s+/g, " ") === DOWN && (await section.getAttribute("data-mode")) === "on-down", await section.innerText());
+    check("sandbox: the red line is red (the danger colour) and the stored value did not change by itself",
+        (await down.evaluate((el) => getComputedStyle(el).color)) !== (await section.locator('[data-testid="sandbox-help"]').evaluate((el) => getComputedStyle(el).color)) &&
+            (await calls("settings_set")).length === setCalls);
     check("sandbox: a switch that is on can be turned off while the test fails",
         (await sw.isChecked()) && (await sw.isEnabled()) && (await state.getAttribute("data-state")) === "fails");
+    check("sandbox: state (c) also shows the help line for the probe and the network line",
+        (await section.locator('[data-testid="sandbox-help"]').innerText()) === HELP && (await section.locator('[data-testid="sandbox-network"]').count()) === 1);
+    await shot("sandbox-on-down.png");
+    // The switch stays enabled while a new test runs, so the operator can turn it off at any time.
+    await config({ sandboxProbe: { state: "fails", detail: UID_ERROR }, sandboxProbeMs: 400 });
+    await again.click();
+    check("sandbox: the switch that is on stays enabled during a test, and the red line is not shown while the test runs",
+        (await sw.isEnabled()) && (await down.count()) === 0 && (await section.getAttribute("data-mode")) === "on-testing");
+    await settled();
+    check("sandbox: the red line is back after the test", (await down.count()) === 1);
     await sw.uncheck();
     await page.waitForFunction(() => window.__towerMockCalls.filter((c) => c.command === "settings_set").pop()?.args.codexSandbox === false);
-    check("sandbox: it is off after that", !(await sw.isChecked()) && !(await sw.isEnabled()));
+    check("sandbox: it is off after that, the red line is gone, and the switch is disabled again",
+        !(await sw.isChecked()) && !(await sw.isEnabled()) && (await down.count()) === 0 && (await section.getAttribute("data-mode")) === "off");
+    await closeSettings();
+
+    // ================= The refused start of a Codex employee: the toast and the button =================
+    await fresh({ state: "works" });
+    await page.evaluate(() => window.__towerMock.patchFloor("/home/demo/tower", { employee: { slug: "eng-lin", patch: { cli: "codex" } } }));
+    await openSettings();
+    await settled();
+    await sw.check();
+    await page.waitForFunction(() => window.__towerMockCalls.filter((c) => c.command === "settings_set").pop()?.args.codexSandbox === true);
+    await closeSettings();
+    await config({ sandboxProbe: { state: "fails", detail: UID_ERROR } });
+    await page.locator('.emp[data-slug="eng-lin"] .hit').click();
+    await page.locator(".bar button.start").click();
+    const toast = page.locator(".toast").filter({ hasText: "does not work on this machine now" });
+    await toast.waitFor();
+    const toastText = await toast.innerText();
+    check("sandbox: a refused start shows an error toast with the text, with no code prefix",
+        toastText.includes("The Codex sandbox does not work on this machine now (" + UID_ERROR + ")") &&
+            toastText.includes('The start of Lin is refused, because the setting "Use the Codex sandbox" is on.') && !toastText.includes("SANDBOX_DOWN"), toastText);
+    check("sandbox: the toast has the button Open Settings", (await toast.getByRole("button", { name: "Open Settings" }).count()) === 1);
+    await page.waitForTimeout(1500);
+    check("sandbox: the error toast stays", (await toast.count()) === 1);
+    check("sandbox: the refusal did not change the stored value (no settings_set after the switch on)",
+        (await calls("settings_set")).pop().args.codexSandbox === true);
+    await toast.getByRole("button", { name: "Open Settings" }).click();
+    await dialog.waitFor();
+    await settled();
+    await page.waitForTimeout(200);
+    const inView = await page.evaluate(() => {
+        const d = document.querySelector('[role="dialog"]').getBoundingClientRect();
+        const t = document.querySelector('[data-section="codex-sandbox"]').getBoundingClientRect();
+        return t.top >= d.top - 1 && t.top < d.bottom;
+    });
+    check("sandbox: the button opens Settings at the section Codex sandbox, where the red line shows",
+        inView && (await dialog.getAttribute("data-wanted")) === "codex-sandbox" && (await down.count()) === 1 && (await sw.isChecked()) && (await sw.isEnabled()));
+    await shot("sandbox-toast-open.png");
+    await closeSettings();
+
+    // The notice of a start by an employee (kind sandbox_down) and the notice of the team resume are error toasts that stay too.
+    await page.evaluate(() => window.__towerMock.notice("/home/demo/tower", 'SANDBOX_DOWN: The Codex sandbox does not work on this machine now (x). The start of Sam is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.', "sandbox_down"));
+    const noticeToast = page.locator(".toast").filter({ hasText: "The start of Sam is refused" });
+    await noticeToast.waitFor();
+    check("sandbox: a sandbox_down notice is an error toast with the button Open Settings",
+        (await noticeToast.getByRole("button", { name: "Open Settings" }).count()) === 1 && !(await noticeToast.innerText()).includes("SANDBOX_DOWN") &&
+            (await noticeToast.getAttribute("data-kind")) !== "info", await noticeToast.innerText());
+    await page.waitForTimeout(1500);
+    check("sandbox: the notice toast stays", (await noticeToast.count()) === 1);
+    await noticeToast.getByRole("button", { name: "Open Settings" }).click();
+    await dialog.waitFor();
+    check("sandbox: the button of the notice opens Settings at the section Codex sandbox",
+        (await dialog.getAttribute("data-wanted")) === "codex-sandbox" && await page.evaluate(() => {
+            const d = document.querySelector('[role="dialog"]').getBoundingClientRect();
+            const t = document.querySelector('[data-section="codex-sandbox"]').getBoundingClientRect();
+            return t.top >= d.top - 1 && t.top < d.bottom;
+        }));
     await closeSettings();
 }

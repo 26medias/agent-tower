@@ -5,13 +5,15 @@
 
 mod app_support;
 
-use app_support::Rig;
+use app_support::{Rig, Shared, wait_for};
+use serde_json::json;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tower_core::app::SandboxState;
+use tower_core::app::{SandboxState, Tower, TowerError};
 use tower_core::model::{CliKind, PermissionPolicy};
 
 const UID_ERROR: &str = "bwrap: setting up uid map: Permission denied";
@@ -269,6 +271,328 @@ fn a_floor_that_is_not_a_repository_gets_the_flag_with_no_worktrees() {
     rig.start("pm");
     let pm = last_call(&rig, "pm");
     assert!(pm.codex_sandbox && !pm.worktrees);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A stored "on" with a sandbox that does not work (defect D1)
+// ---------------------------------------------------------------------------------------------
+
+/// Write `[codex] sandbox = true` in the app config, as if the operator had turned it on in an
+/// earlier run of the app. No probe runs.
+fn store_on(config: &Path) {
+    let file = config.join("programs.toml");
+    let mut text = fs::read_to_string(&file).unwrap_or_default();
+    text.push_str("\n[codex]\nsandbox = true\n");
+    fs::write(file, text).unwrap();
+}
+
+/// A rig with the sandbox stored as on, and a floor with the Codex employees `pm`, `qa` and
+/// `eng`, and the Claude employees `ceo` and `cl`.
+fn stored_on_rig(tools: &Path, body: &str, window: Option<Duration>) -> Rig {
+    let rig = Rig::with(|cfg| {
+        if let Some(window) = window {
+            cfg.sandbox_window = window;
+        }
+    });
+    write_exe(&tools.join("node"), "#!/bin/sh\nexit 0\n");
+    write_exe(&tools.join("bwrap"), &format!("#!/bin/sh\n{body}\n"));
+    rig.tower
+        .programs_set("node", tools.join("node").to_str().unwrap())
+        .unwrap();
+    rig.create_floor();
+    rig.add_employee("eng", Some("pm"));
+    rig.add_employee("cl", Some("pm"));
+    rig.add_employee("qa", Some("pm"));
+    for slug in ["pm", "qa", "eng"] {
+        rig.make_codex(slug);
+    }
+    store_on(&rig.config);
+    rig
+}
+
+fn set_bwrap(tools: &Path, body: &str) {
+    write_exe(&tools.join("bwrap"), &format!("#!/bin/sh\n{body}\n"));
+}
+
+/// The number of times that the fake `bwrap` ran (it writes one line in `runs.log`).
+fn runs(tools: &Path) -> usize {
+    fs::read_to_string(tools.join("runs.log")).map_or(0, |text| text.lines().count())
+}
+
+fn counting(tools: &Path, tail: &str) -> String {
+    format!("echo run >> {}; {tail}", tools.join("runs.log").display())
+}
+
+fn sandbox_notices(rig: &Rig) -> Vec<String> {
+    rig.events
+        .notices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, kind, _)| kind == "sandbox_down")
+        .map(|(_, _, text)| text.clone())
+        .collect()
+}
+
+fn name_of(rig: &Rig, slug: &str) -> String {
+    rig.tower
+        .floor_open(&rig.cwd)
+        .unwrap()
+        .employees
+        .into_iter()
+        .find(|e| e.slug == slug)
+        .unwrap()
+        .name
+}
+
+#[test]
+fn a_stored_on_with_a_failing_sandbox_refuses_a_codex_start_and_changes_nothing() {
+    let tools = TempDir::new().unwrap();
+    let rig = stored_on_rig(tools.path(), &fails(), None);
+    assert!(
+        rig.tower.settings_get().codex_sandbox,
+        "the stored value is on"
+    );
+    let config_before = config_text(&rig);
+    let name = name_of(&rig, "pm");
+
+    // The start by the operator.
+    let error = rig.try_start("pm").unwrap_err();
+    assert!(matches!(error, TowerError::SandboxDown { .. }), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "SANDBOX_DOWN: The Codex sandbox does not work on this machine now ({UID_ERROR}). The start of {name} is refused, because the setting \"Use the Codex sandbox\" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox."
+        )
+    );
+    // The resume by the operator.
+    let error = rig
+        .tower
+        .session_resume(&rig.cwd, "pm", None, 24, 80)
+        .unwrap_err();
+    assert!(error.to_string().starts_with("SANDBOX_DOWN:"), "{error}");
+    // Nothing started, and no silent fall back to full access.
+    assert!(rig.calls().is_empty(), "{:?}", rig.calls());
+    assert!(rig.tower.floor_open(&rig.cwd).unwrap().sessions.is_empty());
+    // The failing probe did not change the stored value. The app config is the same text.
+    assert!(rig.tower.settings_get().codex_sandbox);
+    assert_eq!(config_text(&rig), config_before);
+    // The operator can turn it off, and then the start has no sandbox and works.
+    assert!(
+        !rig.tower
+            .settings_set_codex(Some(false))
+            .unwrap()
+            .codex_sandbox
+    );
+    rig.start("pm");
+    assert!(!last_call(&rig, "pm").codex_sandbox);
+}
+
+#[test]
+fn a_claude_employee_and_the_setup_session_start_with_a_failing_sandbox() {
+    let tools = TempDir::new().unwrap();
+    let rig = stored_on_rig(tools.path(), &fails(), None);
+    rig.start("cl");
+    assert!(!last_call(&rig, "cl").codex_sandbox);
+    // The setup session with a Codex CLI is not a Codex employee.
+    rig.tower
+        .setup_start(&rig.cwd, CliKind::Codex, 24, 80)
+        .unwrap();
+    assert!(!last_call(&rig, "setup").codex_sandbox);
+    assert!(sandbox_notices(&rig).is_empty());
+}
+
+#[test]
+fn a_tool_start_is_refused_with_one_line_and_one_notice_for_each_window() {
+    let tools = TempDir::new().unwrap();
+    let rig = stored_on_rig(tools.path(), &fails(), None);
+    rig.start("ceo");
+    rig.live_idle("ceo");
+
+    let first = rig.tool(
+        "ceo",
+        "employee_start",
+        json!({"employee": "pm", "message": "Hello."}),
+    );
+    assert!(
+        first.text.starts_with("SANDBOX_DOWN:")
+            && first.text.contains(UID_ERROR)
+            && first.text.contains("Do not send it again."),
+        "{}",
+        first.text
+    );
+    assert!(!first.text.contains('\n'), "one line");
+    // Two more refused starts inside the window: the tool answer says it each time, the UI one time.
+    let second = rig.tool(
+        "ceo",
+        "employee_start",
+        json!({"employee": "eng", "message": "Hello."}),
+    );
+    assert!(second.text.starts_with("SANDBOX_DOWN:"), "{}", second.text);
+    let assign = rig.tool("ceo", "send", json!({"to": "qa", "text": "Hello again."}));
+    assert!(assign.text.starts_with("SANDBOX_DOWN:"), "{}", assign.text);
+
+    // Nothing started.
+    let started: Vec<String> = rig.calls().into_iter().map(|c| c.slug).collect();
+    assert_eq!(started, ["ceo"]);
+    let notices = sandbox_notices(&rig);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with("SANDBOX_DOWN:"), "{notices:?}");
+    assert!(notices[0].contains(UID_ERROR), "{notices:?}");
+}
+
+#[test]
+fn the_notice_comes_again_after_the_window_and_a_repair_lets_the_start_pass() {
+    let tools = TempDir::new().unwrap();
+    let rig = stored_on_rig(tools.path(), &fails(), Some(Duration::from_millis(400)));
+    assert!(rig.try_start("pm").is_err());
+    // The operator code path does not send a notice (its error is the answer). A tool start does.
+    rig.start("ceo");
+    rig.live_idle("ceo");
+    rig.tool(
+        "ceo",
+        "employee_start",
+        json!({"employee": "pm", "message": "a"}),
+    );
+    assert_eq!(sandbox_notices(&rig).len(), 1);
+    std::thread::sleep(Duration::from_millis(500));
+    rig.tool(
+        "ceo",
+        "employee_start",
+        json!({"employee": "pm", "message": "b"}),
+    );
+    assert_eq!(sandbox_notices(&rig).len(), 2);
+
+    // A repair: the next start passes, with the profile.
+    set_bwrap(tools.path(), &works());
+    rig.start("pm");
+    assert!(last_call(&rig, "pm").codex_sandbox);
+}
+
+#[test]
+fn the_team_resume_refuses_each_codex_start_and_sends_one_notice() {
+    let tools = TempDir::new().unwrap();
+    let rig = Rig::new();
+    write_exe(&tools.path().join("node"), "#!/bin/sh\nexit 0\n");
+    set_bwrap(tools.path(), &works());
+    rig.tower
+        .programs_set("node", tools.path().join("node").to_str().unwrap())
+        .unwrap();
+    rig.create_floor();
+    rig.add_employee("eng", Some("pm"));
+    for slug in ["pm", "eng"] {
+        rig.make_codex(slug);
+    }
+    // The first run of the app: the switch is off, the team is live, the app closes.
+    for slug in ["ceo", "pm", "eng"] {
+        rig.start(slug);
+        rig.live_idle(slug);
+    }
+    rig.tower.shutdown();
+
+    // The second run: the switch is on (stored) and `bwrap` fails.
+    store_on(&rig.config);
+    set_bwrap(tools.path(), &fails());
+    let shared = Arc::new(Shared::default());
+    let socket = rig.root.path().join("second.sock");
+    let second: Tower = Rig::make_tower(&rig.config, &socket, &shared, |cfg| {
+        cfg.resume_pause = Duration::from_millis(20);
+    });
+    second
+        .programs_set("node", tools.path().join("node").to_str().unwrap())
+        .unwrap();
+    let events = Arc::new(app_support::Events::default());
+    second.set_observer(events.clone());
+    second.team_resume(&rig.cwd).unwrap();
+    wait_for("the resume ends", || {
+        second
+            .floor_open(&rig.cwd)
+            .unwrap()
+            .resume_progress
+            .is_none()
+    });
+    // The Claude employee `ceo` resumed. The two Codex employees were refused.
+    let slugs: Vec<String> = shared
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| c.slug.clone())
+        .collect();
+    assert_eq!(slugs, ["ceo"]);
+    let notices = events.notices.lock().unwrap().clone();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].1, "sandbox_down");
+    assert!(notices[0].2.starts_with("SANDBOX_DOWN:"), "{notices:?}");
+    // The refused employees stay in the list for a new try.
+    let mut left = second.floor_open(&rig.cwd).unwrap().resumable;
+    left.sort();
+    assert_eq!(left, ["eng", "pm"]);
+}
+
+#[test]
+fn a_works_result_is_reused_for_the_window_and_a_failure_is_probed_again() {
+    let tools = TempDir::new().unwrap();
+    let rig = stored_on_rig(tools.path(), &counting(tools.path(), "exit 0"), None);
+    // Three Codex starts, one probe.
+    for slug in ["pm", "qa", "eng"] {
+        rig.start(slug);
+        assert!(last_call(&rig, slug).codex_sandbox);
+    }
+    assert_eq!(runs(tools.path()), 1);
+    // The Claude start and the setup start run no probe.
+    rig.start("cl");
+    assert_eq!(runs(tools.path()), 1);
+
+    // `bwrap` breaks now. The `works` result still counts inside the window.
+    set_bwrap(tools.path(), &counting(tools.path(), &fails()));
+    rig.tower.session_stop(&rig.live_idle("pm")).unwrap();
+    let limit = std::time::Instant::now() + Duration::from_secs(10);
+    while rig.try_start("pm").is_err() {
+        assert!(std::time::Instant::now() < limit, "pm does not restart");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(runs(tools.path()), 1);
+
+    // The button "Test again" runs the probe. A failure clears the result that was kept.
+    assert_eq!(
+        rig.tower.codex_sandbox_probe().unwrap().state,
+        SandboxState::Fails
+    );
+    assert_eq!(runs(tools.path()), 2);
+    rig.tower.session_stop(&rig.live_idle("qa")).unwrap();
+    let mut refused = 0;
+    let limit = std::time::Instant::now() + Duration::from_secs(10);
+    // The old process needs a short time to end. A start before that gives another error.
+    while refused < 2 {
+        assert!(std::time::Instant::now() < limit, "no refusal");
+        match rig.try_start("qa") {
+            Err(TowerError::SandboxDown { .. }) => refused += 1,
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            Ok(_) => panic!("a start passed with a failing sandbox"),
+        }
+    }
+    // A failure is probed again at each start: 2 more runs for the 2 refusals.
+    assert_eq!(runs(tools.path()), 4);
+    // A repair works at the next start: the failure was not kept.
+    set_bwrap(tools.path(), &counting(tools.path(), "exit 0"));
+    rig.start("qa");
+    assert_eq!(runs(tools.path()), 5);
+}
+
+#[test]
+fn a_works_result_that_is_older_than_the_window_is_probed_again() {
+    let tools = TempDir::new().unwrap();
+    let rig = stored_on_rig(
+        tools.path(),
+        &counting(tools.path(), "exit 0"),
+        Some(Duration::from_millis(300)),
+    );
+    rig.start("pm");
+    assert_eq!(runs(tools.path()), 1);
+    std::thread::sleep(Duration::from_millis(400));
+    rig.start("qa");
+    assert_eq!(runs(tools.path()), 2);
 }
 
 // ---------------------------------------------------------------------------------------------

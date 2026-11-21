@@ -450,6 +450,7 @@ class Store {
 
     private actionFor(kind: ErrorAction): Toast["action"] {
         if (kind === "settings-programs") return { label: "Open Settings", run: () => this.openSettings("programs") };
+        if (kind === "settings-sandbox") return { label: "Open Settings", run: () => this.openSettings("codex-sandbox") };
         return undefined;
     }
 

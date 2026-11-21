@@ -3,7 +3,7 @@
 // with a capital letter and a full stop, and with a hint about what to do when it knows one.
 // The raw text stays for the code that tests it (`startsWith("NO_KEY:")`). Only the display changes.
 
-const CODE_PREFIX = /^(?:NO_FLOOR|NO_KEY|BUSY|REFUSED|NOT_FOUND|INVALID|NOT_ABSOLUTE|NOT_A_FOLDER|NO_WRITE|FLOOR_GONE)\s*:\s*/;
+const CODE_PREFIX = /^(?:NO_FLOOR|NO_KEY|BUSY|REFUSED|NOT_FOUND|INVALID|NOT_ABSOLUTE|NOT_A_FOLDER|NO_WRITE|FLOOR_GONE|SANDBOX_DOWN)\s*:\s*/;
 
 /**
  * The four errors of `floor_open` and `floor_create` for a path that cannot be a floor (docs/ipc-final.md).
@@ -36,6 +36,7 @@ export function noticePlan(kind: string): NoticePlan {
         case "task_blocked":
         case "resume_failed":
         case "floor_gone":
+        case "sandbox_down":
             return { tone: "error", stay: true };
         case "task_done_unmerged":
             // It carries a warning, so it stays until the operator closes it.
@@ -47,7 +48,15 @@ export function noticePlan(kind: string): NoticePlan {
 }
 
 /** Where an error comes from, so that the toast can offer a button for it. */
-export type ErrorAction = "settings-programs" | null;
+export type ErrorAction = "settings-programs" | "settings-sandbox" | null;
+
+/**
+ * The app refused the start of a Codex employee, because the setting "Use the Codex sandbox" is on and the sandbox does
+ * not work now (docs/ipc-final.md, error prefix SANDBOX_DOWN). The fix is in Settings > Codex sandbox.
+ */
+export function sandboxDown(text: string): boolean {
+    return /^\s*SANDBOX_DOWN\s*:/.test(text);
+}
 
 /** The program was not found or cannot start: the fix is in Settings > Programs. */
 export function programProblem(text: string): boolean {
@@ -62,6 +71,8 @@ export function tidyError(raw: string): string {
     let text = raw.trim().replace(CODE_PREFIX, "").trim();
     if (text === "") return "Something went wrong.";
     const hints: string[] = [];
+    // The sandbox text has its own advice, and its detail ("Permission denied") is not about a folder.
+    if (sandboxDown(raw)) return text.charAt(0).toUpperCase() + text.slice(1);
     if (/Permission denied|os error 13/i.test(text)) hints.push("You cannot write in this folder. Choose a folder that you own.");
     else if (/does not exist or is not a folder/i.test(text)) hints.push("Check the path, and choose a folder that exists.");
     if (programProblem(text) && !/Settings|Programs/i.test(text)) hints.push("Change the program path in Settings > Programs.");
@@ -72,7 +83,8 @@ export function tidyError(raw: string): string {
 
 /** The error that the toast shows, and the action that it offers. */
 export function describeError(raw: string): { text: string; action: ErrorAction } {
-    return { text: tidyError(raw), action: programProblem(raw) ? "settings-programs" : null };
+    const action: ErrorAction = sandboxDown(raw) ? "settings-sandbox" : programProblem(raw) ? "settings-programs" : null;
+    return { text: tidyError(raw), action };
 }
 
 /** A broken employee file: "/home/x/.swarm/employees/broken.md: line 1, column 15: a quote is missing". */

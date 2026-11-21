@@ -233,12 +233,17 @@ impl TowerCore {
                         RESUME_ROWS,
                         RESUME_COLS,
                     );
-                    if let Err(error) = started {
-                        guard.core.notifier.notice(
+                    match started {
+                        Ok(_) => {}
+                        // A dead sandbox refuses each Codex start. One notice for the team.
+                        Err(error @ TowerError::SandboxDown { .. }) => {
+                            guard.core.notice_sandbox_down(&guard.floor.path, &error);
+                        }
+                        Err(error) => guard.core.notifier.notice(
                             &guard.floor.path,
                             "resume_failed",
                             &format!("Could not resume {slug}: {error}"),
-                        );
+                        ),
                     }
                     *locked(&guard.floor.resume) = Some(ResumeProgress {
                         done: index + 1,

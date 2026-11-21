@@ -1325,12 +1325,17 @@ impl TowerCore {
             Err(error) => {
                 // The messages are waiting in the store, and nothing was marked.
                 self.bus.notify();
+                // Only `SandboxDown` sends a notice, and at most one in each window.
+                self.notice_sandbox_down(&floor.path, &error);
                 match error {
                     // Another thread started the employee first. The message waits in the queue.
                     TowerError::AlreadyLive { .. } => {
                         let delivery = self.deliver_pending(&floor.path, to);
                         delivery_report(target_name, &delivery, sent.answer_tail)
                     }
+                    TowerError::SandboxDown { detail, .. } => format!(
+                        "SANDBOX_DOWN: The app could not start {target_name}: the Codex sandbox does not work on this machine now ({detail}), and the operator has the setting \"Use the Codex sandbox\" on. Your message is saved and waits. Do not send it again."
+                    ),
                     other => format!(
                         "The app could not start {target_name}: {other}. Your message is saved and waits. Do not send it again."
                     ),

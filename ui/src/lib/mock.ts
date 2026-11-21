@@ -740,6 +740,13 @@ export function createMockBackend(): Backend {
         if (!emp) throw `unknown employee ${slug}`;
         const old = floor.sessions.find((x) => x.slug === slug);
         if (old && old.status !== "stopped") throw `employee ${slug} already has a live session`;
+        // The real app runs the probe at each Codex start when the setting is on, and it never falls back to full access.
+        if (emp.cli === "codex" && settings.codexSandbox) {
+            const probe = sandboxProbe();
+            if (probe.state !== "works") {
+                throw `SANDBOX_DOWN: The Codex sandbox does not work on this machine now (${probe.detail}). The start of ${emp.name} is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.`;
+            }
+        }
         counter += 1;
         const s: MockSession = {
             view: {
@@ -1348,6 +1355,7 @@ export function createMockBackend(): Backend {
                 floor.resumeProgress = { done: 0, total: list.length };
                 emit("floor-changed", { path: a.path });
                 void (async () => {
+                    let sandboxNoticeSent = false;
                     for (const [index, slug] of list.entries()) {
                         if (index > 0) await sleep(config().resumePauseMs ?? 400);
                         try {
@@ -1355,7 +1363,11 @@ export function createMockBackend(): Backend {
                             startSession(a.path, slug);
                             floor.resumable = floor.resumable.filter((s) => s !== slug);
                         } catch (e) {
-                            emit("notice", { path: a.path, kind: "resume_failed", text: `Could not resume ${slug}: ${String(e)}` });
+                            if (String(e).startsWith("SANDBOX_DOWN:")) {
+                                // One notice for the team, as the real app sends (one in each 60 s).
+                                if (!sandboxNoticeSent) emit("notice", { path: a.path, kind: "sandbox_down", text: String(e) });
+                                sandboxNoticeSent = true;
+                            } else emit("notice", { path: a.path, kind: "resume_failed", text: `Could not resume ${slug}: ${String(e)}` });
                         }
                         floor.resumeProgress = { done: index + 1, total: list.length };
                         emit("floor-changed", { path: a.path });

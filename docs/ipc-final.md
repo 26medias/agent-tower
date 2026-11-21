@@ -206,6 +206,62 @@ false` is always allowed. The UI shows the section "Codex sandbox" in Settings: 
 button "Test again", and the switch, which is disabled unless the last test says `works` (or the
 switch is on already, so that it can be turned off).
 
+## A stored "on" that does not work: `SANDBOX_DOWN` and the three states (2026-11-21, defect D1)
+
+A stored `codexSandbox: true` does not mean that the sandbox works now. After a system update the
+AppArmor profile can be gone, or `bwrap` can be removed. So the app checks the sandbox at each start
+of a Codex session while the setting is on.
+
+**The check.** At each start of a Codex employee with `[codex] sandbox` on, the app runs the probe
+(`codex_sandbox_probe`) first. A `works` result counts for 60 s (`SANDBOX_WINDOW`), so the start of
+a team runs the probe one time. A failure is never kept: the next start runs the probe again. The
+button "Test again" and `settings_set` with `codexSandbox: true` run the probe too, and they update
+the same result (`fails` and `missing` clear it). The app never changes the stored value by itself.
+
+**The refusal.** If the probe does not say `works`, the start is refused. The app does not fall back
+to full access, because a silent fall back would give an employee more rights than the operator
+chose. The error text is:
+
+`SANDBOX_DOWN: The Codex sandbox does not work on this machine now (<detail>). The start of <Name> is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.`
+
+`<detail>` is the `detail` of the probe, and `<Name>` is the name of the employee. The refusal applies
+to `session_start`, `session_resume`, "Resume the last team" (`team_resume`), and a start by an
+employee through the tools `employee_start`, `send` and `task_assign`. It does not apply to a Claude
+employee or to the setup session. Turning the setting off is always allowed.
+
+- A command of the operator (`session_start`, `session_resume`) returns the error text above.
+- `team_resume` starts each employee in turn. A Claude employee resumes. A refused Codex employee
+  stays in the list `resumable`, and the team gets ONE `notice` (see below), not `resume_failed`.
+- A tool answers with one line that starts with `SANDBOX_DOWN: The app could not start <Name>: the
+  Codex sandbox does not work on this machine now (<detail>), and the operator has the setting "Use
+  the Codex sandbox" on. Your message is saved and waits. Do not send it again.`
+
+**The notice.** The refusal of a start by a tool, and the refusal in a team resume, send a `notice`
+event with the kind `sandbox_down`. The `text` is the `SANDBOX_DOWN:` error text. The app sends at
+most one such notice in each 60 s, not one for each refused start. The UI shows an error toast that
+stays, with the button "Open Settings". The UI also gives that button to the error text of a refused
+start by the operator (the text starts with `SANDBOX_DOWN:`). The button opens Settings at the
+section `codex-sandbox`.
+
+| Kind | Text |
+|---|---|
+| `sandbox_down` | The `SANDBOX_DOWN:` error text of the first refused start in the 60 s. |
+
+**The three states of the section "Codex sandbox".** `settings_get` still gives `codexSandbox` (the
+stored value). The UI reads the probe when the panel opens, and the section shows:
+
+| State | When | What the section shows |
+|---|---|---|
+| (a) off | `codexSandbox` is `false` | The probe result, the switch (enabled only when the probe says `works`) |
+| (b) on and works | `codexSandbox` is `true`, probe `works` | The probe result in green, the switch on |
+| (c) on and down | `codexSandbox` is `true`, probe `fails` or `missing` | A red line: "The setting is on, but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or turn the setting off." The switch stays ON and ENABLED, so that the operator can turn it off |
+
+The text under the probe result for `fails` is: "On Ubuntu 24.04 and later, AppArmor blocks bwrap
+by default. Add an AppArmor profile that lets /usr/bin/bwrap use user namespaces, then press Test
+again." For `missing` it is "Install bubblewrap, so that the program bwrap is in the PATH of the
+sessions." A line under the switch is always shown: "With the sandbox on, the commands of a Codex
+employee have no network access (for example a package install fails)."
+
 ## The desktop notification for a question
 
 When a session changes to `question`, the core sends `Observer::question_asked` (the data: the

@@ -125,6 +125,20 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// How long `session_stop` waits for the process to end before it uses `SIGKILL`.
 const STOP_GRACE: Duration = Duration::from_secs(3);
 
+/// How long a `works` result of the sandbox probe counts for the start of a Codex session, and
+/// the shortest time between two `sandbox_down` notices.
+pub const SANDBOX_WINDOW: Duration = Duration::from_secs(60);
+
+/// What the start of a Codex session remembers about the sandbox (memory only). A failed probe
+/// is never kept: the next start runs the probe again.
+#[derive(Default)]
+struct SandboxGate {
+    /// When the last probe said `works`.
+    works_at: Option<Instant>,
+    /// When the last `sandbox_down` notice went out.
+    notice_at: Option<Instant>,
+}
+
 // ---------------------------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------------------------
@@ -148,6 +162,12 @@ pub enum TowerError {
     NoWrite(PathBuf),
     #[error("FLOOR_GONE: The folder of this floor is gone: {}.", .0.display())]
     FloorGone(PathBuf),
+    /// A Codex start with the setting "Use the Codex sandbox" on, while the probe does not say
+    /// `works`. The start is refused. The app never falls back to full access by itself.
+    #[error(
+        "SANDBOX_DOWN: The Codex sandbox does not work on this machine now ({detail}). The start of {name} is refused, because the setting \"Use the Codex sandbox\" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox."
+    )]
+    SandboxDown { name: String, detail: String },
     #[error("{slug} already has a live session. Stop it first.")]
     AlreadyLive { slug: String },
     #[error("{slug} has a live session. Stop it first.")]
@@ -313,7 +333,7 @@ pub trait Observer: Send + Sync {
     fn tasks_changed(&self, _path: &Path) {}
     /// Something that the operator must see, and that is not a state of a session or a task: a
     /// merge that was blocked, or a session that the resume of the team could not start. `kind`
-    /// is `task_blocked` or `resume_failed`. `text` is the message. The default does nothing.
+    /// is `task_blocked`, `resume_failed` or `sandbox_down`. `text` is the message. The default does nothing.
     fn notice(&self, _path: &Path, _kind: &str, _text: &str) {}
     /// A session changed to `question`. The shell decides if the operator needs a desktop
     /// notification (`notify::should_notify`). It comes after the `session_changed` of the same
@@ -392,6 +412,9 @@ pub struct TowerConfig {
     /// The pause between two starts of the resume of the last team (spec 4.2, M3). Tests give a
     /// short one.
     pub resume_pause: Duration,
+    /// How long a `works` result of the sandbox probe counts, and the time between two
+    /// `sandbox_down` notices. `TowerConfig::new` gives 60 seconds. Tests give a short time.
+    pub sandbox_window: Duration,
     /// The pause between two checks of the open floors for a folder that is gone or back. `None`
     /// turns the watcher off. `TowerConfig::new` gives 3 seconds. Tests give a short pause, or
     /// `None`.
@@ -416,6 +439,7 @@ impl TowerConfig {
             mcp_limits: McpLimits::default(),
             test_hooks: Arc::new(TestHooks::default()),
             resume_pause: resume::RESUME_PAUSE,
+            sandbox_window: SANDBOX_WINDOW,
             floor_watch: Some(FLOOR_WATCH_PAUSE),
         }
     }
@@ -559,6 +583,8 @@ pub struct TowerCore {
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
     closed: Arc<AtomicBool>,
     resume_pause: Duration,
+    sandbox_window: Duration,
+    sandbox_gate: Mutex<SandboxGate>,
     /// The home folder, for `~` in a typed path. From `HOME` of the parent environment.
     home: Option<PathBuf>,
     /// The thread that watches the floor folders (`floor_watch`). `shutdown` joins it.
@@ -659,6 +685,8 @@ impl Tower {
             attach_pause: config.attach_pause,
             closed: Arc::new(AtomicBool::new(false)),
             resume_pause: config.resume_pause,
+            sandbox_window: config.sandbox_window,
+            sandbox_gate: Mutex::new(SandboxGate::default()),
             home,
             watcher: Mutex::new(None),
             tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -1243,7 +1271,54 @@ impl TowerCore {
         let env = build_env(&self.session_env.get(), &[], &dirs)
             .map_err(|e| other(format!("cannot build the environment: {e}")))?;
         let cwd = self.home.clone().unwrap_or_else(|| PathBuf::from("/"));
-        Ok(sandbox_probe::run(&env, &cwd, timeout))
+        let probe = sandbox_probe::run(&env, &cwd, timeout);
+        // Each probe updates what the start of a session remembers. A failure clears it.
+        locked(&self.sandbox_gate).works_at =
+            (probe.state == SandboxState::Works).then(Instant::now);
+        Ok(probe)
+    }
+
+    /// The check at the start of a Codex session with the setting on. A `works` result that is
+    /// less than `sandbox_window` old counts, so the start of a team runs the probe one time.
+    /// Any other result refuses the start with `SandboxDown`. The app never falls back to full
+    /// access by itself.
+    fn require_sandbox(&self, name: &str) -> Result<()> {
+        let fresh = locked(&self.sandbox_gate)
+            .works_at
+            .is_some_and(|at| at.elapsed() < self.sandbox_window);
+        if fresh {
+            return Ok(());
+        }
+        let detail = match self.codex_sandbox_probe() {
+            Ok(probe) if probe.state == SandboxState::Works => return Ok(()),
+            Ok(probe) => probe.detail,
+            Err(error) => error.to_string(),
+        };
+        Err(TowerError::SandboxDown {
+            name: name.to_owned(),
+            detail,
+        })
+    }
+
+    /// Tell the observer (kind `sandbox_down`) about a refused start, when `error` is
+    /// `SandboxDown`. At most one notice goes out in each `sandbox_window`, so a team start with
+    /// five Codex employees gives one toast.
+    pub(crate) fn notice_sandbox_down(&self, path: &Path, error: &TowerError) {
+        if !matches!(error, TowerError::SandboxDown { .. }) {
+            return;
+        }
+        {
+            let mut gate = locked(&self.sandbox_gate);
+            if gate
+                .notice_at
+                .is_some_and(|at| at.elapsed() < self.sandbox_window)
+            {
+                return;
+            }
+            gate.notice_at = Some(Instant::now());
+        }
+        self.notifier
+            .notice(path, "sandbox_down", &error.to_string());
     }
 
     /// The model lists. It reads the Codex file and the app config again on each call.
@@ -1448,6 +1523,10 @@ impl TowerCore {
         let codex_sandbox = setup_cli.is_none()
             && employee.cli == CliKind::Codex
             && settings::codex_sandbox(&self.logo_env.config_file);
+        if codex_sandbox {
+            // A stored "on" is not enough: the sandbox must work now (D1 of the review).
+            self.require_sandbox(&employee.name)?;
+        }
         if codex_sandbox && employee.permission != PermissionPolicy::AskAlways {
             // The sandbox profile names these folders. A folder that does not exist yet (the
             // worktrees folder, before the first task) must exist when the CLI starts.

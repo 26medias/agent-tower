@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { blockedTaskId, describeError, isFloorGone, isPathError, noticePlan, programProblem, splitFileError, tidyError } from "./messages";
+import { blockedTaskId, describeError, isFloorGone, isPathError, noticePlan, programProblem, sandboxDown, splitFileError, tidyError } from "./messages";
 
 describe("tidyError", () => {
     it("removes the code prefix and starts with a capital letter", () => {
@@ -37,6 +37,29 @@ describe("describeError", () => {
         expect(describeError('cannot start sam: the program "codex" was not found.').action).toBe("settings-programs");
         expect(describeError("Could not resume pm: forced test failure").action).toBeNull();
         expect(programProblem("the task T-1 is not found")).toBe(false);
+    });
+});
+
+describe("the refused start of a Codex employee (SANDBOX_DOWN)", () => {
+    const text =
+        'SANDBOX_DOWN: The Codex sandbox does not work on this machine now (bwrap: setting up uid map: Permission denied). The start of Sam is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.';
+
+    it("shows the text with no code prefix, with no extra hint", () => {
+        expect(tidyError(text)).toBe(text.replace("SANDBOX_DOWN: ", ""));
+        expect(sandboxDown(text)).toBe(true);
+        expect(sandboxDown("Could not resume pm: SANDBOX_DOWN: x")).toBe(false);
+    });
+
+    it("offers the Open Settings action for the Codex sandbox section", () => {
+        expect(describeError(text).action).toBe("settings-sandbox");
+        // A detail with the words of a missing program does not turn it into a program problem.
+        const missing = text.replace("bwrap: setting up uid map: Permission denied", "cannot run /usr/bin/bwrap: No such file or directory");
+        expect(describeError(missing).action).toBe("settings-sandbox");
+        expect(tidyError(missing)).not.toContain("Settings > Programs");
+    });
+
+    it("shows the sandbox_down notice as an error toast that stays", () => {
+        expect(noticePlan("sandbox_down")).toEqual({ tone: "error", stay: true });
     });
 });
 

@@ -560,7 +560,7 @@ pub struct FloorChanged {
 }
 
 /// Payload of the event `notice` (`docs/ipc-m3.md`): something that the operator must see.
-/// `kind` is `task_blocked` or `resume_failed`.
+/// `kind` is `task_blocked`, `resume_failed` or `sandbox_down` (and the kinds of `docs/ipc-final.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Notice {

@@ -15,6 +15,8 @@
 
     let keyDraft = $state("");
     let keyBusy = $state(false);
+    // The section that a toast asked for when the panel opened (null: none). The attribute `data-wanted` shows it.
+    let wanted = $state<string | null>(null);
 
     onMount(() => {
         // The Codex file can change while the app runs: read the lists again.
@@ -25,6 +27,7 @@
         // A toast can ask for one section, for example the program paths.
         const want = store.settingsSection;
         store.settingsSection = null;
+        wanted = want;
         if (want) {
             void tick().then(() => document.querySelector(`[data-section="${want}"]`)?.scrollIntoView({ block: "start" }));
         }
@@ -65,8 +68,9 @@
 
     const probe = $derived(store.sandboxProbe);
     const sandboxOn = $derived(store.settings?.codexSandbox ?? false);
-    // The switch can be turned ON only when the last probe says `works`. It can always be turned OFF.
-    const sandboxDisabled = $derived(!store.settings || store.sandboxTesting || (!sandboxOn && probe?.state !== "works"));
+    // The switch can be turned ON only when the last probe says `works`. It can always be turned OFF, also while the
+    // test runs and also when the test fails: the operator must be able to leave a stored "on" that does not work.
+    const sandboxDisabled = $derived(!store.settings || (!sandboxOn && (store.sandboxTesting || probe?.state !== "works")));
     const sandboxReason = $derived(
         !store.settings || sandboxOn || probe?.state === "works"
             ? null
@@ -74,10 +78,18 @@
               ? "The switch needs the result of the test."
               : "The switch stays off because the test did not pass.",
     );
+    // The three states of the section. The stored value is never changed by the test:
+    //   off: the setting is off.
+    //   on-works: the setting is on and the probe works.
+    //   on-down: the setting is on and the probe does not say works. The app refuses each Codex start.
+    //   on-testing: the setting is on and the test has no result yet.
+    const sandboxMode = $derived(
+        !sandboxOn ? "off" : store.sandboxTesting || !probe ? "on-testing" : probe.state === "works" ? "on-works" : "on-down",
+    );
     const sandboxHelp = $derived(
         probe?.state === "missing"
             ? "Install bubblewrap, so that the program bwrap is in the PATH of the sessions."
-            : "Codex needs an AppArmor profile that lets bwrap use user namespaces. See docs/spec.md, decision O7.",
+            : "On Ubuntu 24.04 and later, AppArmor blocks bwrap by default. Add an AppArmor profile that lets /usr/bin/bwrap use user namespaces, then press Test again.",
     );
 
     const codexNote = $derived(
@@ -86,7 +98,7 @@
 </script>
 
 <div class="backdrop" role="presentation" use:modal={{ onclose }} onclick={(e) => e.target === e.currentTarget && onclose()}>
-    <div class="panel" role="dialog" aria-modal="true" aria-label="Settings">
+    <div class="panel" role="dialog" aria-modal="true" aria-label="Settings" data-wanted={wanted}>
         <header>
             <h2>Settings</h2>
             <button type="button" class="ghost close" aria-label="Close settings" onclick={onclose}>close</button>
@@ -178,7 +190,7 @@
             <ProgramsPanel />
         </section>
 
-        <section data-section="codex-sandbox" aria-label="Codex sandbox">
+        <section data-section="codex-sandbox" data-mode={sandboxMode} aria-label="Codex sandbox">
             <h3>Codex sandbox</h3>
             <div class="sandbox-state" data-testid="sandbox-state" data-state={store.sandboxTesting ? "testing" : (probe?.state ?? "unknown")}>
                 {#if store.sandboxTesting}
@@ -212,6 +224,15 @@
                 />
                 <span>Use the Codex sandbox for Codex employees</span>
             </label>
+            <p class="hint" data-testid="sandbox-network">
+                With the sandbox on, the commands of a Codex employee have no network access (for example a package install fails).
+            </p>
+            {#if sandboxMode === "on-down"}
+                <p class="down" role="alert" data-testid="sandbox-down">
+                    The setting is on, but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or turn the setting
+                    off.
+                </p>
+            {/if}
             {#if sandboxReason}
                 <p class="hint" data-testid="sandbox-reason">{sandboxReason}</p>
             {/if}
@@ -219,8 +240,7 @@
             <p class="hint">
                 On: the Codex CLI enforces the policy of each Codex employee. A <em>read-only</em> employee can write only the
                 reports folder. An <em>edit-in-worktree</em> employee can write only the task worktrees, the reports folder and
-                the temporary folders. In a folder that is not a git repository it can write the project folder. The commands
-                have no network access. An action outside the policy asks you for approval. Off: the CLI enforces no policy, and
+                the temporary folders. In a folder that is not a git repository it can write the project folder. An action outside the policy asks you for approval. Off: the CLI enforces no policy, and
                 only the role text limits a Codex employee. The change applies at the next start of a session.
             </p>
         </section>
@@ -376,6 +396,13 @@
 
     .sandbox-state .testing {
         color: var(--dim);
+    }
+
+    .down {
+        margin: 0;
+        color: var(--danger);
+        font-size: 12px;
+        user-select: text;
     }
 
     .check {

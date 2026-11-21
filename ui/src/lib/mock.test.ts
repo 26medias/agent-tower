@@ -179,6 +179,33 @@ describe("mock: settings switch, program test and reset", () => {
         }
     });
 
+    it("refuses the start of a Codex employee when the setting is on and the probe does not say works", async () => {
+        const g = globalThis as Record<string, unknown>;
+        const b = createMockBackend();
+        const set = (codexSandbox: boolean) => b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, codexSandbox });
+        const start = (slug: string) => b.invoke("session_start", { path: FLOOR, slug, firstMessage: null, rows: 24, cols: 80 });
+        try {
+            // `eng-sam` has a start that fails once for the demo. Use another employee as the Codex one.
+            control().patchFloor(FLOOR, { employee: { slug: "eng-lin", patch: { cli: "codex" } } });
+            g.__towerMockConfig = { sandboxProbe: { state: "works" } };
+            await set(true);
+            // The machine changes after the switch was turned on. The stored value stays on.
+            g.__towerMockConfig = { sandboxProbe: { state: "fails", detail: "bwrap: no way" } };
+            const refused = await rejected(start("eng-lin"));
+            expect(refused).toBe(
+                'SANDBOX_DOWN: The Codex sandbox does not work on this machine now (bwrap: no way). The start of Lin is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.',
+            );
+            expect((await b.invoke<Settings>("settings_get")).codexSandbox).toBe(true);
+            // A Claude employee is not affected.
+            await start("pm");
+            // Turning it off is always allowed, and then the Codex start has no sandbox.
+            expect((await set(false)).codexSandbox).toBe(false);
+            await start("eng-lin");
+        } finally {
+            delete g.__towerMockConfig;
+        }
+    });
+
     it("sends codexSandbox in settings_set only when it has a value", () => {
         expect(settingsSetArgs(null, null, false, null)).toEqual({ openaiKey: null, imageModel: null, notifyOnQuestion: false });
         expect(Object.keys(settingsSetArgs(null, null, null, null))).not.toContain("codexSandbox");

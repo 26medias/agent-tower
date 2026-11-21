@@ -185,6 +185,7 @@ export interface TasksChangedPayload {
 export type NoticeKind =
     | "task_blocked"
     | "resume_failed"
+    | "sandbox_down"
     | "task_done_unmerged"
     | "floor_gone"
     | "floor_back";
