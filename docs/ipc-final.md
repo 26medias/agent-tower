@@ -173,23 +173,62 @@ settings_set(openaiKey: string | null, imageModel: string | null, notifyOnQuesti
 `notify_on_question`. The default (`true`) has no key: the app removes the key (and an empty
 table) when the value is set to `true`. A value that is not a boolean is read as `true`.
 
-## `Settings.codexSandbox` and `codex_sandbox_probe` (2026-11-21, decision O7, option A)
+## The Codex sandbox: three states, `codexSandboxMode`, `codexSandboxEffective` (2026-11-21, decision O7)
+
+Decision of the operator on 2026-11-21: the sandbox is ON by default **when it works** on the
+machine. The setting "Codex sandbox" has three stored states.
 
 ```ts
-interface Settings { /* ... all the old fields ... */ codexSandbox: boolean }  // default false
+type CodexSandboxMode = "auto" | "on" | "off"
+type CodexSandboxEffective = "on" | "off" | "refused"
 
-// New optional fourth argument. A missing argument or null means "no change".
+interface Settings { /* ... all the old fields ... */
+  codexSandboxMode: CodexSandboxMode            // the stored state; default "auto"
+  codexSandboxEffective: CodexSandboxEffective  // what a Codex start gets now
+  codexSandbox: boolean                         // OLD field; kept; see below
+}
+
+// New optional fifth argument `codexSandboxMode`. A missing argument or null means "no change".
 settings_set(openaiKey: string | null, imageModel: string | null,
-             notifyOnQuestion?: boolean | null, codexSandbox?: boolean | null): Promise<Settings>
+             notifyOnQuestion?: boolean | null, codexSandbox?: boolean | null,
+             codexSandboxMode?: CodexSandboxMode | null): Promise<Settings>
 
 codex_sandbox_probe(): Promise<{ state: "works" | "fails" | "missing"; detail: string }>
 ```
 
-`codexSandbox` is stored in the app config file `programs.toml`, table `[codex]`, key `sandbox`.
-The default (`false`) has no key: the app removes the key (and an empty table) when the value is set
-to `false`. Other keys of `[codex]` stay. A value that is not a boolean is read as `false`. The
-switch applies at the next start of a session (the app reads it in `launch`). It never applies to
-a Claude employee or to the setup session.
+**The three states and how the app stores them** (`programs.toml`, table `[codex]`, key `sandbox`;
+other keys of `[codex]` stay):
+
+| `codexSandboxMode` | Word in Settings | Stored as | A Codex start |
+|---|---|---|---|
+| `auto` (default) | Automatic (recommended) | no `sandbox` key | The app runs the probe. If it says `works`, Codex gets the sandbox profile. If not, Codex starts with the old full-access flags (`-a on-request -s danger-full-access`), and the app sends ONE information notice in each run of the app (below). No refusal. |
+| `on` | Always | `sandbox = true` | The app runs the probe. If it says `works`, Codex gets the sandbox profile. If not, the start is refused with `SANDBOX_DOWN:` (below). |
+| `off` | Never | `sandbox = false` | Full access. No probe. |
+
+Migration: an existing file with `sandbox = true` stays `on`. A file with no key is now `auto`
+(before 2026-11-21 it meant "off"). A value that is not a boolean is read as `auto`.
+
+**`codexSandboxEffective`** is what a Codex start gets now: `on` (the sandbox profile), `off` (full
+access: the mode is `off`, or the mode is `auto` and the sandbox does not work) or `refused` (the mode
+is `on` and the sandbox does not work, so a Codex start is refused). The app takes it from the stored
+mode and from the LAST probe of this run of the app (any probe: "Test again", `settings_set` with `on`,
+a Codex start). If no probe ran yet, `settings_get` runs one. A later change of the machine shows after
+the next probe. The UI reads `settings_get` again after each "Test again".
+
+**`codexSandbox` (the old boolean field, kept, no rename)** now has the meaning "effective state":
+`true` exactly when `codexSandboxEffective` is `on`. It is `false` for `off` and for `refused`. An old
+client that only reads this field sees whether a Codex start gets the sandbox now.
+
+**`settings_set`.** `codexSandboxMode` is the new argument: `"auto"` removes the key, `"on"` stores
+`true`, `"off"` stores `false`. Any other word is an error (`REFUSED: codexSandboxMode must be "auto",
+"on" or "off", not "<word>"`) and nothing changes. The old boolean `codexSandbox` still works: `true`
+is `"on"` and `false` is `"off"` (stored as `sandbox = false`, not as "no key"). A call with both
+arguments uses `codexSandboxMode`. Choosing `on` ("Always") runs the probe again and refuses the change
+unless it says `works`. The error text is `the Codex sandbox does not work on this machine, so it
+cannot be set to "Always": <detail>` (`fails`) or `the Codex sandbox cannot be set to "Always":
+<detail>` (`missing`). The command checks the sandbox setting first: a refusal changes nothing else of
+the same call. `auto` and `off` are always allowed. The setting applies at the next start of a session
+(the app reads it in `launch`). It never applies to a Claude employee or to the setup session.
 
 `codex_sandbox_probe` finds `bwrap` in the PATH of a session (the same environment as
 `program_test`), runs `bwrap --unshare-user --ro-bind / / true` with no shell and a time limit of
@@ -198,69 +237,63 @@ a Claude employee or to the setup session.
 `bwrap: setting up uid map: Permission denied`), or it did not end in 5 s. `missing`: no `bwrap` in
 the PATH.
 
-`settings_set` with `codexSandbox: true` runs the probe again and refuses the change unless it says
-`works`. The error text is `the Codex sandbox does not work on this machine, so it cannot be turned
-on: <detail>` (`fails`) or `the Codex sandbox cannot be turned on: <detail>` (`missing`). The
-command checks the switch first: a refusal changes nothing else of the same call. `codexSandbox:
-false` is always allowed. The UI shows the section "Codex sandbox" in Settings: the probe result, the
-button "Test again", and the switch, which is disabled unless the last test says `works` (or the
-switch is on already, so that it can be turned off).
+**The check at a Codex start.** In the states `auto` and `on` the app runs the probe first. A `works`
+result counts for 60 s (`SANDBOX_WINDOW`), so the start of a team runs the probe one time. A failure
+is never kept: the next start runs the probe again. The button "Test again" and `settings_set` with
+`on` run the probe too, and they update the same result. The app never changes the stored value by
+itself. The instructions of the employee (`codex_permission_instructions`) and the flags of the
+adapter both follow the EFFECTIVE state of that start.
 
-## A stored "on" that does not work: `SANDBOX_DOWN` and the three states (2026-11-21, defect D1)
+**The refusal (state `on` only).** If the probe does not say `works`, the start is refused. The
+error text is:
 
-A stored `codexSandbox: true` does not mean that the sandbox works now. After a system update the
-AppArmor profile can be gone, or `bwrap` can be removed. So the app checks the sandbox at each start
-of a Codex session while the setting is on.
+`SANDBOX_DOWN: <Name> did not start: the Codex sandbox does not work on this machine now (<detail>). The setting "Codex sandbox" is "Always". Repair the sandbox, or choose "Automatic" or "Never" in Settings > Codex sandbox.`
 
-**The check.** At each start of a Codex employee with `[codex] sandbox` on, the app runs the probe
-(`codex_sandbox_probe`) first. A `works` result counts for 60 s (`SANDBOX_WINDOW`), so the start of
-a team runs the probe one time. A failure is never kept: the next start runs the probe again. The
-button "Test again" and `settings_set` with `codexSandbox: true` run the probe too, and they update
-the same result (`fails` and `missing` clear it). The app never changes the stored value by itself.
-
-**The refusal.** If the probe does not say `works`, the start is refused. The app does not fall back
-to full access, because a silent fall back would give an employee more rights than the operator
-chose. The error text is:
-
-`SANDBOX_DOWN: The Codex sandbox does not work on this machine now (<detail>). The start of <Name> is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.`
-
+(Before this wording on 2026-11-21 the text started with "The Codex sandbox does not work ... The start
+of <Name> is refused". The fact that matters, which employee did not start, now comes first.)
 `<detail>` is the `detail` of the probe, and `<Name>` is the name of the employee. The refusal applies
 to `session_start`, `session_resume`, "Resume the last team" (`team_resume`), and a start by an
 employee through the tools `employee_start`, `send` and `task_assign`. It does not apply to a Claude
-employee or to the setup session. Turning the setting off is always allowed.
+employee or to the setup session.
 
 - A command of the operator (`session_start`, `session_resume`) returns the error text above.
 - `team_resume` starts each employee in turn. A Claude employee resumes. A refused Codex employee
   stays in the list `resumable`, and the team gets ONE `notice` (see below), not `resume_failed`.
-- A tool answers with one line that starts with `SANDBOX_DOWN: The app could not start <Name>: the
-  Codex sandbox does not work on this machine now (<detail>), and the operator has the setting "Use
-  the Codex sandbox" on. Your message is saved and waits. Do not send it again.`
+- A tool answers with one line that starts with `SANDBOX_DOWN: <Name> did not start: the Codex
+  sandbox does not work on this machine now (<detail>). The operator set "Codex sandbox" to "Always".
+  Your message is saved and waits. Do not send it again.`
 
-**The notice.** The refusal of a start by a tool, and the refusal in a team resume, send a `notice`
-event with the kind `sandbox_down`. The `text` is the `SANDBOX_DOWN:` error text. The app sends at
-most one such notice in each 60 s, not one for each refused start. The UI shows an error toast that
-stays, with the button "Open Settings". The UI also gives that button to the error text of a refused
-start by the operator (the text starts with `SANDBOX_DOWN:`). The button opens Settings at the
-section `codex-sandbox`.
+**The notices.**
 
-| Kind | Text |
+| Kind | When | Text | UI |
+|---|---|---|---|
+| `sandbox_down` | A start by a tool, or a team resume, is refused (state `on`). At most one in each 60 s. | The `SANDBOX_DOWN:` error text of the first refused start. | Error toast that stays, with the button "Open Settings". |
+| `sandbox_auto_off` | State `auto`, and the probe does not say `works` at a Codex start. ONE in each run of the app, not one for each start. A later start in the same run sends none. | `The Codex sandbox does not work on this machine, so Codex employees run with full access. See Settings > Codex sandbox.` | Information toast that stays, with the button "Open Settings". |
+
+The button "Open Settings" opens Settings at the section `codex-sandbox`. The UI also gives that
+button to the error text of a refused start by the operator (the text starts with `SANDBOX_DOWN:`).
+
+**The section "Codex sandbox" in Settings.** One control with three choices, in these words:
+"Automatic (recommended): use the sandbox when it works on this machine", "Always: refuse to start a
+Codex employee when the sandbox does not work", "Never: Codex employees have full access". Above it:
+the probe result and the button "Test again". Under it, one line says what is in effect now, from
+`codexSandboxEffective`:
+
+| `codexSandboxEffective` | The line |
 |---|---|
-| `sandbox_down` | The `SANDBOX_DOWN:` error text of the first refused start in the 60 s. |
+| `on` | `In effect now: the sandbox is on.` |
+| `off`, mode `off` | `In effect now: the sandbox is off, because you chose Never.` |
+| `off`, mode `auto` | `In effect now: the sandbox is off, because it does not work on this machine (<probe detail>).` |
+| `refused` | `In effect now: Codex employees cannot start, because the sandbox does not work on this machine (<probe detail>).` A red line also says what to do. |
+| (a test runs) | `In effect now: testing the sandbox...` |
 
-**The three states of the section "Codex sandbox".** `settings_get` still gives `codexSandbox` (the
-stored value). The UI reads the probe when the panel opens, and the section shows:
-
-| State | When | What the section shows |
-|---|---|---|
-| (a) off | `codexSandbox` is `false` | The probe result, the switch (enabled only when the probe says `works`) |
-| (b) on and works | `codexSandbox` is `true`, probe `works` | The probe result in green, the switch on |
-| (c) on and down | `codexSandbox` is `true`, probe `fails` or `missing` | A red line: "The setting is on, but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or turn the setting off." The switch stays ON and ENABLED, so that the operator can turn it off |
-
-The text under the probe result for `fails` is: "On Ubuntu 24.04 and later, AppArmor blocks bwrap
-by default. Add an AppArmor profile that lets /usr/bin/bwrap use user namespaces, then press Test
-again." For `missing` it is "Install bubblewrap, so that the program bwrap is in the PATH of the
-sessions." A line under the switch is always shown: "With the sandbox on, the commands of a Codex
-employee have no network access (for example a package install fails)."
+"Always" can be chosen only when the last test says `works` (or when it is chosen already, so that the
+operator can leave it). "Automatic" and "Never" can always be chosen. The text under the probe result
+for `fails` is: "On Ubuntu 24.04 and later, AppArmor blocks bwrap by default. Add an AppArmor profile
+that lets /usr/bin/bwrap use user namespaces, then press Test again." For `missing` it is "Install
+bubblewrap, so that the program bwrap is in the PATH of the sessions." A line is always shown: "With
+the sandbox on, the commands of a Codex employee have no network access (for example a package
+install fails)."
 
 ## The desktop notification for a question
 

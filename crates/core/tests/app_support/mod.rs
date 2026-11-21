@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
@@ -463,7 +464,32 @@ impl Rig {
                 .programs_set(name, bin("fake-cli").to_str().unwrap())
                 .expect("set a program");
         }
-        tower.programs_set("node", "/bin/true").expect("set node");
+        // The session PATH of a test finds this folder first. It holds `node` and a `bwrap` that
+        // fails, so the Codex sandbox does not work in a test unless the test says so (the real
+        // `/usr/bin/bwrap` of the machine must not change a test). The default state of the
+        // setting is "Automatic", so a Codex start in a test gets full access, as before. A test
+        // of the sandbox writes its own `bwrap` in its own folder (`app_codex_sandbox.rs`).
+        let tools = config
+            .parent()
+            .map_or_else(|| config.join("tools"), |base| base.join("rig-tools"));
+        std::fs::create_dir_all(&tools).expect("make the tools folder");
+        let node = tools.join("node");
+        if !node.exists() {
+            std::os::unix::fs::symlink("/bin/true", &node).expect("link node");
+        }
+        let bwrap = tools.join("bwrap");
+        if !bwrap.exists() {
+            std::fs::write(
+                &bwrap,
+                "#!/bin/sh\necho 'bwrap: the rig has no sandbox' >&2\nexit 1\n",
+            )
+            .expect("write bwrap");
+            std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755))
+                .expect("make bwrap executable");
+        }
+        tower
+            .programs_set("node", node.to_str().unwrap())
+            .expect("set node");
         tower
     }
 

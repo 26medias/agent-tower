@@ -5,6 +5,7 @@
     import { onMount, tick } from "svelte";
     import { modal } from "$lib/modal";
     import { store } from "$lib/store.svelte";
+    import type { CodexSandboxMode } from "$lib/types";
     import ActionError from "./ActionError.svelte";
     import FloorDefaultsForm from "./FloorDefaultsForm.svelte";
     import ModelListEditor from "./ModelListEditor.svelte";
@@ -67,25 +68,32 @@
     }
 
     const probe = $derived(store.sandboxProbe);
-    const sandboxOn = $derived(store.settings?.codexSandbox ?? false);
-    // The switch can be turned ON only when the last probe says `works`. It can always be turned OFF, also while the
-    // test runs and also when the test fails: the operator must be able to leave a stored "on" that does not work.
-    const sandboxDisabled = $derived(!store.settings || (!sandboxOn && (store.sandboxTesting || probe?.state !== "works")));
-    const sandboxReason = $derived(
-        !store.settings || sandboxOn || probe?.state === "works"
-            ? null
-            : store.sandboxTesting || !probe
-              ? "The switch needs the result of the test."
-              : "The switch stays off because the test did not pass.",
+    const sandboxMode = $derived(store.settings?.codexSandboxMode ?? "auto");
+    const sandboxEffective = $derived(store.settings?.codexSandboxEffective ?? "off");
+    // "Always" can be chosen only when the last probe says `works`. "Automatic" and "Never" can always be chosen, also
+    // while the test runs and also when it fails: the operator must be able to leave a stored "Always" that does not work.
+    const alwaysDisabled = $derived(!store.settings || (sandboxMode !== "on" && (store.sandboxTesting || probe?.state !== "works")));
+    const alwaysReason = $derived(
+        alwaysDisabled && store.settings
+            ? store.sandboxTesting || !probe
+                ? "\"Always\" needs the result of the test."
+                : "\"Always\" is not possible because the test did not pass."
+            : null,
     );
-    // The three states of the section. The stored value is never changed by the test:
-    //   off: the setting is off.
-    //   on-works: the setting is on and the probe works.
-    //   on-down: the setting is on and the probe does not say works. The app refuses each Codex start.
-    //   on-testing: the setting is on and the test has no result yet.
-    const sandboxMode = $derived(
-        !sandboxOn ? "off" : store.sandboxTesting || !probe ? "on-testing" : probe.state === "works" ? "on-works" : "on-down",
-    );
+    // The line "In effect now". It comes from the app (`codexSandboxEffective`, from the last probe). While a test runs it
+    // says so, because the result is not known yet.
+    const effectiveText = $derived.by(() => {
+        if (!store.settings) return "";
+        if (store.sandboxTesting) return "In effect now: testing the sandbox...";
+        if (sandboxEffective === "on") return "In effect now: the sandbox is on.";
+        if (sandboxEffective === "refused") {
+            return `In effect now: Codex employees cannot start, because the sandbox does not work on this machine (${probe?.detail ?? "not tested"}).`;
+        }
+        if (sandboxMode === "off") return "In effect now: the sandbox is off, because you chose Never.";
+        return `In effect now: the sandbox is off, because it does not work on this machine (${probe?.detail ?? "not tested"}).`;
+    });
+    // The data-mode of the section: the stored mode, and what is in effect now.
+    const sandboxEffectiveState = $derived(store.sandboxTesting ? "testing" : sandboxEffective);
     const sandboxHelp = $derived(
         probe?.state === "missing"
             ? "Install bubblewrap, so that the program bwrap is in the PATH of the sessions."
@@ -190,7 +198,7 @@
             <ProgramsPanel />
         </section>
 
-        <section data-section="codex-sandbox" data-mode={sandboxMode} aria-label="Codex sandbox">
+        <section data-section="codex-sandbox" data-mode={sandboxMode} data-effective={sandboxEffectiveState} aria-label="Codex sandbox">
             <h3>Codex sandbox</h3>
             <div class="sandbox-state" data-testid="sandbox-state" data-state={store.sandboxTesting ? "testing" : (probe?.state ?? "unknown")}>
                 {#if store.sandboxTesting}
@@ -209,38 +217,50 @@
             {#if !store.sandboxTesting && probe && probe.state !== "works"}
                 <p class="hint" data-testid="sandbox-help">{sandboxHelp}</p>
             {/if}
-            <label class="check">
-                <input
-                    type="checkbox"
-                    name="codexSandbox"
-                    checked={sandboxOn}
-                    disabled={sandboxDisabled}
-                    onchange={async (e) => {
-                        const box = e.currentTarget;
-                        const ok = await store.setCodexSandbox(box.checked);
-                        // A refusal leaves the stored value as it was: show that.
-                        if (!ok) box.checked = store.settings?.codexSandbox ?? false;
-                    }}
-                />
-                <span>Use the Codex sandbox for Codex employees</span>
-            </label>
+            <div class="choices" role="radiogroup" aria-label="Codex sandbox setting">
+                {#each [{ value: "auto", label: "Automatic (recommended): use the sandbox when it works on this machine" }, { value: "on", label: "Always: refuse to start a Codex employee when the sandbox does not work" }, { value: "off", label: "Never: Codex employees have full access" }] as choice (choice.value)}
+                    <label class="check">
+                        <input
+                            type="radio"
+                            name="codexSandboxMode"
+                            value={choice.value}
+                            data-choice={choice.value}
+                            checked={sandboxMode === choice.value}
+                            disabled={!store.settings || (choice.value === "on" && alwaysDisabled)}
+                            onchange={async (e) => {
+                                const radio = e.currentTarget;
+                                const ok = await store.setCodexSandboxMode(radio.value as CodexSandboxMode);
+                                // A refusal leaves the stored value as it was: show that.
+                                if (!ok) {
+                                    const group = radio.form ?? document;
+                                    for (const each of group.querySelectorAll<HTMLInputElement>('input[name="codexSandboxMode"]')) {
+                                        each.checked = each.value === (store.settings?.codexSandboxMode ?? "auto");
+                                    }
+                                }
+                            }}
+                        />
+                        <span>{choice.label}</span>
+                    </label>
+                {/each}
+            </div>
+            <p class="hint effective" data-testid="sandbox-effective" data-effective={sandboxEffectiveState}>{effectiveText}</p>
             <p class="hint" data-testid="sandbox-network">
                 With the sandbox on, the commands of a Codex employee have no network access (for example a package install fails).
             </p>
-            {#if sandboxMode === "on-down"}
+            {#if sandboxEffective === "refused" && !store.sandboxTesting}
                 <p class="down" role="alert" data-testid="sandbox-down">
-                    The setting is on, but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or turn the setting
-                    off.
+                    The setting is "Always", but the sandbox does not work now. Codex employees cannot start until you repair the sandbox or choose
+                    "Automatic" or "Never".
                 </p>
             {/if}
-            {#if sandboxReason}
-                <p class="hint" data-testid="sandbox-reason">{sandboxReason}</p>
+            {#if alwaysReason}
+                <p class="hint" data-testid="sandbox-reason">{alwaysReason}</p>
             {/if}
             <ActionError area="codex-sandbox" />
             <p class="hint">
-                On: the Codex CLI enforces the policy of each Codex employee. A <em>read-only</em> employee can write only the
+                With the sandbox on, the Codex CLI enforces the policy of each Codex employee. A <em>read-only</em> employee can write only the
                 reports folder. An <em>edit-in-worktree</em> employee can write only the task worktrees, the reports folder and
-                the temporary folders. In a folder that is not a git repository it can write the project folder. An action outside the policy asks you for approval. Off: the CLI enforces no policy, and
+                the temporary folders. In a folder that is not a git repository it can write the project folder. An action outside the policy asks you for approval. With the sandbox off, the CLI enforces no policy, and
                 only the role text limits a Codex employee. The change applies at the next start of a session.
             </p>
         </section>
@@ -409,5 +429,22 @@
         display: flex;
         align-items: center;
         gap: 8px;
+    }
+
+    .choices {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .effective {
+        color: var(--text);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        user-select: text;
+    }
+
+    .effective[data-effective="refused"] {
+        color: var(--danger);
     }
 </style>

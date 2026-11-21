@@ -120,7 +120,11 @@ fn programs_overrides_are_checked_stored_and_read_by_a_new_tower() {
     let fake = bin("fake-cli");
     let got = rig.tower.programs_get();
     assert_eq!(got.claude.as_deref(), Some(fake.as_path()));
-    assert_eq!(got.node.as_deref(), Some(Path::new("/bin/true")));
+    // The rig links `node` to `/bin/true` in its own tools folder (see `app_support`).
+    assert_eq!(
+        got.node.as_deref(),
+        Some(rig.root.path().join("rig-tools/node").as_path())
+    );
     assert_eq!(got.hook.as_deref(), Some(bin("tower-hook").as_path()));
 
     // A path that is not an executable file is refused, and nothing changes.

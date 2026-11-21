@@ -38,6 +38,10 @@ export function noticePlan(kind: string): NoticePlan {
         case "floor_gone":
         case "sandbox_down":
             return { tone: "error", stay: true };
+        case "sandbox_auto_off":
+            // An information toast that stays: with "Automatic" the app started Codex with full access, and the
+            // operator should know it. The toast has the button "Open Settings" (the store adds it).
+            return { tone: "info", stay: true };
         case "task_done_unmerged":
             // It carries a warning, so it stays until the operator closes it.
             return { tone: "info", stay: true };
@@ -51,7 +55,7 @@ export function noticePlan(kind: string): NoticePlan {
 export type ErrorAction = "settings-programs" | "settings-sandbox" | null;
 
 /**
- * The app refused the start of a Codex employee, because the setting "Use the Codex sandbox" is on and the sandbox does
+ * The app refused the start of a Codex employee, because the setting "Codex sandbox" is "Always" and the sandbox does
  * not work now (docs/ipc-final.md, error prefix SANDBOX_DOWN). The fix is in Settings > Codex sandbox.
  */
 export function sandboxDown(text: string): boolean {

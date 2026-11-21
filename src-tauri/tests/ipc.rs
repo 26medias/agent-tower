@@ -476,7 +476,10 @@ fn an_unknown_session_gives_a_text_error() {
 
 #[test]
 fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_shapes() {
-    let app = app();
+    // A `bwrap` that fails first in the PATH: the default state "Automatic" gives `off` here, on
+    // each machine (the real `/usr/bin/bwrap` of the machine must not change the answer).
+    let failing = fake_tools("echo 'bwrap: no sandbox in this test' >&2; exit 1");
+    let app = app_full(None, Some(failing.path()));
     let path = app.path();
     let floor = app
         .call("floor_create", json!({ "path": path, "name": "Acme" }))
@@ -502,7 +505,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
     // Settings. The arguments are camelCase, and a null is "no change".
     assert_eq!(
         app.call("settings_get", json!({})).unwrap(),
-        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "codexSandbox": false, "homeDir": "/tmp" })
+        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/tmp" })
     );
     let set = app
         .call(
@@ -520,7 +523,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
         .unwrap();
     assert_eq!(
         set,
-        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "codexSandbox": false, "homeDir": "/tmp" })
+        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/tmp" })
     );
     assert!(!set.to_string().contains("sk-test-1"));
     let set = app
@@ -1161,41 +1164,72 @@ fn fake_tools(body: &str) -> tempfile::TempDir {
     tools
 }
 
-/// The command `codex_sandbox_probe` and the argument `codexSandbox` of `settings_set`. The
-/// switch is off by default, a failing probe refuses it with the error text, a working probe
-/// accepts it, and an old call with no `codexSandbox` changes nothing.
+/// The command `codex_sandbox_probe` and the arguments `codexSandbox` (old, boolean) and
+/// `codexSandboxMode` (new, three states) of `settings_set`. The default is "auto". A failing
+/// probe refuses "on" with the error text, a working probe accepts it, and an old call with no
+/// sandbox argument changes nothing. `codexSandbox` in the answer is the EFFECTIVE state.
 #[test]
 fn the_codex_sandbox_probe_and_switch_work_through_the_ipc() {
     let failing = fake_tools("echo 'bwrap: setting up uid map: Permission denied' >&2; exit 1");
     let app = app_full(None, Some(failing.path()));
-    assert_eq!(
-        app.call("settings_get", json!({})).unwrap()["codexSandbox"],
-        json!(false)
-    );
+    let first = app.call("settings_get", json!({})).unwrap();
+    assert_eq!(first["codexSandbox"], json!(false));
+    assert_eq!(first["codexSandboxMode"], json!("auto"));
+    assert_eq!(first["codexSandboxEffective"], json!("off"));
     assert_eq!(
         app.call("codex_sandbox_probe", json!({})).unwrap(),
         json!({ "state": "fails", "detail": "bwrap: setting up uid map: Permission denied" })
     );
-    let error = app
-        .call(
-            "settings_set",
-            json!({ "openaiKey": null, "imageModel": "m-2", "codexSandbox": true }),
-        )
-        .unwrap_err();
-    assert!(
-        error.contains("does not work on this machine")
-            && error.contains("setting up uid map: Permission denied"),
-        "{error}"
-    );
+    // The old boolean and the new word both refuse "on" while the probe fails.
+    for args in [
+        json!({ "openaiKey": null, "imageModel": "m-2", "codexSandbox": true }),
+        json!({ "openaiKey": null, "imageModel": "m-2", "codexSandboxMode": "on" }),
+    ] {
+        let error = app.call("settings_set", args).unwrap_err();
+        assert!(
+            error.contains("does not work on this machine")
+                && error.contains("setting up uid map: Permission denied"),
+            "{error}"
+        );
+    }
     // A refusal changes nothing else: the image model of the same call is not stored.
     let now = app.call("settings_get", json!({})).unwrap();
     assert_eq!(now["codexSandbox"], json!(false));
+    assert_eq!(now["codexSandboxMode"], json!("auto"));
     assert_ne!(now["imageModel"], json!("m-2"));
+    // A word that is not one of the three is an error, and nothing changes.
+    let error = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": "m-2", "codexSandboxMode": "maybe" }),
+        )
+        .unwrap_err();
+    assert!(error.contains("codexSandboxMode must be"), "{error}");
+    assert_ne!(
+        app.call("settings_get", json!({})).unwrap()["imageModel"],
+        json!("m-2")
+    );
+    // "never" and "auto" are always allowed. "never" stores `false`, so the mode is "off".
+    let never = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "codexSandboxMode": "off" }),
+        )
+        .unwrap();
+    assert_eq!(never["codexSandboxMode"], json!("off"));
+    assert_eq!(never["codexSandboxEffective"], json!("off"));
+    assert_eq!(never["codexSandbox"], json!(false));
 
     let working = fake_tools("exit 0");
     let app = app_full(None, Some(working.path()));
+    // Automatic with a sandbox that works: effective on, and the old field says so.
+    let auto = app.call("settings_get", json!({})).unwrap();
+    assert_eq!(auto["codexSandboxMode"], json!("auto"));
+    assert_eq!(auto["codexSandboxEffective"], json!("on"));
+    assert_eq!(auto["codexSandbox"], json!(true));
     let probe = app.call("codex_sandbox_probe", json!({})).unwrap();
     assert_eq!(probe["state"], json!("works"));
+    // The old boolean `true` is "on". The answer has the three-state value and the effective state.
     let on = app
         .call(
             "settings_set",
@@ -1203,14 +1237,19 @@ fn the_codex_sandbox_probe_and_switch_work_through_the_ipc() {
         )
         .unwrap();
     assert_eq!(on["codexSandbox"], json!(true));
-    // An old call (no `codexSandbox`) and a null: no change.
+    assert_eq!(on["codexSandboxMode"], json!("on"));
+    assert_eq!(on["codexSandboxEffective"], json!("on"));
+    // An old call (no sandbox argument) and a null: no change.
     for args in [
         json!({ "openaiKey": null, "imageModel": "m-3" }),
         json!({ "openaiKey": null, "imageModel": null, "codexSandbox": null }),
+        json!({ "openaiKey": null, "imageModel": null, "codexSandboxMode": null }),
     ] {
         let same = app.call("settings_set", args).unwrap();
         assert_eq!(same["codexSandbox"], json!(true));
+        assert_eq!(same["codexSandboxMode"], json!("on"));
     }
+    // The old boolean `false` is "off" (the stored `false`, not the default).
     let off = app
         .call(
             "settings_set",
@@ -1218,7 +1257,47 @@ fn the_codex_sandbox_probe_and_switch_work_through_the_ipc() {
         )
         .unwrap();
     assert_eq!(off["codexSandbox"], json!(false));
+    assert_eq!(off["codexSandboxMode"], json!("off"));
     assert_eq!(off["imageModel"], json!("m-3"));
+    // The new word "auto" goes back to the default, and the new word wins over the old boolean.
+    let auto = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "codexSandboxMode": "auto" }),
+        )
+        .unwrap();
+    assert_eq!(auto["codexSandboxMode"], json!("auto"));
+    assert_eq!(auto["codexSandbox"], json!(true));
+    let both = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "codexSandbox": false, "codexSandboxMode": "on" }),
+        )
+        .unwrap();
+    assert_eq!(both["codexSandboxMode"], json!("on"));
+    // The file keeps the stored forms: `true`, `false`, and no key.
+    let file = app.dir.path().join("config/programs.toml");
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("sandbox = true")
+    );
+    app.call(
+        "settings_set",
+        json!({ "openaiKey": null, "imageModel": null, "codexSandboxMode": "off" }),
+    )
+    .unwrap();
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("sandbox = false")
+    );
+    app.call(
+        "settings_set",
+        json!({ "openaiKey": null, "imageModel": null, "codexSandboxMode": "auto" }),
+    )
+    .unwrap();
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("sandbox"));
 }
 
 #[test]

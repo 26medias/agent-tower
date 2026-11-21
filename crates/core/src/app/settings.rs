@@ -18,8 +18,13 @@
 //!
 //! ```toml
 //! [codex]
-//! sandbox = true   # use the Codex sandbox for Codex employees; the default is false
+//! sandbox = true   # "Always": refuse a Codex start when the sandbox does not work
+//! sandbox = false  # "Never": Codex employees have full access, and no probe runs
+//! # no `sandbox` key: "Automatic" (the default): the sandbox is on when it works
 //! ```
+//!
+//! Before 2026-11-21 (the second decision of that day) a missing key meant "off". Now it means
+//! "Automatic". A stored `sandbox = true` stays "Always".
 //!
 //! The rules of the floors for commands with no question (since 2026-11-21) are in the table
 //! `[floor_permissions]`. Each key is the real absolute path of a floor, and the value is the
@@ -55,6 +60,61 @@ pub enum KeySource {
     Env,
 }
 
+/// The stored state of the setting "Codex sandbox" (decision O7, changed on 2026-11-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexSandboxMode {
+    /// No key in the file. The sandbox is on when the probe says that it works.
+    Auto,
+    /// `sandbox = true`. The sandbox is on. A failing probe refuses a Codex start.
+    On,
+    /// `sandbox = false`. Codex starts with full access. No probe runs.
+    Off,
+}
+
+impl CodexSandboxMode {
+    /// The word in the interface contract.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CodexSandboxMode::Auto => "auto",
+            CodexSandboxMode::On => "on",
+            CodexSandboxMode::Off => "off",
+        }
+    }
+
+    /// The reverse of `as_str`. `None` for any other text.
+    pub fn parse(text: &str) -> Option<CodexSandboxMode> {
+        match text {
+            "auto" => Some(CodexSandboxMode::Auto),
+            "on" => Some(CodexSandboxMode::On),
+            "off" => Some(CodexSandboxMode::Off),
+            _ => None,
+        }
+    }
+}
+
+/// What a Codex start gets now (see `SettingsView::codex_sandbox_effective`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxEffective {
+    /// A Codex start gets the sandbox profile.
+    On,
+    /// A Codex start gets full access: the mode is `off`, or the mode is `auto` and the probe
+    /// does not say `works`.
+    Off,
+    /// The mode is `on` and the probe does not say `works`: a Codex start is refused.
+    Refused,
+}
+
+impl SandboxEffective {
+    /// The word in the interface contract.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxEffective::On => "on",
+            SandboxEffective::Off => "off",
+            SandboxEffective::Refused => "refused",
+        }
+    }
+}
+
 /// `Settings` of the contract. It has no key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsView {
@@ -64,8 +124,13 @@ pub struct SettingsView {
     /// `[interface] notify_on_question`: show a desktop notification when an agent asks a
     /// question and the window has no focus. The default is `true`.
     pub notify_on_question: bool,
-    /// `[codex] sandbox`: start Codex employees with the Codex sandbox (decision O7, option A).
-    /// The default is `false`.
+    /// `[codex] sandbox` as it is stored: `auto` (no key), `on` (`true`) or `off` (`false`).
+    pub codex_sandbox_mode: CodexSandboxMode,
+    /// What a Codex start gets now. It is filled by `Tower::settings_get`, from the stored mode
+    /// and the last probe of the sandbox. The file alone cannot say it, so `view` gives `Off`.
+    pub codex_sandbox_effective: SandboxEffective,
+    /// The old boolean field: `true` when the effective state is `On` (a Codex start gets the
+    /// sandbox now). It is `false` for `Off` and for `Refused`.
     pub codex_sandbox: bool,
     /// The home folder of the app (`HOME` of its environment). The UI opens the folder dialog
     /// there when no floor gives a better place. `None` when `HOME` is not set.
@@ -138,7 +203,9 @@ pub(crate) fn view(file: &Path, env: &EnvMap) -> SettingsView {
         openai_key_source: key.map(|(_, source)| source),
         image_model: image_model(file),
         notify_on_question: notify_on_question(file),
-        codex_sandbox: codex_sandbox(file),
+        codex_sandbox_mode: codex_sandbox_mode(file),
+        codex_sandbox_effective: SandboxEffective::Off,
+        codex_sandbox: false,
         home_dir: env
             .get(std::ffi::OsStr::new("HOME"))
             .filter(|home| !home.is_empty())
@@ -179,29 +246,39 @@ pub(crate) fn set_notify_on_question(table: &mut toml::Table, on: bool) {
     }
 }
 
-/// `[codex] sandbox`. A missing file, a missing key or a value that is not a boolean gives the
-/// default: `false`.
-pub(crate) fn codex_sandbox(file: &Path) -> bool {
-    read_table(file)
+/// `[codex] sandbox`. A missing file, a missing key or a value that is not a boolean is
+/// `Auto`. `true` is `On` (so an old file keeps its meaning). `false` is `Off`.
+pub(crate) fn codex_sandbox_mode(file: &Path) -> CodexSandboxMode {
+    match read_table(file)
         .get("codex")
         .and_then(toml::Value::as_table)
         .and_then(|section| section.get("sandbox"))
         .and_then(toml::Value::as_bool)
-        .unwrap_or(false)
+    {
+        Some(true) => CodexSandboxMode::On,
+        Some(false) => CodexSandboxMode::Off,
+        None => CodexSandboxMode::Auto,
+    }
 }
 
-/// Set `[codex] sandbox`. The default value (`false`) removes the key, and an empty table goes
-/// too, so the file stays as small as it was. Other keys of `[codex]` stay.
-pub(crate) fn set_codex_sandbox(table: &mut toml::Table, on: bool) {
+/// Set `[codex] sandbox`. `Auto` (the default) removes the key, and an empty table goes too.
+/// `On` stores `true` and `Off` stores `false`. Other keys of `[codex]` stay.
+pub(crate) fn set_codex_sandbox_mode(table: &mut toml::Table, mode: CodexSandboxMode) {
     let section = table
         .entry("codex")
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
     let now_empty = match section.as_table_mut() {
         Some(section) => {
-            if on {
-                section.insert("sandbox".to_owned(), toml::Value::Boolean(true));
-            } else {
-                section.remove("sandbox");
+            match mode {
+                CodexSandboxMode::Auto => {
+                    section.remove("sandbox");
+                }
+                CodexSandboxMode::On => {
+                    section.insert("sandbox".to_owned(), toml::Value::Boolean(true));
+                }
+                CodexSandboxMode::Off => {
+                    section.insert("sandbox".to_owned(), toml::Value::Boolean(false));
+                }
             }
             section.is_empty()
         }

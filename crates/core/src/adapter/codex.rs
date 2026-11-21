@@ -5,7 +5,8 @@
 //! does not work). Codex has no flag for the session ID: it comes in the first hook event.
 //!
 //! Permission mapping (decision O7). Two cases, chosen by `StartContext::codex_sandbox` (the
-//! switch "Use the Codex sandbox" in Settings, off by default):
+//! EFFECTIVE state of this start: the setting "Codex sandbox" in Settings is "Automatic" by
+//! default, and then the app tests the sandbox at each start; see `docs/spec.md` 4.7):
 //!
 //! - Off (option B): each policy that exists gets `-a on-request -s danger-full-access`. The CLI
 //!   does not enforce `read-only` or `edit-in-worktree`; only the instructions limit the agent.

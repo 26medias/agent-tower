@@ -42,7 +42,7 @@ describe("describeError", () => {
 
 describe("the refused start of a Codex employee (SANDBOX_DOWN)", () => {
     const text =
-        'SANDBOX_DOWN: The Codex sandbox does not work on this machine now (bwrap: setting up uid map: Permission denied). The start of Sam is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.';
+        'SANDBOX_DOWN: Sam did not start: the Codex sandbox does not work on this machine now (bwrap: setting up uid map: Permission denied). The setting "Codex sandbox" is "Always". Repair the sandbox, or choose "Automatic" or "Never" in Settings > Codex sandbox.';
 
     it("shows the text with no code prefix, with no extra hint", () => {
         expect(tidyError(text)).toBe(text.replace("SANDBOX_DOWN: ", ""));
@@ -60,6 +60,10 @@ describe("the refused start of a Codex employee (SANDBOX_DOWN)", () => {
 
     it("shows the sandbox_down notice as an error toast that stays", () => {
         expect(noticePlan("sandbox_down")).toEqual({ tone: "error", stay: true });
+    });
+
+    it("shows the sandbox_auto_off notice as an information toast that stays", () => {
+        expect(noticePlan("sandbox_auto_off")).toEqual({ tone: "info", stay: true });
     });
 });
 

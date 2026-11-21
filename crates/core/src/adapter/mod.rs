@@ -124,8 +124,9 @@ pub struct StartContext {
     /// The rules of the floor for commands with no question (from the app config). The caller has checked them
     /// (`model::valid_allow_rules`). Claude only. They are not used for the policy `ask-always`.
     pub floor_allow: Vec<String>,
-    /// Codex only: start the session with the Codex sandbox that the CLI enforces (the switch
-    /// "Use the Codex sandbox" in Settings; decision O7, option A). With `false` the session
+    /// Codex only: start the session with the Codex sandbox that the CLI enforces. The caller
+    /// sets it to the EFFECTIVE state of this start: the setting "Codex sandbox" in Settings is
+    /// "Automatic" (on when the probe works), "Always" or "Never" (decision O7). With `false` the session
     /// gets `-s danger-full-access`, as before. `worktrees` tells the adapter if the floor is a git
     /// repository with worktrees. Claude ignores this field.
     pub codex_sandbox: bool,

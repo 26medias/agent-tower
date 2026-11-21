@@ -157,6 +157,11 @@ export interface MockControl {
      * "operator".
      */
     deliverMessage(path: string, fromSlug: string, toSlug: string, what: string | { task: number; status?: string }): void;
+    /**
+     * Each Codex start so far, with the sandbox flag that the real app would give it: true when the mode is "Always" or
+     * "Automatic" and the probe said `works` at that start, false for "Never" and for "Automatic" with a failing probe.
+     */
+    readonly codexStarts: { path: string; slug: string; sandbox: boolean }[];
     /** Send the `notice` event. `kind` is `task_blocked` (a blocked merge, an error toast) when it is left out. */
     notice(path: string, text: string, kind?: string): void;
     /**
@@ -320,9 +325,35 @@ export function createMockBackend(): Backend {
         openaiKeySource: null,
         imageModel: "gpt-image-2.6-sunburst",
         notifyOnQuestion: true,
+        // The default is "Automatic" (the decision of 2026-11-21). The two other fields follow the mode and the last probe.
+        codexSandboxMode: "auto",
+        codexSandboxEffective: "off",
         codexSandbox: false,
         homeDir: "/home/demo",
     };
+    // What the last probe said (any result), as in the real app: `settings_get` uses it. Null until a probe runs.
+    let lastProbe: SandboxProbe["state"] | null = null;
+    // The "Automatic" notice goes out one time in each run of the app.
+    let autoNoticeSent = false;
+    // Each Codex start: the sandbox flag that the real app would give (`MockControl.codexStarts`).
+    const codexStarts: { path: string; slug: string; sandbox: boolean }[] = [];
+
+    /** Run the probe of the mock, and remember the result. */
+    function probeNow(): SandboxProbe {
+        const probe = sandboxProbe();
+        lastProbe = probe.state;
+        return probe;
+    }
+
+    /** The effective state from the mode and the last probe (the first call runs a probe, as the real app does). */
+    function refreshSandbox(): void {
+        if (settings.codexSandboxMode === "off") settings.codexSandboxEffective = "off";
+        else {
+            const state = lastProbe ?? probeNow().state;
+            settings.codexSandboxEffective = state === "works" ? "on" : settings.codexSandboxMode === "on" ? "refused" : "off";
+        }
+        settings.codexSandbox = settings.codexSandboxEffective === "on";
+    }
     // The custom models of the app config (`[models]`).
     const custom: Record<ModelKind, string[]> = { claude: [], codex: [], image: [] };
 
@@ -740,13 +771,25 @@ export function createMockBackend(): Backend {
         if (!emp) throw `unknown employee ${slug}`;
         const old = floor.sessions.find((x) => x.slug === slug);
         if (old && old.status !== "stopped") throw `employee ${slug} already has a live session`;
-        // The real app runs the probe at each Codex start when the setting is on, and it never falls back to full access.
-        if (emp.cli === "codex" && settings.codexSandbox) {
-            const probe = sandboxProbe();
+        // The real app runs the probe at each Codex start, unless the mode is "Never". "Always" refuses the start when the
+        // probe fails. "Automatic" starts with full access then, and sends one information notice in each run.
+        if (emp.cli === "codex" && settings.codexSandboxMode !== "off") {
+            const probe = probeNow();
             if (probe.state !== "works") {
-                throw `SANDBOX_DOWN: The Codex sandbox does not work on this machine now (${probe.detail}). The start of ${emp.name} is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.`;
+                if (settings.codexSandboxMode === "on") {
+                    throw `SANDBOX_DOWN: ${emp.name} did not start: the Codex sandbox does not work on this machine now (${probe.detail}). The setting "Codex sandbox" is "Always". Repair the sandbox, or choose "Automatic" or "Never" in Settings > Codex sandbox.`;
+                }
+                if (!autoNoticeSent) {
+                    autoNoticeSent = true;
+                    emit("notice", {
+                        path,
+                        kind: "sandbox_auto_off",
+                        text: "The Codex sandbox does not work on this machine, so Codex employees run with full access. See Settings > Codex sandbox.",
+                    });
+                }
             }
-        }
+            codexStarts.push({ path, slug, sandbox: probe.state === "works" });
+        } else if (emp.cli === "codex") codexStarts.push({ path, slug, sandbox: false });
         counter += 1;
         const s: MockSession = {
             view: {
@@ -1096,6 +1139,7 @@ export function createMockBackend(): Backend {
             }
             case "settings_get": {
                 args(raw, []);
+                refreshSandbox();
                 return { ...settings };
             }
             case "settings_set": {
@@ -1104,16 +1148,25 @@ export function createMockBackend(): Backend {
                     imageModel: string | null;
                     notifyOnQuestion?: boolean | null;
                     codexSandbox?: boolean | null;
-                }>(raw, ["openaiKey", "imageModel"], ["notifyOnQuestion", "codexSandbox"]);
-                if (a.codexSandbox === true) {
-                    // Like the real app: it runs the probe, and it refuses the switch unless the probe says `works`.
-                    const probe = sandboxProbe();
-                    if (probe.state === "fails") {
-                        throw `the Codex sandbox does not work on this machine, so it cannot be turned on: ${probe.detail}`;
+                    codexSandboxMode?: string | null;
+                }>(raw, ["openaiKey", "imageModel"], ["notifyOnQuestion", "codexSandbox", "codexSandboxMode"]);
+                // The new argument wins. The old boolean is "on" (true) or "off" (false).
+                let mode: Settings["codexSandboxMode"] | null = null;
+                if (a.codexSandboxMode !== undefined && a.codexSandboxMode !== null) {
+                    if (a.codexSandboxMode !== "auto" && a.codexSandboxMode !== "on" && a.codexSandboxMode !== "off") {
+                        throw `REFUSED: codexSandboxMode must be "auto", "on" or "off", not "${a.codexSandboxMode}"`;
                     }
-                    if (probe.state === "missing") throw `the Codex sandbox cannot be turned on: ${probe.detail}`;
+                    mode = a.codexSandboxMode;
+                } else if (a.codexSandbox !== undefined && a.codexSandbox !== null) mode = a.codexSandbox ? "on" : "off";
+                if (mode === "on") {
+                    // Like the real app: it runs the probe, and it refuses "Always" unless the probe says `works`.
+                    const probe = probeNow();
+                    if (probe.state === "fails") {
+                        throw `the Codex sandbox does not work on this machine, so it cannot be set to "Always": ${probe.detail}`;
+                    }
+                    if (probe.state === "missing") throw `the Codex sandbox cannot be set to "Always": ${probe.detail}`;
                 }
-                if (a.codexSandbox !== undefined && a.codexSandbox !== null) settings.codexSandbox = a.codexSandbox;
+                if (mode !== null) settings.codexSandboxMode = mode;
                 if (a.notifyOnQuestion !== undefined && a.notifyOnQuestion !== null) {
                     settings.notifyOnQuestion = a.notifyOnQuestion;
                 }
@@ -1138,6 +1191,7 @@ export function createMockBackend(): Backend {
                     // An empty text resets the model, like the real app.
                     settings.imageModel = model !== "" ? model : "gpt-image-2.6-sunburst";
                 }
+                refreshSandbox();
                 return { ...settings };
             }
             case "models_get": {
@@ -1192,7 +1246,7 @@ export function createMockBackend(): Backend {
             case "codex_sandbox_probe": {
                 args(raw, []);
                 await sleep(config().sandboxProbeMs ?? 0);
-                return sandboxProbe();
+                return probeNow();
             }
             case "program_test": {
                 const { name } = args<{ name: ProgramName }>(raw, ["name"]);
@@ -1390,6 +1444,7 @@ export function createMockBackend(): Backend {
     }
 
     (globalThis as Record<string, unknown>).__towerMock = {
+        codexStarts,
         output(sessionId, value) {
             text(sessionById(sessionId), value);
         },

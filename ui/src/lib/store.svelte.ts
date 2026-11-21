@@ -52,6 +52,7 @@ import {
     type ProgramTestResult,
     type Programs,
     type SandboxProbe,
+    type CodexSandboxMode,
     type SessionView,
     type Settings,
     type TaskDetail,
@@ -436,7 +437,11 @@ class Store {
         } else if (plan.tone === "error") {
             const taskId = payload.kind === "task_blocked" ? blockedTaskId(payload.text) : null;
             this.toast(payload.text, undefined, false, undefined, taskId === null ? undefined : { path: payload.path, id: taskId });
-        } else this.toast(payload.text, "info", plan.stay);
+        } else {
+            // The notice of "Automatic" with a sandbox that does not work has a button for the section in Settings.
+            const button = payload.kind === "sandbox_auto_off" ? this.actionFor("settings-sandbox") : undefined;
+            this.toast(payload.text, "info", plan.stay, button);
+        }
         if (payload.kind === "floor_gone" || payload.kind === "floor_back") {
             void this.loadFloors();
             if (payload.path === this.openPath) void this.reloadFloor();
@@ -1443,23 +1448,28 @@ class Store {
         this.sandboxTesting = true;
         if (clearError) this.setActionError("codex-sandbox", null);
         try {
-            this.sandboxProbe = await ipc.codexSandboxProbe();
-        } catch (e) {
-            // A refusal of the command itself (not a failed bwrap). Show it as a failed test.
-            this.sandboxProbe = { state: "fails", detail: ipc.errorText(e) };
+            try {
+                this.sandboxProbe = await ipc.codexSandboxProbe();
+            } catch (e) {
+                // A refusal of the command itself (not a failed bwrap). Show it as a failed test.
+                this.sandboxProbe = { state: "fails", detail: ipc.errorText(e) };
+            }
+            // The effective state (`settings.codexSandboxEffective`) comes from the last probe: read it again, before the
+            // test counts as ended, so the line "In effect now" and the result of the test change together.
+            await this.loadSettings();
         } finally {
             this.sandboxTesting = false;
         }
     }
 
     /**
-     * The switch "Use the Codex sandbox for Codex employees". The app runs the probe again when `on` is true, and it
-     * refuses the switch unless the probe says `works`. Returns true on success.
+     * The setting "Codex sandbox" with its three states (Automatic, Always, Never). The app runs the probe again for
+     * "Always", and it refuses "Always" unless the probe says `works`. Returns true on success.
      */
-    async setCodexSandbox(on: boolean): Promise<boolean> {
+    async setCodexSandboxMode(mode: CodexSandboxMode): Promise<boolean> {
         this.setActionError("codex-sandbox", null);
         try {
-            this.settings = await ipc.settingsSet(null, null, null, on);
+            this.settings = await ipc.settingsSet(null, null, null, null, mode);
             return true;
         } catch (e) {
             this.failIn("codex-sandbox", e);

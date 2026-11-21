@@ -705,7 +705,8 @@ pub(crate) fn team_instructions(employee: &Employee, team: &[Employee], floor: &
 }
 
 /// The part of the instructions about the limits of a Codex employee (spec 4.7, decision O7).
-/// The text follows the switch "Use the Codex sandbox" (`sandbox`) and the policy. `worktrees` is
+/// The text follows the EFFECTIVE state of this start (`sandbox`: true when Codex gets the
+/// sandbox profile, also in "Automatic" with a sandbox that works) and the policy. `worktrees` is
 /// true when the floor is a git repository with worktrees. The text for a Claude employee is not
 /// needed: the app enforces the policy of Claude with permission rules.
 pub(crate) fn codex_permission_instructions(
@@ -1334,7 +1335,7 @@ impl TowerCore {
                         delivery_report(target_name, &delivery, sent.answer_tail)
                     }
                     TowerError::SandboxDown { detail, .. } => format!(
-                        "SANDBOX_DOWN: The app could not start {target_name}: the Codex sandbox does not work on this machine now ({detail}), and the operator has the setting \"Use the Codex sandbox\" on. Your message is saved and waits. Do not send it again."
+                        "SANDBOX_DOWN: {target_name} did not start: the Codex sandbox does not work on this machine now ({detail}). The operator set \"Codex sandbox\" to \"Always\". Your message is saved and waits. Do not send it again."
                     ),
                     other => format!(
                         "The app could not start {target_name}: {other}. Your message is saved and waits. Do not send it again."

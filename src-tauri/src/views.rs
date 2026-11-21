@@ -358,8 +358,15 @@ pub struct Settings {
     pub image_model: String,
     /// `[interface] notify_on_question` of the app config (default `true`).
     pub notify_on_question: bool,
-    /// `[codex] sandbox` of the app config (default `false`): start Codex employees with the
-    /// Codex sandbox. It applies at the next start of a session.
+    /// `[codex] sandbox` of the app config, as it is stored: `auto` (no key, the default), `on`
+    /// ("Always") or `off` ("Never"). It applies at the next start of a session.
+    pub codex_sandbox_mode: String,
+    /// What a Codex start gets now: `on` (the sandbox profile), `off` (full access: the mode is
+    /// `off`, or the mode is `auto` and the sandbox does not work) or `refused` (the mode is `on`
+    /// and the sandbox does not work, so a Codex start is refused). It uses the last probe.
+    pub codex_sandbox_effective: String,
+    /// The old boolean field. Since 2026-11-21 it is the EFFECTIVE state: `true` when
+    /// `codexSandboxEffective` is `on`, else `false`.
     pub codex_sandbox: bool,
     /// The home folder of the app, or `null` when it is not known. The UI opens the "Browse..."
     /// dialog there when no floor gives a better place.
@@ -376,6 +383,8 @@ impl From<app::SettingsView> for Settings {
             }),
             image_model: view.image_model,
             notify_on_question: view.notify_on_question,
+            codex_sandbox_mode: view.codex_sandbox_mode.as_str().to_owned(),
+            codex_sandbox_effective: view.codex_sandbox_effective.as_str().to_owned(),
             codex_sandbox: view.codex_sandbox,
             home_dir: view.home_dir.map(|home| text(&home)),
         }
@@ -858,24 +867,28 @@ mod tests {
             openai_key_source: Some(KeySource::Env),
             image_model: "m".into(),
             notify_on_question: false,
+            codex_sandbox_mode: "auto".into(),
+            codex_sandbox_effective: "off".into(),
             codex_sandbox: false,
             home_dir: Some("/home/a".into()),
         };
         assert_eq!(
             to_json(&settings),
-            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "codexSandbox": false, "homeDir": "/home/a"})
+            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/home/a"})
         );
         let none = Settings {
             openai_key_set: false,
             openai_key_source: None,
             image_model: "m".into(),
             notify_on_question: true,
+            codex_sandbox_mode: "on".into(),
+            codex_sandbox_effective: "on".into(),
             codex_sandbox: true,
             home_dir: None,
         };
         assert_eq!(
             to_json(&none),
-            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "codexSandbox": true, "homeDir": null})
+            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "codexSandboxMode": "on", "codexSandboxEffective": "on", "codexSandbox": true, "homeDir": null})
         );
         assert_eq!(to_json(&KeySource::Config), json!("config"));
     }

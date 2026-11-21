@@ -20,6 +20,7 @@ import type {
     ProgramName,
     ProgramTestResult,
     SandboxProbe,
+    CodexSandboxMode,
     Programs,
     SessionChangedPayload,
     NoticePayload,
@@ -190,24 +191,34 @@ export const settingsSet = (
     imageModel: string | null,
     notifyOnQuestion: boolean | null = null,
     codexSandbox: boolean | null = null,
-) => call<Settings>("settings_set", settingsSetArgs(openaiKey, imageModel, notifyOnQuestion, codexSandbox));
+    codexSandboxMode: CodexSandboxMode | null = null,
+) => call<Settings>("settings_set", settingsSetArgs(openaiKey, imageModel, notifyOnQuestion, codexSandbox, codexSandboxMode));
 
 /**
- * The arguments of `settings_set`. `codexSandbox` is left out when it is null: an old call has no such argument, and
- * the app reads a missing one as "no change". The other three always go, as before.
+ * The arguments of `settings_set`. `codexSandbox` (the old boolean: true is "on", false is "off") and `codexSandboxMode`
+ * (`auto`, `on` or `off`) are left out when they are null: an old call has no such argument, and the app reads a
+ * missing one as "no change". When a call has both, the mode wins. The other three always go, as before.
  */
 export function settingsSetArgs(
     openaiKey: string | null,
     imageModel: string | null,
     notifyOnQuestion: boolean | null,
     codexSandbox: boolean | null,
+    codexSandboxMode: CodexSandboxMode | null = null,
 ): Record<string, unknown> {
-    return { openaiKey, imageModel, notifyOnQuestion, ...(codexSandbox === null ? {} : { codexSandbox }) };
+    return {
+        openaiKey,
+        imageModel,
+        notifyOnQuestion,
+        ...(codexSandbox === null ? {} : { codexSandbox }),
+        ...(codexSandboxMode === null ? {} : { codexSandboxMode }),
+    };
 }
 
 /**
  * Runs `bwrap --unshare-user --ro-bind / / true` with the environment of a session (5 s at most). It starts no Codex
- * session. `codexSandbox: true` in `settingsSet` runs this probe again, and the app refuses the switch unless it says `works`.
+ * session. Choosing "Always" (`codexSandboxMode: "on"` or `codexSandbox: true`) in `settingsSet` runs this probe again, and the
+ * app refuses it unless it says `works`.
  */
 export const codexSandboxProbe = () => call<SandboxProbe>("codex_sandbox_probe");
 

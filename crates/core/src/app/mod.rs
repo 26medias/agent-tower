@@ -94,7 +94,7 @@ pub use notify::{NOTIFICATION_TITLE, QuestionAsked, question_body, should_notify
 pub use program_test::{PROGRAM_TEST_TIMEOUT, ProgramTest};
 pub use resume::ResumeProgress;
 pub use sandbox_probe::{PROBE_TIMEOUT, SandboxProbe, SandboxState};
-pub use settings::{KeySource, SettingsView};
+pub use settings::{CodexSandboxMode, KeySource, SandboxEffective, SettingsView};
 pub use tools::{FAILURE_TTL, hook_candidates, locate_hook_program, workspace_root};
 
 /// The size limit of the PTY log of one session (spec 4.9; the log keeps 4 to 8 MB).
@@ -129,12 +129,20 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 /// the shortest time between two `sandbox_down` notices.
 pub const SANDBOX_WINDOW: Duration = Duration::from_secs(60);
 
+/// The text of the notice `sandbox_auto_off` (docs/ipc-final.md).
+pub const AUTO_OFF_NOTICE: &str = "The Codex sandbox does not work on this machine, so Codex employees run with full access. See Settings > Codex sandbox.";
+
 /// What the start of a Codex session remembers about the sandbox (memory only). A failed probe
 /// is never kept: the next start runs the probe again.
 #[derive(Default)]
 struct SandboxGate {
     /// When the last probe said `works`.
     works_at: Option<Instant>,
+    /// What the last probe said (any result). `settings_get` uses it, so a read of the settings
+    /// does not run a probe each time.
+    last: Option<SandboxState>,
+    /// The "Automatic" notice (`sandbox_auto_off`) went out in this run of the app.
+    auto_notice_sent: bool,
     /// When the last `sandbox_down` notice went out.
     notice_at: Option<Instant>,
 }
@@ -162,10 +170,11 @@ pub enum TowerError {
     NoWrite(PathBuf),
     #[error("FLOOR_GONE: The folder of this floor is gone: {}.", .0.display())]
     FloorGone(PathBuf),
-    /// A Codex start with the setting "Use the Codex sandbox" on, while the probe does not say
-    /// `works`. The start is refused. The app never falls back to full access by itself.
+    /// A Codex start with the setting "Codex sandbox" at "Always", while the probe does not say
+    /// `works`. The start is refused. With "Automatic" the app starts Codex with full access
+    /// instead (`sandbox_auto_off` notice).
     #[error(
-        "SANDBOX_DOWN: The Codex sandbox does not work on this machine now ({detail}). The start of {name} is refused, because the setting \"Use the Codex sandbox\" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox."
+        "SANDBOX_DOWN: {name} did not start: the Codex sandbox does not work on this machine now ({detail}). The setting \"Codex sandbox\" is \"Always\". Repair the sandbox, or choose \"Automatic\" or \"Never\" in Settings > Codex sandbox."
     )]
     SandboxDown { name: String, detail: String },
     #[error("{slug} already has a live session. Stop it first.")]
@@ -1168,8 +1177,36 @@ impl TowerCore {
     }
 
     /// The settings of the logo. They never hold the key.
+    ///
+    /// `codex_sandbox_mode` is the stored state. `codex_sandbox_effective` is what a Codex start
+    /// gets now. It comes from the mode and from the LAST probe of this run of the app. If no
+    /// probe ran yet, this call runs one. A later change of the machine shows after the next
+    /// probe ("Test again" or a Codex start). `codex_sandbox` is `true` when the effective state
+    /// is `On`.
     pub fn settings_get(&self) -> SettingsView {
-        settings::view(&self.logo_env.config_file, &self.logo_env.env)
+        let mut view = settings::view(&self.logo_env.config_file, &self.logo_env.env);
+        view.codex_sandbox_effective = self.sandbox_effective(view.codex_sandbox_mode);
+        view.codex_sandbox = view.codex_sandbox_effective == SandboxEffective::On;
+        view
+    }
+
+    /// The effective state of the sandbox (see `settings_get`).
+    fn sandbox_effective(&self, mode: CodexSandboxMode) -> SandboxEffective {
+        if mode == CodexSandboxMode::Off {
+            return SandboxEffective::Off;
+        }
+        let last = locked(&self.sandbox_gate).last;
+        let state = match last {
+            Some(state) => state,
+            None => self
+                .codex_sandbox_probe()
+                .map_or(SandboxState::Fails, |probe| probe.state),
+        };
+        match (state, mode) {
+            (SandboxState::Works, _) => SandboxEffective::On,
+            (_, CodexSandboxMode::On) => SandboxEffective::Refused,
+            _ => SandboxEffective::Off,
+        }
     }
 
     /// Change the settings. `None` is "no change". An empty text removes the stored value: the
@@ -1217,32 +1254,44 @@ impl TowerCore {
         Ok(self.settings_get())
     }
 
-    /// The switch "Use the Codex sandbox for Codex employees" (`[codex] sandbox` of the app
-    /// config). `None` is "no change". Turning it ON runs the probe first (`codex_sandbox_probe`)
-    /// and refuses unless the probe says `works`. Turning it OFF is always allowed. It applies at
-    /// the next start of a session. Returns the settings.
+    /// The old switch of the Codex sandbox: `true` is "Always" (`On`) and `false` is "Never"
+    /// (`Off`). `None` is "no change". See `settings_set_codex_mode`.
     pub fn settings_set_codex(&self, sandbox: Option<bool>) -> Result<SettingsView> {
-        if let Some(on) = sandbox {
+        self.settings_set_codex_mode(sandbox.map(|on| {
             if on {
+                CodexSandboxMode::On
+            } else {
+                CodexSandboxMode::Off
+            }
+        }))
+    }
+
+    /// The setting "Codex sandbox" with its three states (`[codex] sandbox` of the app config).
+    /// `None` is "no change". Choosing `On` ("Always") runs the probe first and refuses unless
+    /// the probe says `works`. `Auto` and `Off` are always allowed. It applies at the next start
+    /// of a session. Returns the settings.
+    pub fn settings_set_codex_mode(&self, mode: Option<CodexSandboxMode>) -> Result<SettingsView> {
+        if let Some(mode) = mode {
+            if mode == CodexSandboxMode::On {
                 let probe = self.codex_sandbox_probe()?;
                 match probe.state {
                     SandboxState::Works => {}
                     SandboxState::Fails => {
                         return Err(other(format!(
-                            "the Codex sandbox does not work on this machine, so it cannot be turned on: {}",
+                            "the Codex sandbox does not work on this machine, so it cannot be set to \"Always\": {}",
                             probe.detail
                         )));
                     }
                     SandboxState::Missing => {
                         return Err(other(format!(
-                            "the Codex sandbox cannot be turned on: {}",
+                            "the Codex sandbox cannot be set to \"Always\": {}",
                             probe.detail
                         )));
                     }
                 }
             }
             settings::update(&self.logo_env.config_file, |table| {
-                settings::set_codex_sandbox(table, on);
+                settings::set_codex_sandbox_mode(table, mode);
             })
             .map_err(|e| io_message("cannot write the app config", e))?;
         }
@@ -1273,31 +1322,57 @@ impl TowerCore {
         let cwd = self.home.clone().unwrap_or_else(|| PathBuf::from("/"));
         let probe = sandbox_probe::run(&env, &cwd, timeout);
         // Each probe updates what the start of a session remembers. A failure clears it.
-        locked(&self.sandbox_gate).works_at =
-            (probe.state == SandboxState::Works).then(Instant::now);
+        {
+            let mut gate = locked(&self.sandbox_gate);
+            gate.works_at = (probe.state == SandboxState::Works).then(Instant::now);
+            gate.last = Some(probe.state);
+        }
         Ok(probe)
     }
 
-    /// The check at the start of a Codex session with the setting on. A `works` result that is
-    /// less than `sandbox_window` old counts, so the start of a team runs the probe one time.
-    /// Any other result refuses the start with `SandboxDown`. The app never falls back to full
-    /// access by itself.
-    fn require_sandbox(&self, name: &str) -> Result<()> {
+    /// The check at the start of a Codex session when the sandbox is wanted. A `works` result
+    /// that is less than `sandbox_window` old counts, so the start of a team runs the probe one
+    /// time. `Err` holds the detail of any other result. A failure is never kept.
+    fn check_sandbox(&self) -> std::result::Result<(), String> {
         let fresh = locked(&self.sandbox_gate)
             .works_at
             .is_some_and(|at| at.elapsed() < self.sandbox_window);
         if fresh {
             return Ok(());
         }
-        let detail = match self.codex_sandbox_probe() {
-            Ok(probe) if probe.state == SandboxState::Works => return Ok(()),
-            Ok(probe) => probe.detail,
-            Err(error) => error.to_string(),
+        match self.codex_sandbox_probe() {
+            Ok(probe) if probe.state == SandboxState::Works => Ok(()),
+            Ok(probe) => Err(probe.detail),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// The start of a Codex session with the setting at "Always": a failing check refuses the
+    /// start with `SandboxDown`. The app never falls back to full access in this state.
+    fn require_sandbox(&self, name: &str) -> Result<()> {
+        self.check_sandbox()
+            .map_err(|detail| TowerError::SandboxDown {
+                name: name.to_owned(),
+                detail,
+            })
+    }
+
+    /// The start of a Codex session with the setting at "Automatic": does the sandbox work now?
+    /// When it does not, the session starts with full access, and the observer gets ONE
+    /// information notice (kind `sandbox_auto_off`) in each run of the app.
+    fn auto_sandbox(&self, path: &Path) -> bool {
+        if self.check_sandbox().is_ok() {
+            return true;
+        }
+        let first = {
+            let mut gate = locked(&self.sandbox_gate);
+            !std::mem::replace(&mut gate.auto_notice_sent, true)
         };
-        Err(TowerError::SandboxDown {
-            name: name.to_owned(),
-            detail,
-        })
+        if first {
+            self.notifier
+                .notice(path, "sandbox_auto_off", AUTO_OFF_NOTICE);
+        }
+        false
     }
 
     /// Tell the observer (kind `sandbox_down`) about a refused start, when `error` is
@@ -1520,13 +1595,21 @@ impl TowerCore {
             );
         // The Codex sandbox (the switch in Settings, decision O7): only a Codex employee gets it,
         // never the setup session. The switch is read now, so a change applies at the next start.
-        let codex_sandbox = setup_cli.is_none()
-            && employee.cli == CliKind::Codex
-            && settings::codex_sandbox(&self.logo_env.config_file);
-        if codex_sandbox {
-            // A stored "on" is not enough: the sandbox must work now (D1 of the review).
-            self.require_sandbox(&employee.name)?;
-        }
+        // `codex_sandbox` is the EFFECTIVE state of this start. The instructions and the adapter
+        // follow it. "Always" needs a sandbox that works now (D1 of the review) and refuses the
+        // start otherwise. "Automatic" falls back to full access (decision of 2026-11-21).
+        let codex_sandbox = if setup_cli.is_none() && employee.cli == CliKind::Codex {
+            match settings::codex_sandbox_mode(&self.logo_env.config_file) {
+                CodexSandboxMode::Off => false,
+                CodexSandboxMode::On => {
+                    self.require_sandbox(&employee.name)?;
+                    true
+                }
+                CodexSandboxMode::Auto => self.auto_sandbox(&floor.path),
+            }
+        } else {
+            false
+        };
         if codex_sandbox && employee.permission != PermissionPolicy::AskAlways {
             // The sandbox profile names these folders. A folder that does not exist yet (the
             // worktrees folder, before the first task) must exist when the CLI starts.

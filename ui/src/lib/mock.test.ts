@@ -146,14 +146,15 @@ describe("mock: settings switch, program test and reset", () => {
         expect(on.notifyOnQuestion).toBe(true);
     });
 
-    it("has the Codex sandbox switch off by default and turns it on only when the probe says works", async () => {
+    it("has the Codex sandbox on Automatic by default and takes Always only when the probe says works", async () => {
         const g = globalThis as Record<string, unknown>;
         const b = createMockBackend();
         const probe = () => b.invoke<SandboxProbe>("codex_sandbox_probe");
-        const set = (codexSandbox?: boolean | null) =>
-            b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, ...(codexSandbox === undefined ? {} : { codexSandbox }) });
+        const get = () => b.invoke<Settings>("settings_get");
+        const set = (args: Record<string, unknown> = {}) => b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, ...args });
         try {
-            expect((await b.invoke<Settings>("settings_get")).codexSandbox).toBe(false);
+            // The default: the mode is auto. The probe works (the mock default), so it is on in effect.
+            expect(await get()).toMatchObject({ codexSandboxMode: "auto", codexSandboxEffective: "on", codexSandbox: true });
             // Each state of the probe.
             g.__towerMockConfig = { sandboxProbe: { state: "fails" } };
             expect(await probe()).toEqual({ state: "fails", detail: "bwrap: setting up uid map: Permission denied" });
@@ -161,56 +162,124 @@ describe("mock: settings switch, program test and reset", () => {
             expect(await probe()).toMatchObject({ state: "missing" });
             g.__towerMockConfig = { sandboxProbe: { state: "works" } };
             expect(await probe()).toMatchObject({ state: "works" });
-            // A probe that does not say works refuses the switch, with the text of the problem.
+            // The effective state follows the last probe: Automatic with a failing probe is off.
             g.__towerMockConfig = { sandboxProbe: { state: "fails", detail: "bwrap: no way" } };
-            expect(await rejected(set(true))).toMatch(/does not work on this machine.*bwrap: no way/);
+            await probe();
+            expect(await get()).toMatchObject({ codexSandboxMode: "auto", codexSandboxEffective: "off", codexSandbox: false });
+            // A probe that does not say works refuses "Always", with the text of the problem, for the new and the old argument.
+            expect(await rejected(set({ codexSandboxMode: "on" }))).toMatch(/does not work on this machine.*bwrap: no way/);
+            expect(await rejected(set({ codexSandbox: true }))).toMatch(/does not work on this machine.*bwrap: no way/);
             g.__towerMockConfig = { sandboxProbe: { state: "missing" } };
-            expect(await rejected(set(true))).toMatch(/cannot be turned on/);
-            expect((await b.invoke<Settings>("settings_get")).codexSandbox).toBe(false);
-            // A probe that says works accepts it. A missing argument and null change nothing. Off is always allowed.
+            expect(await rejected(set({ codexSandboxMode: "on" }))).toMatch(/cannot be set to "Always"/);
+            expect((await get()).codexSandboxMode).toBe("auto");
+            // A word that is not one of the three is refused.
+            expect(await rejected(set({ codexSandboxMode: "maybe" }))).toMatch(/codexSandboxMode must be/);
+            // A probe that says works accepts "Always". A missing argument and null change nothing.
             g.__towerMockConfig = { sandboxProbe: { state: "works" } };
-            expect((await set(true)).codexSandbox).toBe(true);
-            expect((await set()).codexSandbox).toBe(true);
-            expect((await set(null)).codexSandbox).toBe(true);
+            expect(await set({ codexSandboxMode: "on" })).toMatchObject({ codexSandboxMode: "on", codexSandboxEffective: "on", codexSandbox: true });
+            expect((await set()).codexSandboxMode).toBe("on");
+            expect((await set({ codexSandbox: null, codexSandboxMode: null })).codexSandboxMode).toBe("on");
+            // The machine fails: "Always" is "refused" in effect, and the old field is false.
             g.__towerMockConfig = { sandboxProbe: { state: "fails" } };
-            expect((await set(false)).codexSandbox).toBe(false);
+            await probe();
+            expect(await get()).toMatchObject({ codexSandboxMode: "on", codexSandboxEffective: "refused", codexSandbox: false });
+            // "Never" and "Automatic" are always allowed. The old boolean false is "Never".
+            expect(await set({ codexSandbox: false })).toMatchObject({ codexSandboxMode: "off", codexSandboxEffective: "off", codexSandbox: false });
+            expect((await set({ codexSandboxMode: "auto" })).codexSandboxMode).toBe("auto");
+            // "Never" keeps the effective state off, also when the probe works. The new argument wins over the old one.
+            g.__towerMockConfig = { sandboxProbe: { state: "works" } };
+            await probe();
+            expect(await set({ codexSandboxMode: "off" })).toMatchObject({ codexSandboxEffective: "off", codexSandbox: false });
+            expect(await set({ codexSandbox: false, codexSandboxMode: "auto" })).toMatchObject({ codexSandboxMode: "auto", codexSandboxEffective: "on" });
         } finally {
             delete g.__towerMockConfig;
         }
     });
 
-    it("refuses the start of a Codex employee when the setting is on and the probe does not say works", async () => {
+    it("refuses the start of a Codex employee only when the mode is Always and the probe does not say works", async () => {
         const g = globalThis as Record<string, unknown>;
         const b = createMockBackend();
-        const set = (codexSandbox: boolean) => b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, codexSandbox });
+        const set = (args: Record<string, unknown>) => b.invoke<Settings>("settings_set", { openaiKey: null, imageModel: null, ...args });
         const start = (slug: string) => b.invoke("session_start", { path: FLOOR, slug, firstMessage: null, rows: 24, cols: 80 });
+        const stop = async (slug: string) => {
+            const view = await b.invoke<{ sessions: { slug: string; sessionId: string }[] }>("floor_open", { path: FLOOR });
+            const live = view.sessions.find((x) => x.slug === slug);
+            if (live) await b.invoke("session_stop", { sessionId: live.sessionId });
+        };
+        const starts = () => control().codexStarts.map((x) => `${x.slug}:${x.sandbox}`);
         try {
             // `eng-sam` has a start that fails once for the demo. Use another employee as the Codex one.
             control().patchFloor(FLOOR, { employee: { slug: "eng-lin", patch: { cli: "codex" } } });
             g.__towerMockConfig = { sandboxProbe: { state: "works" } };
-            await set(true);
-            // The machine changes after the switch was turned on. The stored value stays on.
+            await set({ codexSandboxMode: "on" });
+            // The machine changes after "Always" was chosen. The stored value stays "on".
             g.__towerMockConfig = { sandboxProbe: { state: "fails", detail: "bwrap: no way" } };
             const refused = await rejected(start("eng-lin"));
             expect(refused).toBe(
-                'SANDBOX_DOWN: The Codex sandbox does not work on this machine now (bwrap: no way). The start of Lin is refused, because the setting "Use the Codex sandbox" is on. Repair the sandbox, or turn the setting off in Settings > Codex sandbox to start Codex with no sandbox.',
+                'SANDBOX_DOWN: Lin did not start: the Codex sandbox does not work on this machine now (bwrap: no way). The setting "Codex sandbox" is "Always". Repair the sandbox, or choose "Automatic" or "Never" in Settings > Codex sandbox.',
             );
-            expect((await b.invoke<Settings>("settings_get")).codexSandbox).toBe(true);
+            expect((await b.invoke<Settings>("settings_get")).codexSandboxMode).toBe("on");
+            expect(starts()).toEqual([]);
             // A Claude employee is not affected.
             await start("pm");
-            // Turning it off is always allowed, and then the Codex start has no sandbox.
-            expect((await set(false)).codexSandbox).toBe(false);
+            // "Automatic" with the same failing probe: the start works with full access.
+            await set({ codexSandboxMode: "auto" });
             await start("eng-lin");
+            expect(starts()).toEqual(["eng-lin:false"]);
+            // "Automatic" with a probe that works: the start gets the sandbox.
+            await stop("eng-lin");
+            g.__towerMockConfig = { sandboxProbe: { state: "works" } };
+            await start("eng-lin");
+            expect(starts()).toEqual(["eng-lin:false", "eng-lin:true"]);
+            // "Never": no sandbox, also when the probe works.
+            await stop("eng-lin");
+            await set({ codexSandboxMode: "off" });
+            await start("eng-lin");
+            expect(starts()).toEqual(["eng-lin:false", "eng-lin:true", "eng-lin:false"]);
         } finally {
             delete g.__towerMockConfig;
         }
     });
 
-    it("sends codexSandbox in settings_set only when it has a value", () => {
+    it("sends one information notice in a run when Automatic starts Codex with full access", async () => {
+        const g = globalThis as Record<string, unknown>;
+        const b = createMockBackend();
+        const notices: { kind: string; text: string }[] = [];
+        b.listen("notice", (payload) => notices.push(payload as { kind: string; text: string }));
+        const start = (slug: string) => b.invoke("session_start", { path: FLOOR, slug, firstMessage: null, rows: 24, cols: 80 });
+        try {
+            control().patchFloor(FLOOR, { employee: { slug: "eng-lin", patch: { cli: "codex" } } });
+            control().patchFloor(FLOOR, { employee: { slug: "pm", patch: { cli: "codex" } } });
+            g.__towerMockConfig = { sandboxProbe: { state: "works" } };
+            await start("eng-lin");
+            await new Promise((r) => setTimeout(r, 20));
+            expect(notices).toEqual([]);
+            g.__towerMockConfig = { sandboxProbe: { state: "fails" } };
+            await start("pm");
+            // A second Codex start in the same run, with the same failing probe: no second notice.
+            const view = await b.invoke<{ sessions: { slug: string; sessionId: string }[] }>("floor_open", { path: FLOOR });
+            await b.invoke("session_stop", { sessionId: view.sessions.find((x) => x.slug === "eng-lin")!.sessionId });
+            await start("eng-lin");
+            await new Promise((r) => setTimeout(r, 20));
+            expect(notices).toEqual([
+                {
+                    path: FLOOR,
+                    kind: "sandbox_auto_off",
+                    text: "The Codex sandbox does not work on this machine, so Codex employees run with full access. See Settings > Codex sandbox.",
+                },
+            ]);
+        } finally {
+            delete g.__towerMockConfig;
+        }
+    });
+
+    it("sends codexSandbox and codexSandboxMode in settings_set only when they have a value", () => {
         expect(settingsSetArgs(null, null, false, null)).toEqual({ openaiKey: null, imageModel: null, notifyOnQuestion: false });
         expect(Object.keys(settingsSetArgs(null, null, null, null))).not.toContain("codexSandbox");
+        expect(Object.keys(settingsSetArgs(null, null, null, null, null))).not.toContain("codexSandboxMode");
         expect(settingsSetArgs(null, null, null, true)).toEqual({ openaiKey: null, imageModel: null, notifyOnQuestion: null, codexSandbox: true });
         expect(settingsSetArgs(null, null, null, false)).toMatchObject({ codexSandbox: false });
+        expect(settingsSetArgs(null, null, null, null, "auto")).toEqual({ openaiKey: null, imageModel: null, notifyOnQuestion: null, codexSandboxMode: "auto" });
     });
 
     it("tests a program: a good result, a bad result and a program that is not found", async () => {

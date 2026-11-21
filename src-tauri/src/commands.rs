@@ -25,7 +25,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use tauri::State;
 use tauri::ipc::Channel;
-use tower_core::app::{OutputSink, Tower, TowerError};
+use tower_core::app::{CodexSandboxMode, OutputSink, Tower, TowerError};
 
 /// The Tower in the managed state of Tauri.
 pub type Shared = Arc<Tower>;
@@ -236,11 +236,29 @@ pub async fn settings_set(
     image_model: Option<String>,
     notify_on_question: Option<bool>,
     codex_sandbox: Option<bool>,
+    codex_sandbox_mode: Option<String>,
 ) -> Result<Settings, String> {
     blocking(&tower, move |t| {
-        // The sandbox switch goes first: a refusal (the probe does not say `works`) changes
+        // `codexSandboxMode` (`auto`, `on` or `off`) is the new argument. The old boolean
+        // `codexSandbox` stays: `true` is `on` and `false` is `off`. The new argument wins when
+        // a call has both.
+        let mode = match codex_sandbox_mode.as_deref() {
+            Some(word) => Some(CodexSandboxMode::parse(word).ok_or_else(|| {
+                TowerError::Refused(format!(
+                    "codexSandboxMode must be \"auto\", \"on\" or \"off\", not \"{word}\""
+                ))
+            })?),
+            None => codex_sandbox.map(|on| {
+                if on {
+                    CodexSandboxMode::On
+                } else {
+                    CodexSandboxMode::Off
+                }
+            }),
+        };
+        // The sandbox setting goes first: a refusal (the probe does not say `works`) changes
         // nothing else.
-        t.settings_set_codex(codex_sandbox)?;
+        t.settings_set_codex_mode(mode)?;
         t.settings_set(openai_key, image_model)?;
         t.settings_set_interface(notify_on_question)
             .map(Settings::from)

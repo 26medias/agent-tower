@@ -69,13 +69,30 @@ export interface ResumeProgress {
 /** `SessionView.slug` of the setup session. The slug is reserved: `employee_save` refuses it. */
 export const SETUP_SLUG = "setup";
 
+/** The stored state of the setting "Codex sandbox". */
+export type CodexSandboxMode = "auto" | "on" | "off";
+
+/** What a Codex start gets now (see `Settings.codexSandboxEffective`). */
+export type CodexSandboxEffective = "on" | "off" | "refused";
+
 export interface Settings {
     openaiKeySet: boolean;
     openaiKeySource: "config" | "env" | null;
     imageModel: string;
     /** `[interface] notify_on_question` of the app config. The default is true. */
     notifyOnQuestion: boolean;
-    /** `[codex] sandbox` of the app config. The default is false. It applies at the next start of a session. */
+    /**
+     * `[codex] sandbox` of the app config as it is stored: `auto` (no key, the default), `on` ("Always") or `off`
+     * ("Never"). It applies at the next start of a session.
+     */
+    codexSandboxMode: CodexSandboxMode;
+    /**
+     * What a Codex start gets now: `on` (the sandbox profile), `off` (full access: the mode is `off`, or the mode is
+     * `auto` and the sandbox does not work) or `refused` (the mode is `on` and the sandbox does not work, so a Codex start
+     * is refused). The app takes it from the last probe.
+     */
+    codexSandboxEffective: CodexSandboxEffective;
+    /** The old boolean field. Since 2026-11-21 it is the EFFECTIVE state: true when `codexSandboxEffective` is `on`. */
     codexSandbox: boolean;
     /** The home folder of the app. The "Browse..." dialog opens there when no floor gives a better place. Null when unknown. */
     homeDir: string | null;
@@ -186,6 +203,7 @@ export type NoticeKind =
     | "task_blocked"
     | "resume_failed"
     | "sandbox_down"
+    | "sandbox_auto_off"
     | "task_done_unmerged"
     | "floor_gone"
     | "floor_back";
