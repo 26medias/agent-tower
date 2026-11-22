@@ -17,7 +17,7 @@ portable-pty = "0.9"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 ureq = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 base64 = "0.23"
 
 [dev-dependencies]

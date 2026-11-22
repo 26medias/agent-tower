@@ -164,7 +164,7 @@ impl Run {
     }
 }
 
-fn write_logo(cwd: &Path, png: &[u8]) -> std::result::Result<(), String> {
+pub(super) fn write_logo(cwd: &Path, png: &[u8]) -> std::result::Result<(), String> {
     let path = logo_path(cwd);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;

@@ -110,7 +110,10 @@ fn the_endpoint_speaks_initialize_tools_list_tools_call_ping_and_notifications()
             "task_list",
             "task_comment",
             "task_diff",
-            "task_merge"
+            "task_merge",
+            "floor_look",
+            "floor_logo_set",
+            "floor_look_set"
         ]
     );
     for tool in list["result"]["tools"].as_array().unwrap() {

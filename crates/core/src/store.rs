@@ -1402,6 +1402,18 @@ impl FloorStore {
         Ok(())
     }
 
+    /// Write the `name` of `floor.toml`. The rest of the file stays (see `set_brand`).
+    pub fn set_name(&mut self, name: &str) -> Result<(), StoreError> {
+        let path = self.swarm_dir().join(FLOOR_FILE);
+        let text = read_text(&path)?;
+        let mut table: toml::Table = toml::from_str(&text).map_err(|e| invalid(&path, e))?;
+        table.insert("name".to_owned(), toml::Value::String(name.to_owned()));
+        let text = toml::to_string(&table).map_err(|e| invalid(&path, e))?;
+        write_atomic(&path, text.as_bytes())?;
+        self.floor.name = name.to_owned();
+        Ok(())
+    }
+
     /// Write the `[defaults]` table of `floor.toml`. The rest of the file stays (see `set_brand`).
     /// A field that is `None` is removed from the file. Empty defaults remove the table.
     pub fn set_defaults(&mut self, defaults: FloorDefaults) -> Result<(), StoreError> {

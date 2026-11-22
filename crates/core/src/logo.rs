@@ -165,6 +165,63 @@ pub fn clean_up(picture: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out.into_inner())
 }
 
+/// The most bytes that a picture file for [`import`] can have.
+pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The longest side (in pixels) that a picture for [`import`] can have.
+const MAX_IMPORT_SIDE: u32 = 8192;
+
+/// Make a logo from a picture that the project has (PNG, JPEG or WebP). The colours and the
+/// alpha values stay. The empty border (alpha 0) is cropped, and the picture is scaled down to
+/// fit 512 x 512 (a smaller picture keeps its size). The result is the bytes of a PNG file.
+pub fn import(picture: &[u8]) -> Result<Vec<u8>, String> {
+    const FORMATS: &str = "The file must be a PNG, a JPEG or a WebP picture";
+    let reader = || {
+        image::ImageReader::new(Cursor::new(picture))
+            .with_guessed_format()
+            .map_err(|error| format!("cannot read the picture: {error}"))
+    };
+    match reader()?.format() {
+        Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) => {}
+        _ => {
+            return Err(format!(
+                "{FORMATS}. Convert an SVG file to a PNG file first."
+            ));
+        }
+    }
+    let (width, height) = reader()?
+        .into_dimensions()
+        .map_err(|error| format!("{FORMATS}: {error}"))?;
+    if width > MAX_IMPORT_SIDE || height > MAX_IMPORT_SIDE {
+        return Err(format!(
+            "the picture is {width} x {height} pixels. The limit is {MAX_IMPORT_SIDE} for each side."
+        ));
+    }
+    let rgba = reader()?
+        .decode()
+        .map_err(|error| format!("{FORMATS}: {error}"))?
+        .to_rgba8();
+    let (mut left, mut top, mut right, mut bottom) = (width, height, 0, 0);
+    for (x, y, pixel) in rgba.enumerate_pixels() {
+        if pixel.0[3] > 0 {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+        }
+    }
+    if left > right || top > bottom {
+        return Err("the picture has no visible pixel".to_owned());
+    }
+    let cropped =
+        imageops::crop_imm(&rgba, left, top, right - left + 1, bottom - top + 1).to_image();
+    let mut out = Cursor::new(Vec::new());
+    fit(cropped)
+        .write_to(&mut out, ImageFormat::Png)
+        .map_err(|error| format!("cannot write the PNG: {error}"))?;
+    Ok(out.into_inner())
+}
+
 fn fit(picture: RgbaImage) -> RgbaImage {
     let (width, height) = picture.dimensions();
     if width <= MAX_SIDE && height <= MAX_SIDE {

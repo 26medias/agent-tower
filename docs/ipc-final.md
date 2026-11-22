@@ -426,3 +426,28 @@ interface Settings { /* ... all the old fields ... */ homeDir: string | null }
 `homeDir` is `HOME` of the environment of the app (`null` if it is not set). The UI opens the
 "Browse..." dialog in the parent folder of the last floor of the list that is not missing. With
 no such floor it opens the dialog in `homeDir`. With no `homeDir` it gives no start folder.
+
+## MCP tools for the look of a floor (added 2026-11-22)
+
+Three tools of the MCP server `tower` (`crates/core/src/app/look.rs`). Any employee of the floor
+may call them. They change no IPC type: after a change the app sends `floor_changed`, and the UI
+reads `name`, `description` and `logoVersion` as before.
+
+| Tool | Result |
+|---|---|
+| `floor_look()` | JSON: `name`, `description`, `project_folder`, `has_logo`, `logo_file`, `logo_subject`, `logo_generation_runs`, `logo_generation_error` |
+| `floor_logo_set(file)` | The app reads the picture and writes `.swarm/assets/logo.png`. No image API |
+| `floor_look_set(name?, description?)` | Writes `name` and `[brand] description` of `floor.toml`. The rest of the file stays |
+
+Rules of `floor_logo_set`:
+
+- `file` is absolute, or relative to the project folder. After the links are resolved, the file
+  must be inside the project folder. It must be a regular file of 20 MB at most.
+- The picture must be a PNG, a JPEG or a WebP, with no side above 8192 pixels. An SVG is refused
+  with the instruction to convert it.
+- The app keeps the colours and the alpha values, crops the border that has alpha 0, and scales
+  the picture down to fit 512 x 512. A smaller picture keeps its size.
+- While a logo generation runs for the floor, the tool refuses. A success clears `logoError`.
+
+Rules of `floor_look_set`: each text is one line with no control character. `name` has 1 to 60
+characters. `description` has 300 characters at most, and an empty text removes it.

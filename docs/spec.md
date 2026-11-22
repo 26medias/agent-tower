@@ -218,6 +218,14 @@ Tool group "people":
 | `employee_start(employee, message)` | Start or continue a session of a direct report, with a first message |
 | `employee_stop(employee, fresh?)` | Stop, or stop and prepare a fresh start |
 
+Tool group "look" (added 2026-11-22, any employee of the floor; rules in `docs/ipc-final.md`):
+
+| Tool | Purpose |
+|---|---|
+| `floor_look()` | The name, the description and the logo state of the floor |
+| `floor_logo_set(file)` | Make the logo from a picture file of the project (PNG, JPEG, WebP). No image API |
+| `floor_look_set(name?, description?)` | Change the name and the description of the floor |
+
 Tool group "messages":
 
 | Tool | Purpose |
