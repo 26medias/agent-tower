@@ -316,3 +316,38 @@ fn the_setup_session_names_the_setup_agent() {
     assert_eq!(events[0].role, "Setup");
     assert_eq!(events[0].slug, "setup");
 }
+
+#[test]
+fn the_claude_auto_mode_switch_is_on_by_default_and_reaches_the_start_of_a_session() {
+    let rig = Rig::new();
+    rig.create_floor();
+    assert!(rig.tower.settings_get().claude_auto_mode);
+    rig.start("ceo");
+    assert!(rig.calls().last().unwrap().claude_auto);
+
+    let off = rig.tower.settings_set_claude(Some(false)).unwrap();
+    assert!(!off.claude_auto_mode);
+    let file = rig.config.join("programs.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[claude]") && text.contains("auto_mode = false"),
+        "{text}"
+    );
+    rig.start("pm");
+    assert!(!rig.calls().last().unwrap().claude_auto);
+
+    // `None` changes nothing. The default value removes the key and the empty table.
+    assert!(
+        !rig.tower
+            .settings_set_claude(None)
+            .unwrap()
+            .claude_auto_mode
+    );
+    assert!(
+        rig.tower
+            .settings_set_claude(Some(true))
+            .unwrap()
+            .claude_auto_mode
+    );
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("[claude]"));
+}

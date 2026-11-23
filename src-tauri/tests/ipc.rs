@@ -505,7 +505,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
     // Settings. The arguments are camelCase, and a null is "no change".
     assert_eq!(
         app.call("settings_get", json!({})).unwrap(),
-        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/tmp" })
+        json!({ "openaiKeySet": false, "openaiKeySource": null, "imageModel": "gpt-image-2.6-sunburst", "notifyOnQuestion": true, "claudeAutoMode": true, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/tmp" })
     );
     let set = app
         .call(
@@ -523,7 +523,7 @@ fn the_logo_settings_and_setup_commands_work_through_the_ipc_with_the_contract_s
         .unwrap();
     assert_eq!(
         set,
-        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/tmp" })
+        json!({ "openaiKeySet": true, "openaiKeySource": "config", "imageModel": "model-y", "notifyOnQuestion": true, "claudeAutoMode": true, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/tmp" })
     );
     assert!(!set.to_string().contains("sk-test-1"));
     let set = app
@@ -1214,6 +1214,23 @@ fn the_notification_switch_is_in_settings_get_and_settings_set() {
         )
         .unwrap();
     assert_eq!(on["notifyOnQuestion"], json!(true));
+
+    // The switch "Claude auto mode" goes through the same command, and the other settings stay.
+    let off = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "notifyOnQuestion": null, "claudeAutoMode": false }),
+        )
+        .unwrap();
+    assert_eq!(off["claudeAutoMode"], json!(false));
+    assert_eq!(off["notifyOnQuestion"], json!(true));
+    let on = app
+        .call(
+            "settings_set",
+            json!({ "openaiKey": null, "imageModel": null, "claudeAutoMode": true }),
+        )
+        .unwrap();
+    assert_eq!(on["claudeAutoMode"], json!(true));
     assert_eq!(on["imageModel"], json!("m-1"));
 }
 

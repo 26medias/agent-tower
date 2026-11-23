@@ -63,6 +63,20 @@ pub fn permission_mode(policy: PermissionPolicy, worktrees: bool) -> &'static st
     }
 }
 
+/// The `--permission-mode` value of a start. With `claude_auto` (the setting "Claude auto mode")
+/// the mode is `auto` for each policy but `ask-always`: the classifier of Claude decides each
+/// action, and the operator gets a question only when it refuses to decide. PROBED on 2026-11-23
+/// (Claude 2.1.330, `--model haiku --permission-mode auto`): the session starts with the line
+/// `auto mode on` and with no extra dialog. In `auto` the policy `read-only` is not enforced by
+/// questions: the role text and the deny rules are what holds the employee back.
+pub fn session_permission_mode(ctx: &StartContext) -> &'static str {
+    if ctx.claude_auto && ctx.employee.permission != PermissionPolicy::AskAlways {
+        "auto"
+    } else {
+        permission_mode(ctx.employee.permission, ctx.worktrees)
+    }
+}
+
 /// The JSON text for `--mcp-config`. The token is NOT in the text: Claude expands
 /// `${TOWER_MCP_TOKEN}` in a header from the environment of the session (PROBED, Claude 2.1.330).
 /// So the token is not in the argument list, which any process of the same user can read.
@@ -210,7 +224,7 @@ fn build_args(ctx: &StartContext, session_args: &[&str]) -> Result<Vec<OsString>
     args.push("--settings".into());
     args.push(settings_json(&hook_command, ctx).into());
     args.push("--permission-mode".into());
-    args.push(permission_mode(ctx.employee.permission, ctx.worktrees).into());
+    args.push(session_permission_mode(ctx).into());
     if let Some(model) = non_empty(&ctx.employee.model) {
         check_no_nul("the model", model)?;
         args.push("--model".into());

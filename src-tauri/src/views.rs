@@ -396,6 +396,9 @@ pub struct Settings {
     pub image_model: String,
     /// `[interface] notify_on_question` of the app config (default `true`).
     pub notify_on_question: bool,
+    /// `[claude] auto_mode` of the app config (default `true`): a Claude employee starts in the
+    /// permission mode `auto`, but not with the policy `ask-always`.
+    pub claude_auto_mode: bool,
     /// `[codex] sandbox` of the app config, as it is stored: `auto` (no key, the default), `on`
     /// ("Always") or `off` ("Never"). It applies at the next start of a session.
     pub codex_sandbox_mode: String,
@@ -421,6 +424,7 @@ impl From<app::SettingsView> for Settings {
             }),
             image_model: view.image_model,
             notify_on_question: view.notify_on_question,
+            claude_auto_mode: view.claude_auto_mode,
             codex_sandbox_mode: view.codex_sandbox_mode.as_str().to_owned(),
             codex_sandbox_effective: view.codex_sandbox_effective.as_str().to_owned(),
             codex_sandbox: view.codex_sandbox,
@@ -933,6 +937,7 @@ mod tests {
             openai_key_source: Some(KeySource::Env),
             image_model: "m".into(),
             notify_on_question: false,
+            claude_auto_mode: false,
             codex_sandbox_mode: "auto".into(),
             codex_sandbox_effective: "off".into(),
             codex_sandbox: false,
@@ -940,13 +945,14 @@ mod tests {
         };
         assert_eq!(
             to_json(&settings),
-            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/home/a"})
+            json!({"openaiKeySet": true, "openaiKeySource": "env", "imageModel": "m", "notifyOnQuestion": false, "claudeAutoMode": false, "codexSandboxMode": "auto", "codexSandboxEffective": "off", "codexSandbox": false, "homeDir": "/home/a"})
         );
         let none = Settings {
             openai_key_set: false,
             openai_key_source: None,
             image_model: "m".into(),
             notify_on_question: true,
+            claude_auto_mode: true,
             codex_sandbox_mode: "on".into(),
             codex_sandbox_effective: "on".into(),
             codex_sandbox: true,
@@ -954,7 +960,7 @@ mod tests {
         };
         assert_eq!(
             to_json(&none),
-            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "codexSandboxMode": "on", "codexSandboxEffective": "on", "codexSandbox": true, "homeDir": null})
+            json!({"openaiKeySet": false, "openaiKeySource": null, "imageModel": "m", "notifyOnQuestion": true, "claudeAutoMode": true, "codexSandboxMode": "on", "codexSandboxEffective": "on", "codexSandbox": true, "homeDir": null})
         );
         assert_eq!(to_json(&KeySource::Config), json!("config"));
     }

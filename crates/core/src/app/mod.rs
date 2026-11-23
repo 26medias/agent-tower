@@ -1282,6 +1282,18 @@ impl TowerCore {
         Ok(self.settings_get())
     }
 
+    /// The switch "Claude auto mode" (`[claude] auto_mode` of the app config, default `true`).
+    /// `None` is "no change". It applies at the next start of a session. Returns the settings.
+    pub fn settings_set_claude(&self, auto_mode: Option<bool>) -> Result<SettingsView> {
+        if let Some(on) = auto_mode {
+            settings::update(&self.logo_env.config_file, |table| {
+                settings::set_claude_auto_mode(table, on);
+            })
+            .map_err(|e| io_message("cannot write the app config", e))?;
+        }
+        Ok(self.settings_get())
+    }
+
     /// The old switch of the Codex sandbox: `true` is "Always" (`On`) and `false` is "Never"
     /// (`Off`). `None` is "no change". See `settings_set_codex_mode`.
     pub fn settings_set_codex(&self, sandbox: Option<bool>) -> Result<SettingsView> {
@@ -1705,6 +1717,7 @@ impl TowerCore {
             worktrees,
             floor_allow,
             codex_sandbox,
+            claude_auto: settings::claude_auto_mode(&self.logo_env.config_file),
             instructions: Some(if setup_cli.is_some() {
                 instructions(&employee, None, &floor.path, false, false)
             } else {

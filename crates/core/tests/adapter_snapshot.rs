@@ -1006,3 +1006,26 @@ fn the_allow_rules_and_the_mode_of_each_policy_are_exact() {
         "{args:?}"
     );
 }
+
+#[test]
+fn the_auto_mode_switch_gives_auto_for_each_policy_but_ask_always() {
+    use tower_core::adapter::claude_session_permission_mode as session_permission_mode;
+    for worktrees in [false, true] {
+        for (policy, expected) in [
+            (PermissionPolicy::ReadOnly, "auto"),
+            (PermissionPolicy::EditInWorktree, "auto"),
+            (PermissionPolicy::AskAlways, "manual"),
+        ] {
+            let mut ctx = fixed_ctx(CliKind::Claude, policy);
+            ctx.worktrees = worktrees;
+            ctx.claude_auto = true;
+            assert_eq!(session_permission_mode(&ctx), expected, "{policy:?}");
+            ctx.claude_auto = false;
+            assert_eq!(
+                session_permission_mode(&ctx),
+                claude_permission_mode(policy, worktrees),
+                "{policy:?}"
+            );
+        }
+    }
+}

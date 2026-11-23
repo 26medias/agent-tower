@@ -263,6 +263,8 @@ pub struct Call {
     pub floor_allow: Vec<String>,
     /// `StartContext::codex_sandbox`: the Codex sandbox switch at the start of this session.
     pub codex_sandbox: bool,
+    /// `StartContext::claude_auto` of the start.
+    pub claude_auto: bool,
 }
 
 #[derive(Default)]
@@ -371,6 +373,7 @@ impl TestAdapter {
             worktrees: ctx.worktrees,
             floor_allow: ctx.floor_allow.clone(),
             codex_sandbox: ctx.codex_sandbox,
+            claude_auto: ctx.claude_auto,
         });
         Ok(SpawnPlan {
             spec: SpawnSpec {

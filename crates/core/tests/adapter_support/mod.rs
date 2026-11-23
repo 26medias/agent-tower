@@ -76,6 +76,7 @@ pub fn fixed_ctx(cli: CliKind, policy: PermissionPolicy) -> StartContext {
         worktrees: false,
         floor_allow: Vec::new(),
         codex_sandbox: false,
+        claude_auto: false,
     }
 }
 

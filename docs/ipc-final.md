@@ -480,3 +480,16 @@ interface FloorView { /* ... all the old fields ... */ requests: OperatorRequest
   focus and the switch `notify_on_question` is on. The body is
   `Maya (CEO) needs you in Fin Check: <the first 120 characters of the text>`.
 - The request stays when the session of the employee ends.
+
+## `Settings.claudeAutoMode` (added 2026-11-23)
+
+```ts
+interface Settings { /* ... all the old fields ... */ claudeAutoMode: boolean }
+```
+
+`claudeAutoMode` is `[claude] auto_mode` of the app config. The default is `true`. `settings_set`
+takes the optional argument `claudeAutoMode: boolean | null` (`null` or missing is "no change").
+When it is `true`, a Claude employee starts with `--permission-mode auto`, but not with the policy
+`ask-always`, which keeps `manual`. The allow rules and the deny rules of the session stay. The
+switch applies at the next start of a session. In `auto` the policy `read-only` is not enforced by
+a question for each edit: the role text and the deny rules hold the employee back.

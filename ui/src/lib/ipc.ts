@@ -195,6 +195,10 @@ export const settingsSet = (
     codexSandboxMode: CodexSandboxMode | null = null,
 ) => call<Settings>("settings_set", settingsSetArgs(openaiKey, imageModel, notifyOnQuestion, codexSandbox, codexSandboxMode));
 
+/** The switch "Claude auto mode" (`[claude] auto_mode` of the app config). The other settings stay. */
+export const settingsSetClaudeAuto = (on: boolean) =>
+    call<Settings>("settings_set", { openaiKey: null, imageModel: null, notifyOnQuestion: null, claudeAutoMode: on });
+
 /**
  * The arguments of `settings_set`. `codexSandbox` (the old boolean: true is "on", false is "off") and `codexSandboxMode`
  * (`auto`, `on` or `off`) are left out when they are null: an old call has no such argument, and the app reads a

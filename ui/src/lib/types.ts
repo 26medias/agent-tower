@@ -98,6 +98,8 @@ export interface Settings {
     imageModel: string;
     /** `[interface] notify_on_question` of the app config. The default is true. */
     notifyOnQuestion: boolean;
+    /** `[claude] auto_mode` of the app config: Claude employees start in the permission mode `auto`. The default is true. */
+    claudeAutoMode?: boolean;
     /**
      * `[codex] sandbox` of the app config as it is stored: `auto` (no key, the default), `on` ("Always") or `off`
      * ("Never"). It applies at the next start of a session.

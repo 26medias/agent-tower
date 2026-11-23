@@ -340,6 +340,7 @@ export function createMockBackend(): Backend {
         openaiKeySource: null,
         imageModel: "gpt-image-2.6-sunburst",
         notifyOnQuestion: true,
+        claudeAutoMode: true,
         // The default is "Automatic" (the decision of 2026-11-21). The two other fields follow the mode and the last probe.
         codexSandboxMode: "auto",
         codexSandboxEffective: "off",
@@ -1164,9 +1165,10 @@ export function createMockBackend(): Backend {
                     openaiKey: string | null;
                     imageModel: string | null;
                     notifyOnQuestion?: boolean | null;
+                    claudeAutoMode?: boolean | null;
                     codexSandbox?: boolean | null;
                     codexSandboxMode?: string | null;
-                }>(raw, ["openaiKey", "imageModel"], ["notifyOnQuestion", "codexSandbox", "codexSandboxMode"]);
+                }>(raw, ["openaiKey", "imageModel"], ["notifyOnQuestion", "codexSandbox", "codexSandboxMode", "claudeAutoMode"]);
                 // The new argument wins. The old boolean is "on" (true) or "off" (false).
                 let mode: Settings["codexSandboxMode"] | null = null;
                 if (a.codexSandboxMode !== undefined && a.codexSandboxMode !== null) {
@@ -1184,6 +1186,9 @@ export function createMockBackend(): Backend {
                     if (probe.state === "missing") throw `the Codex sandbox cannot be set to "Always": ${probe.detail}`;
                 }
                 if (mode !== null) settings.codexSandboxMode = mode;
+                if (a.claudeAutoMode !== undefined && a.claudeAutoMode !== null) {
+                    settings.claudeAutoMode = a.claudeAutoMode;
+                }
                 if (a.notifyOnQuestion !== undefined && a.notifyOnQuestion !== null) {
                     settings.notifyOnQuestion = a.notifyOnQuestion;
                 }

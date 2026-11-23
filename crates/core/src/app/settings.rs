@@ -124,6 +124,9 @@ pub struct SettingsView {
     /// `[interface] notify_on_question`: show a desktop notification when an agent asks a
     /// question and the window has no focus. The default is `true`.
     pub notify_on_question: bool,
+    /// `[claude] auto_mode`: a Claude employee starts in the permission mode `auto` (not for
+    /// the policy `ask-always`). The default is `true`.
+    pub claude_auto_mode: bool,
     /// `[codex] sandbox` as it is stored: `auto` (no key), `on` (`true`) or `off` (`false`).
     pub codex_sandbox_mode: CodexSandboxMode,
     /// What a Codex start gets now. It is filled by `Tower::settings_get`, from the stored mode
@@ -203,6 +206,7 @@ pub(crate) fn view(file: &Path, env: &EnvMap) -> SettingsView {
         openai_key_source: key.map(|(_, source)| source),
         image_model: image_model(file),
         notify_on_question: notify_on_question(file),
+        claude_auto_mode: claude_auto_mode(file),
         codex_sandbox_mode: codex_sandbox_mode(file),
         codex_sandbox_effective: SandboxEffective::Off,
         codex_sandbox: false,
@@ -222,6 +226,39 @@ pub(crate) fn notify_on_question(file: &Path) -> bool {
         .and_then(|section| section.get("notify_on_question"))
         .and_then(toml::Value::as_bool)
         .unwrap_or(true)
+}
+
+/// `[claude] auto_mode`. A missing file, a missing key or a value that is not a boolean gives
+/// the default: `true`.
+pub(crate) fn claude_auto_mode(file: &Path) -> bool {
+    read_table(file)
+        .get("claude")
+        .and_then(toml::Value::as_table)
+        .and_then(|section| section.get("auto_mode"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Set `[claude] auto_mode`. The default value (`true`) removes the key, and an empty table
+/// goes too.
+pub(crate) fn set_claude_auto_mode(table: &mut toml::Table, on: bool) {
+    let section = table
+        .entry("claude")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let now_empty = match section.as_table_mut() {
+        Some(section) => {
+            if on {
+                section.remove("auto_mode");
+            } else {
+                section.insert("auto_mode".to_owned(), toml::Value::Boolean(false));
+            }
+            section.is_empty()
+        }
+        None => false,
+    };
+    if now_empty {
+        table.remove("claude");
+    }
 }
 
 /// Set `[interface] notify_on_question`. The default value (`true`) removes the key, and an

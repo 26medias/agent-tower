@@ -1600,6 +1600,18 @@ class Store {
         }
     }
 
+    /** The switch "Claude auto mode". It applies at the next start of a session. Returns true on success. */
+    async setClaudeAutoMode(on: boolean): Promise<boolean> {
+        this.setActionError("claude", null);
+        try {
+            this.settings = await ipc.settingsSetClaudeAuto(on);
+            return true;
+        } catch (e) {
+            this.failIn("claude", e);
+            return false;
+        }
+    }
+
     /** The switch "Desktop notification when an agent asks a question". Returns true on success. */
     async setNotifyOnQuestion(on: boolean): Promise<boolean> {
         this.setActionError("interface", null);

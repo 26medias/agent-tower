@@ -23,6 +23,7 @@ use crate::pty::{LogConfig, SpawnSpec};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub use claude::session_permission_mode as claude_session_permission_mode;
 pub use claude::{ClaudeAdapter, permission_mode as claude_permission_mode};
 pub use codex::{CodexAdapter, cli_session_id_from_event};
 
@@ -130,6 +131,10 @@ pub struct StartContext {
     /// gets `-s danger-full-access`, as before. `worktrees` tells the adapter if the floor is a git
     /// repository with worktrees. Claude ignores this field.
     pub codex_sandbox: bool,
+    /// Claude only: start the session in the permission mode `auto` (the setting "Claude auto
+    /// mode" in Settings, on by default). The policy `ask-always` keeps the mode `manual`. The
+    /// allow rules and the deny rules of the session stay. Codex ignores this field.
+    pub claude_auto: bool,
 }
 
 /// What to start, and what the app learns at once.

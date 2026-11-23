@@ -267,6 +267,26 @@
             </p>
         </section>
 
+        <section data-section="claude" aria-label="Claude permissions">
+            <h3>Claude permissions</h3>
+            <label class="check">
+                <input
+                    type="checkbox"
+                    name="claudeAutoMode"
+                    checked={store.settings?.claudeAutoMode ?? true}
+                    disabled={!store.settings}
+                    onchange={(e) => void store.setClaudeAutoMode(e.currentTarget.checked)}
+                />
+                <span>Start Claude employees in auto mode</span>
+            </label>
+            <ActionError area="claude" />
+            <p class="hint">
+                In auto mode Claude decides by itself if a command is safe, and asks you only when it is not sure. An employee with the
+                policy "ask always" still asks for each action. With auto mode the policy "read only" is a rule in the instructions, not
+                a question for each edit. The switch applies at the next start of a session.
+            </p>
+        </section>
+
         <section data-section="interface" aria-label="Interface">
             <h3>Interface</h3>
             <label class="check">

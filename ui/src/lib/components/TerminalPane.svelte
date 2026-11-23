@@ -66,7 +66,13 @@
 
     $effect(() => {
         const c = new SessionTerminal(id, host, {
-            onError: (text) => store.toast(text),
+            // A session that is not live is replaced when its employee starts again (for example at
+            // the resume of the last team). A late call for the old ID is then not an error for
+            // the operator.
+            onError: (text) => {
+                if (!untrack(() => live) && text.startsWith("There is no session with the ID")) return;
+                store.toast(text);
+            },
             onSize: (rows, cols) => store.reportSize(rows, cols),
             onOutput: () => (hasOutput = true),
             onInput: () => store.noteInput(id),

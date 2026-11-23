@@ -237,6 +237,7 @@ pub async fn settings_set(
     notify_on_question: Option<bool>,
     codex_sandbox: Option<bool>,
     codex_sandbox_mode: Option<String>,
+    claude_auto_mode: Option<bool>,
 ) -> Result<Settings, String> {
     blocking(&tower, move |t| {
         // `codexSandboxMode` (`auto`, `on` or `off`) is the new argument. The old boolean
@@ -260,6 +261,7 @@ pub async fn settings_set(
         // nothing else.
         t.settings_set_codex_mode(mode)?;
         t.settings_set(openai_key, image_model)?;
+        t.settings_set_claude(claude_auto_mode)?;
         t.settings_set_interface(notify_on_question)
             .map(Settings::from)
     })
