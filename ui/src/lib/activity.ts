@@ -4,13 +4,14 @@
 //   - an employee started another employee (`employee-started`),
 //   - a task changed (a `tasks-changed` reload compared with the tasks before it),
 //   - a message between employees was delivered (`message-delivered`),
-//   - the app stopped an exchange between two employees (the `notice` of the kind `exchange_stopped`).
+//   - the app stopped an exchange between two employees (the `notice` of the kind `exchange_stopped`),
+//   - an employee asked the operator for something (the event `operator-request`).
 // An employee has one current status row: see the rule at `appendActivity`.
 import type { SessionState } from "./reducers";
 import { statusLabel, taskLabel } from "./tasks";
-import type { MessageDeliveredPayload, Status, TaskView, TrackedSession } from "./types";
+import type { MessageDeliveredPayload, OperatorRequestPayload, Status, TaskView, TrackedSession } from "./types";
 
-export type ActivityKind = "session" | "question" | "started" | "task" | "message" | "exchange";
+export type ActivityKind = "session" | "question" | "started" | "task" | "message" | "exchange" | "request";
 
 export interface ActivityEntry {
     id: number;
@@ -167,6 +168,15 @@ export function messageDraft(p: MessageDeliveredPayload): ActivityDraft {
  */
 export function exchangeDraft(path: string, text: string, slug: string | undefined): ActivityDraft {
     return { path, kind: "exchange", text, slug };
+}
+
+/**
+ * The line for the event `operator-request`: "Maya needs the operator: <text>". The text is on one line (a newline of the
+ * request becomes a space). A click goes to the tab of the employee that asks.
+ */
+export function requestDraft(p: OperatorRequestPayload): ActivityDraft {
+    const text = p.text.replace(/\s+/g, " ").trim();
+    return { path: p.path, kind: "request", text: `${p.name} needs the operator: ${text}`, slug: p.slug };
 }
 
 /** The most characters of the preview of a delivered message (docs/ipc-final.md). */

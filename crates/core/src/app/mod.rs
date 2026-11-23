@@ -33,6 +33,7 @@
 //! observer must be quick and must not call back into the Tower. `OutputSink::output` is called
 //! from the output thread of the session, with no lock held.
 
+mod attention;
 mod bus;
 mod floors_watch;
 mod folder;
@@ -83,6 +84,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+pub use attention::{OperatorAsked, OperatorRequest, REQUEST_MAX_CHARS, request_body};
 pub use bus::{
     EXCHANGE_LIMIT, EXCHANGE_NOTE_AT, EXCHANGE_WINDOW, START_LIMIT, START_WINDOW, STOP_HOOK_HEADER,
     TestHooks,
@@ -298,6 +300,8 @@ pub struct FloorView {
     /// The employees that had a live session at the last close of the app, that have no live
     /// session now, and that can resume (M3). The order is the order of the resume: managers first.
     pub resumable: Vec<String>,
+    /// The open requests of the employees for the operator, oldest first (memory only).
+    pub requests: Vec<OperatorRequest>,
     /// The background resume of the last team runs now (M3).
     pub resume_progress: Option<ResumeProgress>,
     /// The folder of the floor is gone (see `store::floor_is_gone`). Then the other fields are
@@ -358,6 +362,9 @@ pub trait Observer: Send + Sync {
     /// notification (`notify::should_notify`). It comes after the `session_changed` of the same
     /// change. The default does nothing.
     fn question_asked(&self, _path: &Path, _event: &QuestionAsked) {}
+    /// An employee asked for the operator with the tool `ask_operator`. It comes after the
+    /// `floor_changed` of the same request. The default does nothing.
+    fn operator_asked(&self, _path: &Path, _event: &OperatorAsked) {}
     /// The app delivered a message to the session of an employee (a paste, the Stop hook, `inbox`
     /// or the first message of a start). One call for each message, oldest first. The default
     /// does nothing.
@@ -484,6 +491,8 @@ struct FloorHandle {
     git: Mutex<()>,
     /// The resume of the last team that runs now (memory only).
     resume: Mutex<Option<ResumeProgress>>,
+    /// The open requests for the operator (memory only, see `attention.rs`).
+    requests: Mutex<Vec<OperatorRequest>>,
     /// The watcher told the observer that the folder is gone, and did not tell yet that it is
     /// back (see `floor_watch`).
     announced_gone: AtomicBool,
@@ -503,6 +512,7 @@ impl FloorHandle {
             logo: Mutex::default(),
             git: Mutex::new(()),
             resume: Mutex::new(None),
+            requests: Mutex::default(),
             announced_gone: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             last_view: Mutex::new(None),
@@ -1162,6 +1172,7 @@ impl TowerCore {
             setup_session_id,
             defaults,
             resumable,
+            requests: locked(&floor.requests).clone(),
             resume_progress,
             gone: false,
         };

@@ -13,7 +13,9 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
-use tower_core::app::{NOTIFICATION_TITLE, QuestionAsked, question_body, should_notify};
+use tower_core::app::{
+    NOTIFICATION_TITLE, OperatorAsked, QuestionAsked, question_body, request_body, should_notify,
+};
 
 /// The last notifications that the app asked the plugin to show: (title, body), oldest first. A
 /// test reads it, because a notification on the screen is not visible to a test.
@@ -61,6 +63,22 @@ pub fn notify_question(
 pub fn on_question<R: Runtime>(app: &AppHandle<R>, event: &QuestionAsked) {
     let focused = window_has_focus(app);
     notify_question(event, focused, |title, body| show(app, title, body));
+}
+
+/// A request of an employee for the operator: one notification when the window does not have
+/// the focus and the switch is on.
+pub fn on_request<R: Runtime>(app: &AppHandle<R>, event: &OperatorAsked) {
+    if !event.notifications_on || window_has_focus(app) {
+        return;
+    }
+    let request = &event.request;
+    let body = request_body(
+        &request.name,
+        &request.role,
+        &event.floor_name,
+        &request.text,
+    );
+    show(app, NOTIFICATION_TITLE, &body);
 }
 
 /// Call the plugin. A failure (for example no notification service on this machine) is a line on

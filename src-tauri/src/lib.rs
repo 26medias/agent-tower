@@ -13,7 +13,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
 use tower_core::app::{
-    EmployeeStarted, MessageDelivered, Observer, QuestionAsked, SessionView, Tower, TowerConfig,
+    EmployeeStarted, MessageDelivered, Observer, OperatorAsked, QuestionAsked, SessionView, Tower,
+    TowerConfig,
 };
 
 /// Sends the changes of the Tower to all windows as Tauri events.
@@ -68,6 +69,15 @@ impl<R: Runtime> Observer for TauriObserver<R> {
             slug: Some(slug.to_owned()),
         };
         let _ = self.app.emit("notice", payload);
+    }
+
+    fn operator_asked(&self, path: &Path, event: &OperatorAsked) {
+        let payload = views::OperatorRequestEvent {
+            path: path.to_string_lossy().into_owned(),
+            request: views::OperatorRequest::from(&event.request),
+        };
+        let _ = self.app.emit("operator-request", payload);
+        notifications::on_request(&self.app, event);
     }
 
     fn question_asked(&self, _path: &Path, event: &QuestionAsked) {
@@ -125,6 +135,7 @@ pub fn register_commands<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         commands::floor_permissions_set,
         commands::floor_permissions_proposed,
         commands::team_resume,
+        commands::operator_request_clear,
     ])
 }
 

@@ -8,12 +8,14 @@ import {
     exchangeDraft,
     messageDraft,
     repeatsTaskRow,
+    requestDraft,
     sessionDrafts,
     startedDraft,
     taskDrafts,
     type ActivityDraft,
     type ActivityEntry,
 } from "./activity";
+import { mayFocusTerminal } from "./focus";
 import * as ipc from "./ipc";
 import { blockedTaskId, describeError, isPathError, noticePlan, tidyError, type ErrorAction } from "./messages";
 import { modalOpen, onModalChange } from "./modal";
@@ -30,12 +32,15 @@ import {
     finishedTurns,
     isLive,
     nextAfter,
+    nextRequestAfter,
     pickActive,
     questionCount,
     questionOrder,
+    requestsOf,
     trackQuestions,
     sessionOf,
     tabSessions,
+    upsertRequest,
     upsertSession,
     type SessionState,
 } from "./reducers";
@@ -50,6 +55,8 @@ import {
     type ModelCatalog,
     type ModelKind,
     type NoticePayload,
+    type OperatorRequest,
+    type OperatorRequestPayload,
     type ProgramName,
     type ProgramTestResult,
     type Programs,
@@ -85,6 +92,17 @@ export interface Question {
     label: string;
     floorName: string;
 }
+
+/** A request of an employee for the operator, with the words that the top strip shows. */
+export interface RequestRow extends OperatorRequest {
+    path: string;
+    /** "Maya (CEO)". */
+    label: string;
+    floorName: string;
+}
+
+/** The two tabs of the floor view (the area of the office). */
+export type OfficeTab = "floor" | "hierarchy";
 
 /** The title of the window. `(2) Agent Tower` while two sessions ask a question. */
 export function windowTitleFor(questions: number): string {
@@ -174,6 +192,12 @@ class Store {
     reader = $state<"report" | "diff" | null>(null);
     /** The employees of each floor that the UI opened. The attention bar names sessions of any floor with it. */
     employeesByPath = $state.raw<Record<string, Employee[]>>({});
+    /** The tab of the floor view that the operator chose. A per-viewer convenience: it lives in memory only. */
+    officeTab = $state<OfficeTab>("floor");
+    /** The open requests for the operator of each floor that the UI knows, oldest first (docs/ipc-final.md). */
+    requestsByPath = $state.raw<Record<string, OperatorRequest[]>>({});
+    /** The request that "Open" opened last (its ID). The next click opens the next one. */
+    private lastOpenedRequest = $state<number | null>(null);
     /** The lines of the "Team activity" list, for all floors, oldest first. The list shows the open floor only. */
     activity = $state.raw<ActivityEntry[]>([]);
     private activitySeq = 0;
@@ -313,6 +337,8 @@ class Store {
                 await ipc.onMessageDelivered((payload) => this.onMessageDelivered(payload)),
                 // A merge that is blocked, or a start that the team resume could not do.
                 await ipc.onNotice((payload) => this.onNotice(payload)),
+                // An employee that is blocked asks the operator for something.
+                await ipc.onOperatorRequest((payload) => this.onOperatorRequest(payload)),
                 await ipc.onFloorChanged((payload) => {
                     // The list carries the logo version of every floor.
                     void this.loadFloors();
@@ -456,6 +482,21 @@ class Store {
         }
     }
 
+    /**
+     * An `operator-request` event (docs/ipc-final.md): a toast with the button "Open", and a row in the "Team activity"
+     * list. The request also goes in the list of the floor, so the top strip shows it also for a floor that is not open
+     * (that floor is not read again). The app sends `floor-changed` before this event: the open floor reads its view again.
+     */
+    private onOperatorRequest(payload: OperatorRequestPayload): void {
+        const { path, ...request } = payload;
+        this.requestsByPath = { ...this.requestsByPath, [path]: upsertRequest(this.requestsByPath[path] ?? [], request) };
+        this.toast(`${request.name} (${request.role}) needs you: ${request.text}`, "info", false, {
+            label: "Open",
+            run: () => void this.openEmployeeTab(path, request.slug),
+        });
+        this.addActivity([requestDraft(payload)]);
+    }
+
     /** The reason for a control that writes, while the open floor is gone. Else the normal title. */
     goneTitle(normal?: string): string | undefined {
         return this.gone ? GONE_REASON : normal;
@@ -523,6 +564,7 @@ class Store {
 
     private applyView(view: FloorView): void {
         this.floorView = view;
+        this.requestsByPath = { ...this.requestsByPath, [view.path]: requestsOf(view) };
         this.employeesByPath = { ...this.employeesByPath, [view.path]: view.employees };
         this.commitSessions(applyFloorView(this.sessionState, view));
         this.syncLogos();
@@ -681,6 +723,46 @@ class Store {
     /** The question that "Open" opens now: the one after the last opened one, or the oldest. */
     nextQuestion = $derived(nextAfter(this.questions, this.lastOpenedQuestion));
 
+    /** The open requests of all floors that the UI knows, the oldest first. */
+    requests = $derived.by((): RequestRow[] => {
+        const rows: RequestRow[] = [];
+        for (const [path, list] of Object.entries(this.requestsByPath)) {
+            const floor = this.floors.find((f) => f.path === path);
+            const floorName = floor?.name ?? (path === this.openPath ? this.floorView?.name : undefined) ?? path.split("/").filter((p) => p !== "").pop() ?? path;
+            for (const r of list) rows.push({ ...r, path, label: `${r.name} (${r.role})`, floorName });
+        }
+        return rows.sort((a, b) => a.at - b.at || a.id - b.id);
+    });
+
+    /** The request that "Open" opens now: the one after the last opened one, or the oldest. */
+    nextRequest = $derived(nextRequestAfter(this.requests, this.lastOpenedRequest));
+
+    /** The open request of an employee of the open floor, or undefined. */
+    requestOf(slug: string): OperatorRequest | undefined {
+        return this.openPath ? (this.requestsByPath[this.openPath] ?? []).find((r) => r.slug === slug) : undefined;
+    }
+
+    /** "Open" of a request: go to the tab of the employee, or select the employee when it has no live session. */
+    async openRequest(request: RequestRow): Promise<void> {
+        this.lastOpenedRequest = request.id;
+        await this.openEmployeeTab(request.path, request.slug);
+    }
+
+    /**
+     * "Done" of a request: the app removes it. The request leaves the list at once, because `floor-changed` reaches the open
+     * floor only. A refusal shows in a toast, as for the other commands, and the request stays.
+     */
+    async clearRequest(request: { path: string; id: number }): Promise<void> {
+        try {
+            await ipc.operatorRequestClear(request.path, request.id);
+        } catch (e) {
+            this.fail(e);
+            return;
+        }
+        const left = (this.requestsByPath[request.path] ?? []).filter((r) => r.id !== request.id);
+        this.requestsByPath = { ...this.requestsByPath, [request.path]: left };
+    }
+
     windowTitle = $derived(windowTitleFor(this.questions.length));
 
     /**
@@ -700,11 +782,21 @@ class Store {
         if (s.path !== this.openPath && !(await this.openFloor(s.path))) return;
         this.selectedByPath = { ...this.selectedByPath, [s.path]: s.slug };
         this.selectTab(sessionId);
-        await tick();
-        // The pane shows after the tab change. A modal that is open keeps the focus.
-        requestAnimationFrame(() => {
-            if (!modalOpen()) focusTerminal(sessionId);
-        });
+        this.focusSoon(sessionId);
+    }
+
+    /**
+     * Put the keyboard focus in the terminal of a tab that the operator chose, so that the operator can type at once.
+     * It waits for the pane to show (a hidden pane takes no focus). A modal that is open keeps the focus, and so does a
+     * field that the operator types in (see `mayFocusTerminal`). It does nothing when another tab is active by then.
+     */
+    private focusSoon(sessionId: string): void {
+        void tick().then(() =>
+            requestAnimationFrame(() => {
+                if (this.activeId !== sessionId) return;
+                if (mayFocusTerminal(document.activeElement, modalOpen())) focusTerminal(sessionId);
+            }),
+        );
     }
 
     /** Forget the text of a rejected `logo_generate` call: of one floor, or of all floors. */
@@ -834,6 +926,11 @@ class Store {
             if (this.openPath === path) {
                 this.openPath = null;
                 this.floorView = null;
+            }
+            // The floor is out of the list: its requests are out of the strip.
+            if (path in this.requestsByPath) {
+                const { [path]: _forgotten, ...rest } = this.requestsByPath;
+                this.requestsByPath = rest;
             }
             await this.loadFloors();
         } catch (e) {
@@ -1192,7 +1289,16 @@ class Store {
         if (!path) return;
         this.selectedByPath = { ...this.selectedByPath, [path]: slug };
         const session = this.sessionOfEmployee(slug);
-        if (session && isLive(session)) this.selectTab(session.sessionId);
+        if (session && isLive(session)) {
+            this.selectTab(session.sessionId);
+            this.focusSoon(session.sessionId);
+        }
+    }
+
+    /** The operator clicked a tab: make it the active tab and put the focus in its terminal. */
+    openTab(sessionId: string): void {
+        this.selectTab(sessionId);
+        this.focusSoon(sessionId);
     }
 
     /** Go to the tab of an employee, also on another floor (the button "Open" of the notice `exchange_stopped`). */

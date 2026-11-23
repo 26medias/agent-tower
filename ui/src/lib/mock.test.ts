@@ -310,3 +310,62 @@ describe("mock: settings switch, program test and reset", () => {
         expect(none.overrides.codex).toBeNull();
     });
 });
+
+describe("mock: requests for the operator", () => {
+    const open = (b: ReturnType<typeof createMockBackend>) => b.invoke<FloorView>("floor_open", { path: FLOOR });
+
+    it("has an empty list at the start", async () => {
+        const b = createMockBackend();
+        expect((await open(b)).requests).toEqual([]);
+    });
+
+    it("keeps a request in the view, with the name and the role of the employee, and sends the two events in order", async () => {
+        const b = createMockBackend();
+        const events: string[] = [];
+        let payload: unknown = null;
+        await b.listen("floor-changed", () => events.push("floor-changed"));
+        await b.listen("operator-request", (p) => {
+            events.push("operator-request");
+            payload = p;
+        });
+        const id = control().operatorRequest(FLOOR, "pm", "Run sudo apt install ripgrep.");
+        await new Promise((r) => setTimeout(r, 10));
+        expect(events).toEqual(["floor-changed", "operator-request"]);
+        const view = await open(b);
+        expect(view.requests).toHaveLength(1);
+        expect(view.requests[0]).toMatchObject({ id, slug: "pm", name: "Maya", role: "Project Manager", text: "Run sudo apt install ripgrep." });
+        expect(payload).toMatchObject({ path: FLOOR, id, slug: "pm" });
+    });
+
+    it("replaces the old request of an employee with a new one that has a new ID", async () => {
+        const b = createMockBackend();
+        const first = control().operatorRequest(FLOOR, "pm", "one");
+        const other = control().operatorRequest(FLOOR, "ceo", "two");
+        const second = control().operatorRequest(FLOOR, "pm", "three");
+        expect(second).not.toBe(first);
+        const view = await open(b);
+        expect(view.requests.map((r) => r.id)).toEqual([other, second]);
+        expect(view.requests.map((r) => r.text)).toEqual(["two", "three"]);
+    });
+
+    it("refuses a text that is empty, too long or has a control character, and an employee that does not exist", () => {
+        expect(() => control().operatorRequest(FLOOR, "pm", "")).toThrow();
+        expect(() => control().operatorRequest(FLOOR, "pm", "x".repeat(501))).toThrow();
+        expect(() => control().operatorRequest(FLOOR, "pm", "bad\u0007bell")).toThrow();
+        expect(() => control().operatorRequest(FLOOR, "ghost", "hi")).toThrow();
+        expect(() => control().operatorRequest(FLOOR, "pm", "x".repeat(500))).not.toThrow();
+        expect(() => control().operatorRequest(FLOOR, "pm", "line one\nline two")).not.toThrow();
+    });
+
+    it("clears a request with operator_request_clear, sends floor-changed, and does not fail for an unknown ID", async () => {
+        const b = createMockBackend();
+        const id = control().operatorRequest(FLOOR, "pm", "help");
+        let changes = 0;
+        await b.listen("floor-changed", () => changes++);
+        expect(await b.invoke("operator_request_clear", { path: FLOOR, id })).toBeNull();
+        expect((await open(b)).requests).toEqual([]);
+        expect(await b.invoke("operator_request_clear", { path: FLOOR, id: 99_999 })).toBeNull();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(changes).toBe(2);
+    });
+});

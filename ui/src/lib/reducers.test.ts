@@ -9,12 +9,15 @@ import {
     nextAfter,
     pickActive,
     questionCount,
+    nextRequestAfter,
     questionOrder,
+    requestsOf,
     sessionOf,
     tabSessions,
     trackQuestions,
+    upsertRequest,
 } from "./reducers";
-import type { FloorView, SessionView } from "./types";
+import type { FloorView, OperatorRequest, SessionView } from "./types";
 
 const P = "/floor/a";
 
@@ -121,6 +124,7 @@ describe("floor view and tabs", () => {
         resumable: [],
         resumeProgress: null,
         gone: false,
+        requests: [],
     });
 
     it("replaces the sessions of the floor and keeps the other floors", () => {
@@ -258,5 +262,31 @@ describe("question order", () => {
         expect(nextAfter(list, "gone")?.sessionId).toBe("a");
         expect(nextAfter([{ sessionId: "x" }], "x")?.sessionId).toBe("x");
         expect(nextAfter([], null)).toBeNull();
+    });
+});
+
+describe("requests for the operator", () => {
+    const req = (id: number, slug: string, at: number): OperatorRequest => ({ id, slug, name: slug, role: "R", text: `t${id}`, at });
+
+    it("reads a missing requests field as an empty list", () => {
+        expect(requestsOf({} as Pick<FloorView, "requests">)).toEqual([]);
+        expect(requestsOf({ requests: [req(1, "a", 1)] })).toHaveLength(1);
+    });
+
+    it("keeps the list oldest first, and one request for each employee", () => {
+        let list = upsertRequest([], req(1, "a", 10));
+        list = upsertRequest(list, req(2, "b", 5));
+        expect(list.map((r) => r.id)).toEqual([2, 1]);
+        list = upsertRequest(list, req(3, "a", 20));
+        expect(list.map((r) => r.id)).toEqual([2, 3]);
+    });
+
+    it("opens the oldest first, then the next one, and wraps", () => {
+        const list = [req(1, "a", 1), req(2, "b", 2), req(3, "c", 3)];
+        expect(nextRequestAfter(list, null)?.id).toBe(1);
+        expect(nextRequestAfter(list, 1)?.id).toBe(2);
+        expect(nextRequestAfter(list, 3)?.id).toBe(1);
+        expect(nextRequestAfter(list, 99)?.id).toBe(1);
+        expect(nextRequestAfter([], null)).toBeNull();
     });
 });

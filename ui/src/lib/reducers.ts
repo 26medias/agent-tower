@@ -1,5 +1,5 @@
 // Pure state reducers for the session store. No Svelte, no Tauri.
-import type { Employee, EmployeeStartedPayload, FloorView, SessionView, TrackedSession } from "./types";
+import type { Employee, EmployeeStartedPayload, FloorView, OperatorRequest, SessionView, TrackedSession } from "./types";
 
 export interface SessionState {
     /** Sessions by session ID, for all floors that the UI knows. */
@@ -157,4 +157,23 @@ export function nextAfter<T extends { sessionId: string }>(list: T[], last: stri
 export function employeeLabel(employees: readonly Employee[] | undefined, slug: string): string {
     const emp = employees?.find((e) => e.slug === slug);
     return emp ? `${emp.name} (${emp.role})` : slug;
+}
+
+// ---- requests for the operator (docs/ipc-final.md) ----
+
+/** The requests of a view. An old app sends no `requests` field: that is an empty list. */
+export function requestsOf(view: Pick<FloorView, "requests">): OperatorRequest[] {
+    return Array.isArray(view.requests) ? view.requests : [];
+}
+
+/** Put a request in a list, oldest first. A floor holds one request for each employee: a new one replaces the old one. */
+export function upsertRequest(list: readonly OperatorRequest[], request: OperatorRequest): OperatorRequest[] {
+    return [...list.filter((r) => r.slug !== request.slug && r.id !== request.id), request].sort((a, b) => a.at - b.at || a.id - b.id);
+}
+
+/** The request that "Open" opens now: the one after `last` in the list, wrapping. With no `last` (or a request that is gone), the oldest. */
+export function nextRequestAfter<T extends { id: number }>(list: readonly T[], last: number | null): T | null {
+    if (list.length === 0) return null;
+    const at = list.findIndex((r) => r.id === last);
+    return list[(at + 1) % list.length];
 }

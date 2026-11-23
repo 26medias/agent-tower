@@ -189,12 +189,49 @@ pub struct FloorView {
     pub defaults: FloorDefaults,
     /// Slugs of the employees that were live at the last close and can resume now (M3).
     pub resumable: Vec<String>,
+    /// The open requests of the employees for the operator, oldest first.
+    #[serde(default)]
+    pub requests: Vec<OperatorRequest>,
     /// The background resume of the last team. `null` when none runs.
     pub resume_progress: Option<ResumeProgress>,
     /// The folder of the floor is gone (`docs/ipc-final.md`). Then the other fields are the last
     /// known ones. `false` in normal use.
     #[serde(default)]
     pub gone: bool,
+}
+
+/// `OperatorRequest` (`docs/ipc-final.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRequest {
+    pub id: u64,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+    pub text: String,
+    pub at: i64,
+}
+
+impl From<&app::OperatorRequest> for OperatorRequest {
+    fn from(request: &app::OperatorRequest) -> OperatorRequest {
+        OperatorRequest {
+            id: request.id,
+            slug: request.slug.clone(),
+            name: request.name.clone(),
+            role: request.role.clone(),
+            text: request.text.clone(),
+            at: request.at,
+        }
+    }
+}
+
+/// The payload of the event `operator-request`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRequestEvent {
+    pub path: String,
+    #[serde(flatten)]
+    pub request: OperatorRequest,
 }
 
 /// How far the resume of the last team is (`docs/ipc-m3.md`).
@@ -335,6 +372,7 @@ impl From<app::FloorView> for FloorView {
             setup_session_id: view.setup_session_id,
             defaults: view.defaults.into(),
             resumable: view.resumable,
+            requests: view.requests.iter().map(OperatorRequest::from).collect(),
             resume_progress: view.resume_progress.map(ResumeProgress::from),
             gone: view.gone,
         }
@@ -838,9 +876,28 @@ mod tests {
                 policy: Some(Policy::AskAlways),
             },
             resumable: vec!["pm".into(), "eng".into()],
+            requests: vec![OperatorRequest {
+                id: 7,
+                slug: "ceo".into(),
+                name: "Maya".into(),
+                role: "CEO".into(),
+                text: "Run sudo x".into(),
+                at: 5,
+            }],
             resume_progress: Some(ResumeProgress { done: 1, total: 2 }),
             gone: true,
         };
+        let event = OperatorRequestEvent {
+            path: "/p".into(),
+            request: floor.requests[0].clone(),
+        };
+        assert_eq!(
+            to_json(&event),
+            json!({
+                "path": "/p", "id": 7, "slug": "ceo", "name": "Maya", "role": "CEO",
+                "text": "Run sudo x", "at": 5
+            })
+        );
         assert_eq!(
             to_json(&floor),
             json!({
@@ -853,6 +910,10 @@ mod tests {
                     "cli": "codex", "model": "gpt-6-luna", "effort": null, "policy": "ask_always"
                 },
                 "resumable": ["pm", "eng"],
+                "requests": [{
+                    "id": 7, "slug": "ceo", "name": "Maya", "role": "CEO",
+                    "text": "Run sudo x", "at": 5
+                }],
                 "resumeProgress": {"done": 1, "total": 2},
                 "gone": true
             })

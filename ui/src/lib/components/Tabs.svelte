@@ -25,11 +25,13 @@
 
 <div class="tabs" role="tablist" aria-label="Sessions">
     {#each store.tabs as tab (tab.sessionId)}
+        {@const request = store.requestOf(tab.slug)}
         <div
             class="tab"
             class:active={tab.sessionId === store.activeId}
             class:stopped={tab.status === "stopped"}
             class:asking={tab.status === "question"}
+            class:needs={request !== undefined}
             data-session={tab.sessionId}
             data-status={tab.status}
         >
@@ -38,12 +40,15 @@
                 class="main"
                 role="tab"
                 aria-selected={tab.sessionId === store.activeId}
-                onclick={() => store.selectTab(tab.sessionId)}
+                onclick={() => store.openTab(tab.sessionId)}
             >
                 <StatusDot status={tab.status} spin />
                 <span class="label">{nameOf(tab.slug)}</span>
                 {#if tab.status === "question"}
                     <span class="asks" data-testid="tab-asks">asks</span>
+                {:else if request}
+                    <!-- An open request for the operator (docs/ipc-final.md): the amber tab says so until the operator clears it. -->
+                    <span class="asks" data-testid="tab-needs" title="Needs you: {request.text}">needs you</span>
                 {:else if store.isUnread(tab.sessionId)}
                     <span class="unread" data-testid="tab-unread" title="This session finished a turn. Open the tab to read it." role="img" aria-label="Finished a turn, not read yet"></span>
                 {/if}
@@ -126,19 +131,23 @@
 
     /* A session that waits for an answer: an amber tab with the word "asks". It pulses slowly. */
     .tab.asking,
-    .tab.asking.active {
+    .tab.asking.active,
+    .tab.needs,
+    .tab.needs.active {
         background: var(--st-question);
         border-color: var(--st-question);
         color: var(--accent-ink);
     }
 
-    .tab.asking .label {
+    .tab.asking .label,
+    .tab.needs .label {
         color: #1a1400;
         font-weight: 700;
     }
 
     /* The dot is amber too: on the amber tab it turns dark. */
-    .tab.asking :global(.dot) {
+    .tab.asking :global(.dot),
+    .tab.needs :global(.dot) {
         background: #1a1400;
         border-color: #1a1400;
         animation: none;
@@ -176,14 +185,16 @@
     }
 
     /* On the amber tab of a question the word is dark, like "asks". */
-    .tab.asking .got {
+    .tab.asking .got,
+    .tab.needs .got {
         border-color: #1a1400;
         color: #1a1400;
         box-shadow: none;
     }
 
     @media (prefers-reduced-motion: no-preference) {
-        .tab.asking {
+        .tab.asking,
+        .tab.needs {
             animation: ask-pulse 2.4s ease-in-out infinite;
         }
     }

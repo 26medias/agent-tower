@@ -8,6 +8,7 @@ import {
     lineText,
     messageDraft,
     repeatsTaskRow,
+    requestDraft,
     sessionDrafts,
     startedDraft,
     statusPhrase,
@@ -17,7 +18,7 @@ import {
     type ActivityEntry,
 } from "./activity";
 import { employeeLabel, emptySessionState, type SessionState } from "./reducers";
-import type { Employee, MessageDeliveredPayload, Status, TaskView } from "./types";
+import type { Employee, MessageDeliveredPayload, OperatorRequestPayload, Status, TaskView } from "./types";
 
 function state(...rows: [string, string, Status][]): SessionState {
     const byId: SessionState["byId"] = {};
@@ -366,5 +367,46 @@ describe("the fold of the status rows", () => {
             [1, status("eng", "answered", "/b")],
         ]);
         expect(texts(list)).toEqual(["eng is working", "eng answered"]);
+    });
+});
+
+describe("a request for the operator", () => {
+    const request = (over: Partial<OperatorRequestPayload> = {}): OperatorRequestPayload => ({
+        path: "/f",
+        id: 7,
+        slug: "pm",
+        name: "Maya",
+        role: "CEO",
+        text: "Run sudo apt install ripgrep for me.",
+        at: 1_700_000_000_000,
+        ...over,
+    });
+
+    it("is the row \"Maya needs the operator: <text>\" that points at the employee that asks", () => {
+        expect(requestDraft(request())).toEqual({
+            path: "/f",
+            kind: "request",
+            text: "Maya needs the operator: Run sudo apt install ripgrep for me.",
+            slug: "pm",
+        });
+    });
+
+    it("puts a text with newlines on one line", () => {
+        expect(requestDraft(request({ text: "Line one.\n\nLine two.\n  Line three. " })).text).toBe("Maya needs the operator: Line one. Line two. Line three.");
+    });
+
+    it("keeps the whole text (the row cuts it when it is drawn)", () => {
+        const long = "x".repeat(500);
+        expect(requestDraft(request({ text: long })).text).toBe(`Maya needs the operator: ${long}`);
+    });
+
+    it("is never folded away by a status row of the same employee", () => {
+        let id = 0;
+        const next = () => ++id;
+        const draft = requestDraft(request());
+        let list = appendActivity([], [draft], 1000, next);
+        list = appendActivity(list, [{ path: "/f", kind: "session", text: "x", slug: "pm", words: "is working" }], 2000, next);
+        list = appendActivity(list, [{ path: "/f", kind: "question", text: "x", slug: "pm", words: "asks a question" }], 3000, next);
+        expect(list.filter((e) => e.kind === "request")).toHaveLength(1);
     });
 });

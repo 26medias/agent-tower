@@ -451,3 +451,32 @@ Rules of `floor_logo_set`:
 
 Rules of `floor_look_set`: each text is one line with no control character. `name` has 1 to 60
 characters. `description` has 300 characters at most, and an empty text removes it.
+
+## Requests for the operator (added 2026-11-22)
+
+An employee that is blocked and waits for the operator (a `sudo` command, a decision, a secret)
+calls the MCP tool `ask_operator(text)`. The app keeps the request in memory and shows it until
+the operator clears it. A restart of the app drops the requests.
+
+```ts
+interface OperatorRequest {
+    id: number;          // unique in this app run
+    slug: string;        // the employee that asks
+    name: string;
+    role: string;
+    text: string;        // one to 500 characters, no control character except newline
+    at: number;          // Unix ms
+}
+interface FloorView { /* ... all the old fields ... */ requests: OperatorRequest[] }
+```
+
+- `requests` is ordered oldest first. There is at most one request for each employee: a new
+  call of the same employee replaces its old request (with a new `id`).
+- Event `operator-request`, payload `{ path: string } & OperatorRequest`: sent one time when a
+  request is made, after `floor-changed`. The UI shows a toast and adds an activity row.
+- Command `operator_request_clear`, args `{ path: string, id: number }`, result `null`. It
+  removes the request and sends `floor-changed`. An unknown `id` is not an error.
+- The shell shows a desktop notification for each request when the window does not have the
+  focus and the switch `notify_on_question` is on. The body is
+  `Maya (CEO) needs you in Fin Check: <the first 120 characters of the text>`.
+- The request stays when the session of the employee ends.

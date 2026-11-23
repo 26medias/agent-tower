@@ -14,6 +14,7 @@ import type {
     ModelCatalog,
     ModelKind,
     ModelOption,
+    OperatorRequest,
     OutputMessage,
     PermissionsSaved,
     ProgramName,
@@ -61,6 +62,8 @@ interface MockFloor {
     employeeErrors: string[];
     /** `FloorView.gone`: the folder of the floor is gone (`MockControl.goneFloor`). */
     gone: boolean;
+    /** `FloorView.requests`: the open requests for the operator, oldest first (`MockControl.operatorRequest`). */
+    requests: OperatorRequest[];
 }
 
 interface MockTask {
@@ -183,6 +186,13 @@ export interface MockControl {
     setEmployeeErrors(path: string, errors: string[]): void;
     /** Set the `[brand]` description of a floor (`null` removes it). A floor event follows. */
     setDescription(path: string, text: string | null): void;
+    /**
+     * An employee asks the operator for something, as the MCP tool `ask_operator` does in the real app. The request goes in
+     * `FloorView.requests` (a new request of the same employee replaces the old one), `floor-changed` follows, then
+     * `operator-request`. The text has 1 to 500 characters and no control character except newline. Returns the ID of the
+     * request.
+     */
+    operatorRequest(path: string, slug: string, text: string): number;
     /** Change the defaults or one employee of a floor. A floor event follows. */
     patchFloor(path: string, change: { defaults?: Partial<FloorDefaults>; employee?: { slug: string; patch: Partial<Employee> } }): void;
 }
@@ -314,6 +324,8 @@ export function createMockBackend(): Backend {
         overrides: { claude: null, codex: null, node: null },
     };
     let counter = 0;
+    // The ID of a request for the operator. It is unique in a run of the mock, over all floors (docs/ipc-final.md).
+    let requestCounter = 0;
     // Errors that the mock gives one time, to show what the UI does when a start fails.
     const failOnce = new Set(["start:eng-sam", "resume:pm"]);
     // Employees whose start in `team_resume` fails one time (`MockControl.failResume`).
@@ -412,6 +424,7 @@ export function createMockBackend(): Backend {
             mergeBlock: null,
             employeeErrors: [],
             gone: false,
+            requests: [],
         };
         floors.set(path, floor);
         if (!known.includes(path)) known.push(path);
@@ -664,6 +677,7 @@ export function createMockBackend(): Backend {
             resumable: floor.resumeProgress ? [] : [...floor.resumable],
             resumeProgress: floor.resumeProgress ? { ...floor.resumeProgress } : null,
             gone: floor.gone,
+            requests: structuredClone(floor.requests),
         };
     }
 
@@ -1434,6 +1448,14 @@ export function createMockBackend(): Backend {
                 })();
                 return { done: 0, total: list.length } satisfies ResumeProgress;
             }
+            case "operator_request_clear": {
+                const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
+                const floor = floorOf(a.path);
+                // An unknown ID is not an error. `floor-changed` follows in each case.
+                floor.requests = floor.requests.filter((r) => r.id !== a.id);
+                emit("floor-changed", { path: a.path });
+                return null;
+            }
             case "task_report": {
                 const a = args<{ path: string; id: number }>(raw, ["path", "id"]);
                 const t = taskOf(floorOf(a.path), a.id);
@@ -1581,6 +1603,22 @@ export function createMockBackend(): Backend {
         setDescription(path, text) {
             floorOf(path).description = text;
             emit("floor-changed", { path });
+        },
+        operatorRequest(path, slug, text) {
+            const floor = floorOf(path);
+            const emp = floor.employees.find((e) => e.slug === slug);
+            if (!emp) throw `unknown employee ${slug}`;
+            const length = [...text].length;
+            if (length < 1 || length > 500) throw `the text of a request has 1 to 500 characters, not ${length}`;
+            // eslint-disable-next-line no-control-regex
+            if (/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text)) throw "the text of a request has a control character";
+            requestCounter += 1;
+            const request: OperatorRequest = { id: requestCounter, slug, name: emp.name, role: emp.role, text, at: Date.now() };
+            // One request for each employee: the new call replaces the old request.
+            floor.requests = [...floor.requests.filter((r) => r.slug !== slug), request];
+            emit("floor-changed", { path });
+            emit("operator-request", { path, ...request });
+            return request.id;
         },
         patchFloor(path, change) {
             const floor = floorOf(path);

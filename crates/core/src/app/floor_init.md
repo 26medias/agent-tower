@@ -158,6 +158,10 @@ complete and that they can stop this session.
     - `task_diff(task)`: any employee of the floor may read the changes of a task that has a git
       branch (the diffstat and the patch).
     - `task_merge(task)`: only the `pm`, the `ceo` and the operator. See "Worktrees and merge".
+    - `ask_operator(text)`: any employee that is blocked and waits for the operator (a `sudo`
+      command, a decision, a secret) calls it. The app shows the request to the operator until the
+      operator clears it. Write in the role text of the `ceo` and the `pm` that they use it, and
+      that they tell a blocked employee to use it.
     - `floor_look`, `floor_logo_set(file)` and `floor_look_set(name?, description?)`: any employee
       may read and change the look of the floor in the tower. `floor_logo_set` makes the logo from
       a picture file (PNG, JPEG or WebP) that is in the project folder, with no image API.

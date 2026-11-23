@@ -4,22 +4,30 @@
     //   - nothing needs attention: the name and the path of the open floor,
     //   - one or more sessions of ANY known floor ask a question: the strip turns amber. It says who
     //     asks and has an "Open" button. It does not go away by itself, only when no session asks,
+    //   - one or more employees of ANY known floor have an open request for the operator (the MCP tool
+    //     `ask_operator`, docs/ipc-final.md): an amber row in the same style, `Maya (CEO) needs you: <text>`,
+    //     with "Open" and "Done". "Done" clears the request. A long text is cut with an ellipsis and the
+    //     `title` has all of it. A question and a request show side by side,
     //   - the folder of the open floor is gone (`FloorView.gone`, docs/ipc-final.md): the strip turns
     //     red. It names the folder and has the buttons "Forget this floor" and "Check again". The live
     //     sessions keep running: their terminals stay usable. Every control that writes is disabled,
     //   - both: the strip is red, and the question is an amber box in it.
     // "Open" opens the floor of the session when it is not the open one, makes its tab the active
     // tab, selects the employee and puts the keyboard focus in the terminal. With several questions,
-    // each click opens the next one, the oldest first.
+    // each click opens the next one, the oldest first. The requests follow the same rule: with several, the row
+    // says how many and names the next one, "Open" opens it, and "Done" clears it. Each one stays reachable.
     import { store } from "$lib/store.svelte";
     import ConfirmButton from "./ConfirmButton.svelte";
 
     const view = $derived(store.floorView);
     const questions = $derived(store.questions);
     const next = $derived(store.nextQuestion);
+    const requests = $derived(store.requests);
+    const nextRequest = $derived(store.nextRequest);
     const isGone = $derived(view?.gone === true);
     const asking = $derived(questions.length > 0 && next !== null);
-    const mode = $derived(isGone ? (asking ? "both" : "gone") : asking ? "question" : "idle");
+    const requesting = $derived(requests.length > 0 && nextRequest !== null);
+    const mode = $derived(isGone ? (asking || requesting ? "both" : "gone") : asking ? "question" : requesting ? "request" : "idle");
 
     let checking = $state(false);
 
@@ -68,7 +76,7 @@
     {/if}
 
     <!-- The slot is always there, so that a screen reader says the new question. -->
-    <div class="slot" aria-live="polite">
+    <div class="slot" class:both-kinds={asking && requesting} aria-live="polite">
         {#if asking && next}
             <div class="attention" role="status" data-testid="attention-bar" data-count={questions.length}>
                 <span class="mark" aria-hidden="true">?</span>
@@ -81,6 +89,29 @@
                     </span>
                 {/if}
                 <button type="button" class="open" data-testid="attention-open" onclick={() => void store.openQuestion(next.sessionId)}>Open</button>
+            </div>
+        {/if}
+        {#if requesting && nextRequest}
+            <div class="attention request" role="status" data-testid="request-bar" data-count={requests.length} data-id={nextRequest.id}>
+                <span class="mark" aria-hidden="true">!</span>
+                <span class="text" data-testid="request-text" title="{nextRequest.label} needs you{where(nextRequest)}: {nextRequest.text}">
+                    {#if requests.length === 1}
+                        <strong>{nextRequest.label}</strong> needs you{where(nextRequest)}: {nextRequest.text}
+                    {:else}
+                        <strong>{requests.length} agents</strong> need you.
+                        <span class="next">Next: <strong>{nextRequest.label}</strong>{where(nextRequest)}: {nextRequest.text}</span>
+                    {/if}
+                </span>
+                <button type="button" class="open" data-testid="request-open" onclick={() => void store.openRequest(nextRequest)}>Open</button>
+                <button
+                    type="button"
+                    class="open done"
+                    data-testid="request-done"
+                    title="Clear this request. The employee is not told."
+                    onclick={() => void store.clearRequest(nextRequest)}
+                >
+                    Done
+                </button>
             </div>
         {/if}
     </div>
@@ -128,6 +159,7 @@
     .slot {
         display: flex;
         flex: 0 1 auto;
+        gap: 10px;
         min-width: 0;
     }
 
@@ -179,18 +211,22 @@
 
     /* ---- a question: the whole strip is amber ---- */
 
-    .strip[data-mode="question"] {
+    .strip[data-mode="question"],
+    .strip[data-mode="request"] {
         background: var(--st-question);
         border-bottom: 2px solid #b3822e;
         color: #1a1400;
     }
 
     .strip[data-mode="question"] .name,
-    .strip[data-mode="question"] .path {
+    .strip[data-mode="question"] .path,
+    .strip[data-mode="request"] .name,
+    .strip[data-mode="request"] .path {
         color: #1a1400;
     }
 
-    .strip[data-mode="question"] .path {
+    .strip[data-mode="question"] .path,
+    .strip[data-mode="request"] .path {
         opacity: 0.7;
     }
 
@@ -220,6 +256,35 @@
 
     .open:hover:not(:disabled) {
         border-color: #fff;
+    }
+
+    /* "Done" is the quiet button next to "Open": the same dark outline, no fill. */
+    .open.done {
+        background: transparent;
+        color: #1a1400;
+    }
+
+    .open.done:hover:not(:disabled) {
+        background: rgba(26, 20, 0, 0.12);
+        border-color: #1a1400;
+    }
+
+    /* A question and a request side by side: the request takes the room that is left, and its text is cut with an ellipsis. */
+    .attention.request {
+        flex: 0 1 auto;
+    }
+
+    /* With a question beside it, the question keeps its whole text. The request is cut first, but "Open" and "Done" stay. */
+    .slot.both-kinds > .attention:not(.request) {
+        flex: none;
+    }
+
+    .slot.both-kinds > .attention.request {
+        min-width: 190px;
+    }
+
+    .attention .text strong {
+        font-weight: 700;
     }
 
     /* ---- a folder that is gone: the whole strip is red ---- */

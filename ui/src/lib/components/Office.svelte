@@ -2,11 +2,14 @@
     // The office: the info panel on the left (header, buttons, selected employee) and the room on
     // the right. The operator changes the height with the handle under the office, and the split
     // between the info panel and the room with the handle between them (see layout.svelte.ts).
+    // The area of the room has two tabs: "Floor" (the room, the default) and "Hierarchy" (the organisation chart). The chosen
+    // tab lives in the store, in memory. The room stays mounted under the other tab, so its zoom is kept.
     import { layout } from "$lib/layout.svelte";
     import type { Employee } from "$lib/types";
-    import { store } from "$lib/store.svelte";
+    import { store, type OfficeTab } from "$lib/store.svelte";
     import EmployeeBar from "./EmployeeBar.svelte";
     import EmptyOffice from "./EmptyOffice.svelte";
+    import HierarchyChart from "./HierarchyChart.svelte";
     import OfficeHeader from "./OfficeHeader.svelte";
     import OfficeRoom from "./OfficeRoom.svelte";
     import ResizeHandle from "./ResizeHandle.svelte";
@@ -38,6 +41,25 @@
         return () => observer.disconnect();
     });
 
+    const OFFICE_TABS: { id: OfficeTab; label: string }[] = [
+        { id: "floor", label: "Floor" },
+        { id: "hierarchy", label: "Hierarchy" },
+    ];
+
+    /** Arrow keys, Home and End move between the two tabs, as in a tab list of the ARIA pattern. */
+    function tabKey(e: KeyboardEvent): void {
+        const at = OFFICE_TABS.findIndex((t) => t.id === store.officeTab);
+        let to = at;
+        if (e.key === "ArrowRight") to = (at + 1) % OFFICE_TABS.length;
+        else if (e.key === "ArrowLeft") to = (at - 1 + OFFICE_TABS.length) % OFFICE_TABS.length;
+        else if (e.key === "Home") to = 0;
+        else if (e.key === "End") to = OFFICE_TABS.length - 1;
+        else return;
+        e.preventDefault();
+        store.officeTab = OFFICE_TABS[to].id;
+        document.getElementById(`office-tab-${OFFICE_TABS[to].id}`)?.focus();
+    }
+
     // The default height of the office depends on the number of employees.
     $effect(() => {
         layout.employees = store.orderedEmployees.length;
@@ -59,7 +81,30 @@
             {/if}
         </div>
         <div class="room">
-            <OfficeRoom />
+            <div class="view" id="office-panel-floor" role="tabpanel" aria-labelledby="office-tab-floor" hidden={store.officeTab !== "floor"}>
+                <OfficeRoom />
+            </div>
+            {#if store.officeTab === "hierarchy"}
+                <HierarchyChart />
+            {/if}
+            <!-- The tab bar floats over the top left corner, like the zoom buttons over the bottom right one. The room keeps its size. -->
+            <div class="office-tabs" role="tablist" aria-label="Floor view" data-testid="office-tabs">
+                {#each OFFICE_TABS as tab (tab.id)}
+                    <button
+                        type="button"
+                        role="tab"
+                        id="office-tab-{tab.id}"
+                        class="ghost"
+                        aria-selected={store.officeTab === tab.id}
+                        aria-controls="office-panel-{tab.id}"
+                        data-testid="office-tab-{tab.id}"
+                        onclick={() => (store.officeTab = tab.id)}
+                        onkeydown={tabKey}
+                    >
+                        {tab.label}
+                    </button>
+                {/each}
+            </div>
         </div>
         <ResizeHandle
             orientation="vertical"
@@ -134,5 +179,33 @@
         min-height: 0;
         overflow: hidden;
         border-left: 1px solid var(--line);
+    }
+
+    .view {
+        position: absolute;
+        inset: 0;
+    }
+
+    .office-tabs {
+        position: absolute;
+        z-index: 3;
+        top: 6px;
+        left: 8px;
+        display: flex;
+        gap: 2px;
+        padding: 2px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(11, 17, 28, 0.8);
+    }
+
+    .office-tabs button {
+        padding: 0 10px;
+        font-size: 12px;
+    }
+
+    .office-tabs button[aria-selected="true"] {
+        color: var(--accent);
+        border-color: var(--accent);
     }
 </style>

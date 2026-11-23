@@ -58,7 +58,24 @@ export interface FloorView {
     resumable: string[]; // employees that were live at the last close and can resume now, managers first (M3)
     resumeProgress: ResumeProgress | null; // the background resume of the last team, null when none runs (M3)
     gone: boolean; // the folder of the floor is gone (docs/ipc-final.md). false in normal use
+    requests: OperatorRequest[]; // the open requests for the operator, oldest first (docs/ipc-final.md). A missing field is an empty list
 }
+
+/**
+ * A request of a blocked employee for the operator (docs/ipc-final.md, "Requests for the operator"). The employee calls
+ * the MCP tool `ask_operator`. The request stays until the operator clears it. There is one request for each employee.
+ */
+export interface OperatorRequest {
+    id: number; // unique in this app run
+    slug: string; // the employee that asks
+    name: string;
+    role: string;
+    text: string; // one to 500 characters, no control character except newline
+    at: number; // Unix ms
+}
+
+/** Payload of the `operator-request` event: sent one time when a request is made, after `floor-changed`. */
+export type OperatorRequestPayload = { path: string } & OperatorRequest;
 
 /** How far the resume of the last team is. `done` counts the starts that were tried (docs/ipc-m3.md). */
 export interface ResumeProgress {

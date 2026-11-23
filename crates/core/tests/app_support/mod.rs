@@ -90,6 +90,8 @@ pub struct Events {
     pub questions: Mutex<Vec<(PathBuf, QuestionAsked)>>,
     /// The `message_delivered` events, oldest first.
     pub delivered: Mutex<Vec<(PathBuf, MessageDelivered)>>,
+    /// The `operator_asked` events, oldest first.
+    pub asked: Mutex<Vec<(PathBuf, tower_core::app::OperatorAsked)>>,
 }
 
 impl Observer for Events {
@@ -130,6 +132,10 @@ impl Observer for Events {
 
     fn question_asked(&self, path: &Path, event: &QuestionAsked) {
         lock(&self.questions).push((path.to_path_buf(), event.clone()));
+        self.changed.notify_all();
+    }
+    fn operator_asked(&self, path: &Path, event: &tower_core::app::OperatorAsked) {
+        lock(&self.asked).push((path.to_path_buf(), event.clone()));
         self.changed.notify_all();
     }
     fn message_delivered(&self, path: &Path, event: &MessageDelivered) {

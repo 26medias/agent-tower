@@ -15,6 +15,7 @@ import type {
     MessageDeliveredPayload,
     ModelCatalog,
     ModelKind,
+    OperatorRequestPayload,
     OutputMessage,
     PermissionsSaved,
     ProgramName,
@@ -282,6 +283,11 @@ export const floorPermissionsProposed = (path: string) => call<string[]>("floor_
 /** Resume the employees of `FloorView.resumable` in the background. Returns the progress at the start. */
 export const teamResume = (path: string) => call<ResumeProgress>("team_resume", { path });
 
+// ---- Commands (docs/ipc-final.md, "Requests for the operator") ----
+
+/** Remove a request of an employee. An unknown `id` is not an error. `floor-changed` follows. */
+export const operatorRequestClear = (path: string, id: number) => call<null>("operator_request_clear", { path, id });
+
 // ---- Events (docs/ipc-m1.md, "Events") ----
 
 export async function onSessionChanged(handler: (payload: SessionChangedPayload) => void): Promise<Unlisten> {
@@ -310,4 +316,9 @@ export async function onTasksChanged(handler: (payload: TasksChangedPayload) => 
 /** The app delivered a message to the session of an employee (a paste, the Stop hook, `inbox` or a first message). */
 export async function onMessageDelivered(handler: (payload: MessageDeliveredPayload) => void): Promise<Unlisten> {
     return (await backend()).listen<MessageDeliveredPayload>("message-delivered", handler);
+}
+
+/** An employee asked the operator for something (the MCP tool `ask_operator`). `floor-changed` came before it. */
+export async function onOperatorRequest(handler: (payload: OperatorRequestPayload) => void): Promise<Unlisten> {
+    return (await backend()).listen<OperatorRequestPayload>("operator-request", handler);
 }

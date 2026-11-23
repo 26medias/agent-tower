@@ -579,6 +579,19 @@ pub async fn team_resume(tower: State<'_, Shared>, path: String) -> Result<Resum
     .await
 }
 
+/// Clear a request of an employee for the operator (`docs/ipc-final.md`).
+#[tauri::command]
+pub async fn operator_request_clear(
+    tower: State<'_, Shared>,
+    path: String,
+    id: u64,
+) -> Result<(), String> {
+    blocking(&tower, move |t| {
+        t.operator_request_clear(&path_of(&path), id)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

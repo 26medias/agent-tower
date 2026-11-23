@@ -5,6 +5,7 @@
     // output byte on (the CLI can show a trust dialog during the start, and the overlay must not
     // hide it). The overlay takes no pointer events, so the terminal stays usable.
     import { untrack } from "svelte";
+    import { mayFocusTerminal } from "$lib/focus";
     import { modalOpen } from "$lib/modal";
     import { store } from "$lib/store.svelte";
     import {
@@ -85,10 +86,8 @@
         const c = controller;
         if (isActive && c) {
             void c.show().then(() => {
-                // Do not take the focus from a field that the operator uses.
-                const a = document.activeElement;
-                // A modal that is open keeps the focus: the terminal must not take it.
-                if (isActive && !modalOpen() && (!a || a === document.body || a.closest(".xterm"))) c.focus();
+                // A modal that is open keeps the focus, and so does a field that the operator types in.
+                if (isActive && mayFocusTerminal(document.activeElement, modalOpen())) c.focus();
             });
         }
     });

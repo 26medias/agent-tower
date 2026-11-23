@@ -121,6 +121,12 @@ impl Notifier {
         }
     }
 
+    pub fn operator_asked(&self, path: &Path, event: &super::OperatorAsked) {
+        if let Some(observer) = self.get() {
+            observer.operator_asked(path, event);
+        }
+    }
+
     pub fn question_asked(&self, path: &Path, event: &super::QuestionAsked) {
         if let Some(observer) = self.get() {
             observer.question_asked(path, event);

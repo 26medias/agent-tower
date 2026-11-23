@@ -4,7 +4,8 @@
     // that the app delivered ("Maya → Eli: ..."). Each employee has one current status line: a new status line
     // replaces the old one (see `appendActivity`). Each line has its time. A click on a line goes to the tab of
     // the employee (for a message: the receiver), or to the task.
-    // It is calm: small text, no colour except the amber of a question.
+    // A request of an employee for the operator is a row too ("Maya needs the operator: <text>"). A click goes to its tab.
+    // It is calm: small text, no colour except the amber of a question or a request.
     import { activityTime, lineText, visibleActivity, type ActivityEntry } from "$lib/activity";
     import { store } from "$lib/store.svelte";
 
@@ -35,7 +36,7 @@
         <ol>
             {#each lines as line (line.id)}
                 <li>
-                    <button type="button" class="line" class:question={line.kind === "question"} data-kind={line.kind} title={text(line)} onclick={() => go(line)}>
+                    <button type="button" class="line" class:question={line.kind === "question" || line.kind === "request"} data-kind={line.kind} title={text(line)} onclick={() => go(line)}>
                         <time datetime={new Date(line.at).toISOString()}>{activityTime(line.at)}</time>
                         <span class="text">{text(line)}</span>
                     </button>
@@ -109,7 +110,7 @@
         white-space: nowrap;
     }
 
-    /* The one colour: a question. */
+    /* The one colour: a question, or a request for the operator. */
     .line.question {
         color: var(--st-question);
     }
