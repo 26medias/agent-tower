@@ -1141,6 +1141,7 @@ fn plain_between(rig: &Rig, a: &str, b: &str) -> usize {
 }
 
 /// Store `count` plain messages from `from` to `to` that are `age_ms` old (a fast way to fill the window).
+/// A negative `age_ms` dates them in the future: they stay in the window however slow the machine is.
 fn fill(rig: &Rig, from: &str, to: &str, count: usize, age_ms: i64) {
     let at = tower_core_now_ms() - age_ms;
     for n in 0..count {
@@ -1148,6 +1149,22 @@ fn fill(rig: &Rig, from: &str, to: &str, count: usize, age_ms: i64) {
             .insert_message(from, to, &format!("filler {n}"), at, Some(at))
             .unwrap();
     }
+}
+
+/// Make the messages between `a` and `b` (both directions) `by_ms` older. For the window count
+/// this is the same as a clock that moves `by_ms` forward, with no sleep: the app counts the rows
+/// with `created_at` later than its own `now` minus the window.
+fn age_exchange(rig: &Rig, a: &str, b: &str, by_ms: i64) {
+    let conn = rusqlite::Connection::open(rig.cwd.join(".swarm/state/floor.db")).unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    let changed = conn
+        .execute(
+            "UPDATE messages SET created_at = created_at - ?3
+             WHERE (from_slug = ?1 AND to_slug = ?2) OR (from_slug = ?2 AND to_slug = ?1)",
+            rusqlite::params![a, b, by_ms],
+        )
+        .unwrap();
+    assert!(changed > 0, "no message between {a} and {b}");
 }
 
 #[test]
@@ -1216,7 +1233,12 @@ fn the_5th_message_of_the_window_has_a_note_and_no_other_message_has_it() {
 
 #[test]
 fn a_message_after_the_window_passes() {
-    let rig = Rig::with(|config| config.exchange_window = Duration::from_millis(1200));
+    // The window of the config, not the 5 minutes of the default. The test moves the clock of
+    // the messages (`age_exchange`), so it does not sleep and a slow machine cannot change it.
+    const WINDOW_MS: i64 = 60_000;
+    let rig = Rig::with(|config| {
+        config.exchange_window = Duration::from_millis(WINDOW_MS as u64);
+    });
     rig.create_floor();
     rig.add_employee("eng", Some("ceo"));
     rig.start("ceo");
@@ -1227,7 +1249,16 @@ fn a_message_after_the_window_passes() {
     fill(&rig, "eng", "ceo", 4, 0);
     let refused = rig.tool("ceo", "send", json!({"to": "eng", "text": "too soon"}));
     assert!(refused.is_error, "{refused:?}");
-    std::thread::sleep(Duration::from_millis(1400));
+    // 10 s before the end of the window: the 8 messages still count.
+    age_exchange(&rig, "ceo", "eng", WINDOW_MS - 10_000);
+    let still = rig.tool(
+        "ceo",
+        "send",
+        json!({"to": "eng", "text": "still too soon"}),
+    );
+    assert!(still.is_error, "{still:?}");
+    // 1 s after the end of the window: they do not count any more.
+    age_exchange(&rig, "ceo", "eng", 11_000);
     let late = rig.tool(
         "ceo",
         "send",
@@ -1371,7 +1402,11 @@ fn a_refused_message_does_not_use_a_start_slot() {
 
 #[test]
 fn the_operator_gets_one_notice_for_each_pair_and_window() {
-    let rig = Rig::with(|config| config.exchange_window = Duration::from_millis(1500));
+    // The app keeps the time of the last notice of a pair on its own clock (`Instant`), and no
+    // test can move that clock. So this test sleeps for one window. The messages are dated in
+    // the future (`fill` with a negative age): they count however slow the machine is.
+    const WINDOW: Duration = Duration::from_millis(4000);
+    let rig = Rig::with(|config| config.exchange_window = WINDOW);
     rig.create_floor();
     rig.add_employee("eng", Some("ceo"));
     rig.start("ceo");
@@ -1379,9 +1414,10 @@ fn the_operator_gets_one_notice_for_each_pair_and_window() {
     rig.live_idle("ceo");
     rig.live_idle("eng");
     let notices = |rig: &Rig| rig.events.employee_notices.lock().unwrap().clone();
-    fill(&rig, "ceo", "eng", 4, 0);
-    fill(&rig, "eng", "ceo", 4, 0);
+    fill(&rig, "ceo", "eng", 4, -600_000);
+    fill(&rig, "eng", "ceo", 4, -600_000);
     // Four refusals, from both sides, make one notice.
+    let first_refusal = Instant::now();
     for (from, to) in [
         ("ceo", "eng"),
         ("ceo", "eng"),
@@ -1391,6 +1427,11 @@ fn the_operator_gets_one_notice_for_each_pair_and_window() {
         let result = rig.tool(from, "send", json!({"to": to, "text": "again"}));
         assert!(result.is_error, "{result:?}");
     }
+    let refusals_took = first_refusal.elapsed();
+    assert!(
+        refusals_took < WINDOW,
+        "the 4 refusals took {refusals_took:?}, longer than the window: the test cannot conclude"
+    );
     let first = notices(&rig);
     assert_eq!(first.len(), 1, "{first:?}");
     let (path, kind, text, slug) = &first[0];
@@ -1415,9 +1456,12 @@ fn the_operator_gets_one_notice_for_each_pair_and_window() {
             .count(),
         1
     );
-    // A new window: the old messages are gone, 8 new ones come, and the next refusal has a new notice.
-    std::thread::sleep(Duration::from_millis(1700));
-    fill(&rig, "eng", "ceo", 8, 0);
+    // A new window: the old messages are gone, 8 new ones come, and the next refusal has a new
+    // notice. The sleep is at least one window after the first notice (a slow machine only makes
+    // it longer).
+    std::thread::sleep(WINDOW + Duration::from_millis(200));
+    age_exchange(&rig, "ceo", "eng", 3_600_000);
+    fill(&rig, "eng", "ceo", 8, -600_000);
     let result = rig.tool("eng", "send", json!({"to": "ceo", "text": "again"}));
     assert!(result.is_error, "{result:?}");
     let second = notices(&rig);
@@ -2835,6 +2879,17 @@ fn a_failed_write_to_the_hook_marks_nothing_and_the_stop_goes_through() {
     wait_for("the row is delivered", || {
         rig.db().count_pending_messages("eng").unwrap() == 0
     });
+    // The paste path tells the observer AFTER it marks the row (both with the delivery lock held),
+    // so the event can come a little after the mark. A second message, delivered after the first
+    // under the same lock, comes after every event of the first one: wait for it.
+    let after = rig.tool("eng", "send", json!({"to": "ceo", "text": "a later one"}));
+    assert!(!after.is_error, "{after:?}");
+    wait_for("the later message is announced", || {
+        rig.events
+            .delivered_events()
+            .iter()
+            .any(|e| e.preview == "a later one")
+    });
     // The failed write announced nothing. The paste announced the message, one time.
     let previews: Vec<String> = rig
         .events
@@ -2842,7 +2897,7 @@ fn a_failed_write_to_the_hook_marks_nothing_and_the_stop_goes_through() {
         .into_iter()
         .map(|e| e.preview)
         .collect();
-    assert_eq!(previews, ["nobody reads this"]);
+    assert_eq!(previews, ["nobody reads this", "a later one"]);
 }
 
 #[test]
