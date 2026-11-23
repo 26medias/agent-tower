@@ -24,8 +24,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/demo.gif" alt="Short demo: the operator gives the CEO a request, the team picks it up" width="100%">
+  <img src="docs/images/demo.gif" alt="Short demo with demo data: the terminal tabs, the Hierarchy view, one task, and agents that ask a question" width="100%">
 </p>
+<p align="center"><sub>The screenshots show demo data.</sub></p>
 
 ---
 
@@ -208,7 +209,7 @@ Commit `floor.toml`, `employees/` and `assets/`, and a second machine opens the 
 The install is for your user only. It needs no root access.
 
 ```sh
-git clone <this repository> agent-tower
+git clone https://github.com/26medias/agent-tower.git agent-tower
 cd agent-tower
 pnpm run setup         # install the packages of the UI
 pnpm run install-app   # build a release and install it
