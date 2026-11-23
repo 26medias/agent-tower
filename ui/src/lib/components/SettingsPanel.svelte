@@ -311,6 +311,7 @@
             <ActionError area="interface" />
             <p class="hint">The app shows it only while its window has no focus, or is minimized. A click on it does nothing.</p>
         </section>
+        <p class="hint version" data-testid="app-version">Agent Tower {__APP_VERSION__}</p>
     </div>
 </div>
 

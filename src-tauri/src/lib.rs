@@ -3,6 +3,7 @@
 //! events (`TauriObserver`), and the types into the JSON of `docs/ipc-m1.md` (`views`).
 
 mod commands;
+mod instance;
 #[doc(hidden)]
 pub mod notifications;
 mod signals;
@@ -12,6 +13,7 @@ use commands::{Shared, WriteQueues};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
+use tauri_plugin_notification::NotificationExt;
 use tower_core::app::{
     EmployeeStarted, MessageDelivered, Observer, OperatorAsked, QuestionAsked, SessionView, Tower,
     TowerConfig,
@@ -160,6 +162,23 @@ pub fn run() {
     )
     .setup(|app| {
         let config_dir = app.path().app_config_dir()?;
+        // One copy of the app for each config folder (see `instance.rs`).
+        match instance::take(&config_dir)? {
+            Some(lock) => {
+                app.manage(lock);
+            }
+            None => {
+                let text = "Agent Tower runs already. Use the window that is open.";
+                eprintln!("agent-tower: {text}");
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Agent Tower")
+                    .body(text)
+                    .show();
+                std::process::exit(0);
+            }
+        }
         install_tower(app, Arc::new(Tower::new(TowerConfig::new(config_dir))?));
         signals::install(app.handle().clone())?;
         Ok(())

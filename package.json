@@ -6,6 +6,7 @@
         "setup": "pnpm --dir ui install",
         "build": "pnpm --dir ui build && cargo build --workspace --features tauri/custom-protocol",
         "start": "pnpm run build && target/debug/agent-tower",
-        "desktop-entry": "scripts/desktop-entry.sh"
+        "desktop-entry": "scripts/desktop-entry.sh",
+        "install-app": "scripts/install.sh"
     }
 }
