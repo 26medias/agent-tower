@@ -150,7 +150,7 @@ pub const STOP_HOOK_HEADER: &str = "This is not an error. Messages from your tea
 
 /// The oldest a request of the hook program may be when the app writes the answer. The hook
 /// program stops after 2 s, so an answer that is later has no reader and must not mark anything.
-const STOP_REPLY_LIMIT: Duration = Duration::from_millis(1800);
+pub(super) const STOP_REPLY_LIMIT: Duration = Duration::from_millis(1800);
 
 /// The longest block of `wait` (spec 4.4: Claude drops an HTTP tool call after about 60 s).
 pub const WAIT_MAX_SECONDS: f64 = 50.0;
@@ -238,7 +238,13 @@ pub struct TestHooks {
     /// between the first `working` and the end of the hold. A test uses it to show that the Stop
     /// hook does not give a held message.
     pub keep_first_message_held: AtomicBool,
+    /// Runs in the status thread of each session that starts after it was set, before the thread
+    /// handles a status change, with no lock held. A test uses it to make the status thread late.
+    pub before_status: Mutex<Option<StatusPause>>,
 }
+
+/// See `TestHooks::before_status`.
+pub type StatusPause = Arc<dyn Fn(Status) + Send + Sync>;
 
 /// Messages that are out of the waiting list for a short time. They are still waiting in the
 /// store (`delivered_at` is NULL). `inbox`, `wait` and the paste skip them.

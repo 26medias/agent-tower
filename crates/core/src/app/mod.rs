@@ -1767,7 +1767,9 @@ impl TowerCore {
 
         // The route is made BEFORE the process starts, so no hook event is lost.
         let from_router = self.router.subscribe_replying(&id);
-        let (to_session, session_events) = mpsc::channel();
+        // The hook thread of the app applies the events to the session itself (`live.rs`,
+        // `run_hooks`), so the session gets a closed channel and its own hook pump ends at once.
+        let (_, session_events) = mpsc::channel();
         let (handle, streams) = match Session::start(plan.spec, employee.cli, &id, session_events) {
             Ok(started) => started,
             Err(error) => {
@@ -1794,6 +1796,7 @@ impl TowerCore {
             db,
             notifier: Arc::clone(&self.notifier),
             attach_pause: self.attach_pause.clone(),
+            before_status: locked(&self.test_hooks.before_status).clone(),
             after_turn: setup_cli.map(|_| self.setup_hook(&floor)),
             on_status: token_guard
                 .as_ref()
@@ -1829,7 +1832,6 @@ impl TowerCore {
             streams.status,
             streams.output,
             from_router,
-            to_session,
             Arc::clone(&self.router),
             learn_id,
         ) {

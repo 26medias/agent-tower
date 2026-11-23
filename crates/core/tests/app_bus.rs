@@ -726,6 +726,53 @@ fn send_to_a_stopped_employee_that_the_caller_may_not_start_waits_and_goes_out_a
     });
 }
 
+/// T-10: the Stop hook must see the session state after all the earlier hook events. Here the
+/// status thread of `qa` is late: it handles the first `working` 400 ms after the session sent
+/// it. The `Stop` of the first turn comes in that time. The message must go out as a block of
+/// the Stop hook, and not as a paste after the turn.
+#[test]
+fn the_stop_hook_gives_a_waiting_message_when_the_status_thread_is_late() {
+    let hooks = Arc::new(TestHooks::default());
+    let rig = Rig::with({
+        let hooks = Arc::clone(&hooks);
+        move |config| config.test_hooks = hooks
+    });
+    rig.create_floor();
+    rig.add_employee("eng", Some("ceo"));
+    rig.add_employee("qa", Some("ceo"));
+    rig.start("ceo");
+    rig.start("eng");
+    rig.live_idle("ceo");
+    rig.live_idle("eng");
+    let result = rig.tool(
+        "eng",
+        "send",
+        json!({"to": "qa", "text": "need a test run"}),
+    );
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(rig.db().count_pending_messages("qa").unwrap(), 1);
+
+    // Only the session of `qa` gets the hook: a session reads it when it starts.
+    let late: Arc<dyn Fn(Status) + Send + Sync> = Arc::new(|status| {
+        if status == Status::Working {
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    });
+    *lock(&hooks.before_status) = Some(late);
+    let qa = rig.start("qa").session_id;
+    wait_for("the waiting message goes out", || {
+        rig.hook_text(&qa).is_some() || rig.paste_text(&qa).is_some()
+    });
+    assert!(rig.paste_text(&qa).is_none(), "no paste");
+    assert_eq!(
+        rig.hook_text(&qa).unwrap(),
+        delivered("ENG", "Role of eng", "eng", "need a test run")
+    );
+    wait_for("it is marked delivered", || {
+        rig.db().count_pending_messages("qa").unwrap() == 0
+    });
+}
+
 #[test]
 fn a_message_to_a_working_employee_waits_and_goes_out_at_the_stop_hook() {
     let rig = Rig::new();

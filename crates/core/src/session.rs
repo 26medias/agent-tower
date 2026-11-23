@@ -291,6 +291,8 @@ struct State {
     last_time: Millis,
     pty_origin: Millis,
     status_tx: Sender<StatusChange>,
+    /// How many status changes went to `status_tx`. See `Session::status_changes`.
+    status_sent: u64,
     output_tx: Sender<OutputChunk>,
 }
 
@@ -336,6 +338,7 @@ impl Session {
             last_time: now,
             pty_origin: now,
             status_tx,
+            status_sent: 0,
             output_tx,
         };
         let inner = Inner {
@@ -360,6 +363,13 @@ impl Session {
 
     pub fn status(&self) -> Status {
         locked(&self.inner.state).machine.status()
+    }
+
+    /// How many status changes this session has sent to its status channel. The count and the
+    /// send are in one critical section. The reader of the channel compares this with the number
+    /// of changes that it handled, to know that it is not behind (`Live::wait_for_status`).
+    pub fn status_changes(&self) -> u64 {
+        locked(&self.inner.state).status_sent
     }
 
     pub fn cli(&self) -> CliKind {
@@ -574,6 +584,7 @@ impl Inner {
         let new = state.machine.apply(input, now);
         if let Some(new) = new {
             let _ = state.status_tx.send(StatusChange { old, new, at: now });
+            state.status_sent += 1;
         }
         if state.machine.next_deadline() != deadline {
             self.changed.notify_all();
