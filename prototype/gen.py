@@ -1,11 +1,19 @@
-"""Prototype art helper: calls the OpenAI image API. Key comes from the content-gen-mcp .env file."""
-import base64, json, sys, urllib.request, urllib.error
+"""Prototype art helper: calls the OpenAI image API.
 
-ENV = "/home/julien/Projects/content-gen-mcp/.env"
+The key comes from the variable OPENAI_API_KEY, or from the .env file that the variable
+TOWER_ART_ENV names.
+"""
+import base64, json, os, sys, urllib.request, urllib.error
 
 
 def key():
-    for line in open(ENV):
+    value = os.environ.get("OPENAI_API_KEY")
+    if value:
+        return value
+    env = os.environ.get("TOWER_ART_ENV")
+    if not env:
+        raise SystemExit("set OPENAI_API_KEY, or TOWER_ART_ENV to the path of a .env file")
+    for line in open(env):
         if line.startswith("OPENAI_API_KEY="):
             return line.split("=", 1)[1].strip().strip("\"'")
     raise SystemExit("no key")
