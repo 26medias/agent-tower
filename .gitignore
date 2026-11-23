@@ -21,3 +21,6 @@ vite.config.ts.timestamp-*
 
 # Screenshots of the mock page test
 /ui/mock-page*.png
+
+# Python
+__pycache__/
