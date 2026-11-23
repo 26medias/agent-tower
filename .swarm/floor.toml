@@ -1,0 +1,8 @@
+version = 1
+name = "agent-tower"
+
+[defaults]
+
+[brand]
+description = "A desktop app that runs a team of AI agent CLI sessions as a company in a pixel-art office building."
+logo_prompt = "Three office floors that float one above the other, with one lit window on each floor."
