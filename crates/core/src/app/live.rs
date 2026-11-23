@@ -4,8 +4,9 @@
 //! # Threads of one session (all std threads, all end by themselves)
 //!
 //! - **hooks**: reads the hook events of this session from the `HookRouter`, stores the CLI
-//!   session ID of a Codex session from the first event, and forwards each event to the
-//!   `Session` (which has its own hook pump). It ends when the router drops the route.
+//!   session ID of a Codex session from the first event, and applies each event to the
+//!   `Session` in this thread (`Session::on_hook`). So when it handles an event, the status
+//!   machine has all the earlier events. It ends when the router drops the route.
 //! - **status**: reads the status changes of the `Session`. It appends one status event to the
 //!   database for each change. On `stopped` it sets the end time, marks the session as exited,
 //!   removes the hook route and ends.
@@ -43,8 +44,8 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -168,6 +169,8 @@ pub(crate) struct Live {
     notifier: Arc<Notifier>,
     /// Test only. Runs in `attach`, inside the critical section, after the copy of the ring.
     attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test only. Runs in the status thread before it handles a status change.
+    before_status: Option<super::bus::StatusPause>,
     /// Setup session only. The status thread runs it after a turn ended (the status went from
     /// `working` to `idle` or `done`) and after the stop, with no lock of the session held.
     after_turn: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -189,6 +192,29 @@ pub(crate) struct Live {
     on_question: Option<QuestionHook>,
     /// What the Stop hook has done for this session (`StopState`).
     pub stop_state: Mutex<StopState>,
+    /// How far the status thread is. See `wait_for_status`.
+    status_seen: Mutex<StatusSeen>,
+    status_moved: Condvar,
+}
+
+/// The progress of the status thread of a session.
+#[derive(Default)]
+struct StatusSeen {
+    /// How many status changes the thread has handled completely (the flags, the view and the
+    /// `on_status` hook). Compare with `Session::status_changes`.
+    handled: u64,
+    /// The thread has ended. It handles no more changes.
+    ended: bool,
+}
+
+/// Marks the status thread as ended when `run_status` returns, on each path.
+struct StatusEnd<'a>(&'a Live);
+
+impl Drop for StatusEnd<'_> {
+    fn drop(&mut self) {
+        locked(&self.0.status_seen).ended = true;
+        self.0.status_moved.notify_all();
+    }
 }
 
 /// See `Live::on_status`.
@@ -258,6 +284,8 @@ pub(crate) struct LiveParts {
     pub db: Database,
     pub notifier: Arc<Notifier>,
     pub attach_pause: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test only. See `TestHooks::before_status`.
+    pub before_status: Option<super::bus::StatusPause>,
     /// Setup session only. See `Live::after_turn`.
     pub after_turn: Option<Arc<dyn Fn() + Send + Sync>>,
     /// See `Live::on_status`.
@@ -290,6 +318,7 @@ impl Live {
             db: Mutex::new(parts.db),
             notifier: parts.notifier,
             attach_pause: parts.attach_pause,
+            before_status: parts.before_status,
             after_turn: parts.after_turn,
             on_status: parts.on_status,
             worked: AtomicBool::new(false),
@@ -297,6 +326,8 @@ impl Live {
             on_stop: parts.on_stop,
             on_question: parts.on_question,
             stop_state: Mutex::new(StopState::default()),
+            status_seen: Mutex::new(StatusSeen::default()),
+            status_moved: Condvar::new(),
         })
     }
 
@@ -358,9 +389,34 @@ impl Live {
     /// With no hook, the reply is dropped and the program prints nothing.
     fn run_on_stop(&self, event: &Value, reply: &HookReply) -> bool {
         match &self.on_stop {
-            Some(hook) => hook(self, event, reply),
+            Some(hook) => {
+                // The hook reads `worked` and the held messages, and the status thread writes
+                // them. So the status thread must be level with the session first.
+                self.wait_for_status(super::bus::STOP_REPLY_LIMIT.saturating_sub(reply.age()));
+                hook(self, event, reply)
+            }
             None => false,
         }
+    }
+
+    /// Wait until the status thread has handled each status change that the session has sent
+    /// until now. The hook thread calls it with no lock held. This is a wait for a condition and
+    /// not a pause: it returns at once when the status thread is level, which is the usual case.
+    /// `limit` only keeps the hook thread alive if a hook of the status thread hangs: after it,
+    /// the caller continues with the state as it is.
+    fn wait_for_status(&self, limit: Duration) {
+        let sent = self.session.status_changes();
+        let seen = locked(&self.status_seen);
+        let _seen = self
+            .status_moved
+            .wait_timeout_while(seen, limit, |seen| seen.handled < sent && !seen.ended)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+
+    /// The status thread handled one status change completely.
+    fn status_handled(&self) {
+        locked(&self.status_seen).handled += 1;
+        self.status_moved.notify_all();
     }
 
     fn run_after_turn(&self) {
@@ -452,7 +508,6 @@ pub(crate) fn spawn_pumps(
     status: Receiver<StatusChange>,
     output: Receiver<OutputChunk>,
     hooks_in: Receiver<Routed>,
-    hooks_out: Sender<Value>,
     router: Arc<HookRouter>,
     learn_cli_session_id: bool,
 ) -> std::io::Result<()> {
@@ -460,7 +515,7 @@ pub(crate) fn spawn_pumps(
         let live = Arc::clone(live);
         thread::Builder::new()
             .name("app-hooks".into())
-            .spawn(move || run_hooks(&live, hooks_in, hooks_out, learn_cli_session_id))?;
+            .spawn(move || run_hooks(&live, hooks_in, learn_cli_session_id))?;
     }
     {
         let live = Arc::clone(live);
@@ -477,12 +532,7 @@ pub(crate) fn spawn_pumps(
     Ok(())
 }
 
-fn run_hooks(
-    live: &Live,
-    from_router: Receiver<Routed>,
-    to_session: Sender<Value>,
-    mut learn_cli_session_id: bool,
-) {
+fn run_hooks(live: &Live, from_router: Receiver<Routed>, mut learn_cli_session_id: bool) {
     for Routed { event, reply } in from_router {
         // Codex: the ID comes in the first hook event. It is stored before the event goes on.
         if learn_cli_session_id && let Some(id) = cli_session_id_from_event(&event) {
@@ -490,7 +540,9 @@ fn run_hooks(
             learn_cli_session_id = false;
         }
         // A `Stop` with a reply: the Stop hook of the app may block it. This thread handles the
-        // events of the session one by one, so no later event can pass this one. If the stop was
+        // events of the session one by one, and it applies each one to the status machine before
+        // it takes the next one. So no later event can pass this one, and the machine has all the
+        // earlier events (a `UserPromptSubmit`) when the Stop hook reads its status. If the stop was
         // blocked, the machine hears it BEFORE it gets the `Stop` event, so the `Stop` keeps
         // `working` and the status never shows `idle` (spec 4.3). With no reply, or with no
         // block, the `reply` is dropped here, and the connection of the hook program closes with
@@ -505,17 +557,22 @@ fn run_hooks(
         if blocked {
             live.session.stop_blocked_by_app();
         }
-        let _ = to_session.send(event);
-        // The session applies the event in its own thread, so this can be a little early. A
-        // change that has no status change and no output (a draft cleared by a hook) shows at
-        // the next change of the status or the next output.
+        // In this thread, and not through a channel to a thread of the session: a later event
+        // of this session must find the machine with this event applied.
+        live.session.on_hook(&event);
+        // The view has the flags now (a draft cleared by a hook). The status thread sends the
+        // status of the view.
         live.refresh();
     }
 }
 
 fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) {
+    let _end = StatusEnd(live);
     let mut working = false;
     for change in status {
+        if let Some(pause) = &live.before_status {
+            pause(change.new);
+        }
         live.record_status(change.new);
         if change.new == Status::Stopped {
             // Order matters. A `stopped` view must never be sent while the registry still
@@ -554,6 +611,7 @@ fn run_status(live: &Live, status: Receiver<StatusChange>, router: &HookRouter) 
             working = false;
             live.run_after_turn();
         }
+        live.status_handled();
     }
 }
 
