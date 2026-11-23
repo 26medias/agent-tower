@@ -47,6 +47,7 @@
         class="node"
         class:selected={emp.slug === selectedSlug}
         class:attn={asking || request !== undefined}
+        class:off={status === "stopped" && request === undefined}
         data-testid="h-node"
         data-slug={emp.slug}
         data-status={status}
@@ -249,6 +250,15 @@
         color: var(--text);
         text-align: left;
         font-size: 12px;
+    }
+
+    /* An employee with no live session is faded, so that the live ones stand out. */
+    .node.off:not(.selected) {
+        opacity: 0.55;
+    }
+    .node.off:hover,
+    .node.off:focus-visible {
+        opacity: 1;
     }
 
     .node:hover {
