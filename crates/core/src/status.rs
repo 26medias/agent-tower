@@ -381,7 +381,7 @@ impl Machine {
 
     fn handle(&mut self, input: Input, now: Millis) {
         match input {
-            Input::Hook(event) => self.on_hook(&event),
+            Input::Hook(event) => self.on_hook(&event, now),
             Input::OperatorKey(key) => self.on_key(key, now),
             Input::PtyOutput => self.last_output = Some(now),
             Input::Tick => {}
@@ -407,8 +407,9 @@ impl Machine {
         }
     }
 
-    fn on_hook(&mut self, event: &HookEvent) {
+    fn on_hook(&mut self, event: &HookEvent, now: Millis) {
         let claude = self.cli == CliKind::Claude;
+        let mut watch_queued_turn = false;
         let (mapped, status) = match &event.kind {
             HookKind::SessionStart => (
                 MappedEvent::SessionStart,
@@ -421,7 +422,9 @@ impl Machine {
             HookKind::UserPromptSubmit => {
                 self.prompt_seen = true;
                 if self.status == Status::Working {
-                    // Claude starts a queued turn after the next Stop, with no event at its start.
+                    // Claude can start a queued turn after the next Stop, with no event at its
+                    // start. It can also put the prompt into the turn that runs (a report of a
+                    // subagent, a notification of a background task), and then no turn follows.
                     // A Codex steering prompt does not queue a turn.
                     self.queued_turn |= claude;
                 } else {
@@ -441,6 +444,8 @@ impl Machine {
             }
             HookKind::Stop => {
                 self.tool_since_stop = false;
+                // This Stop uses the queued mark. See the quiet watch below.
+                watch_queued_turn = claude && self.queued_turn && !self.stop_blocked;
                 (MappedEvent::Stop, self.status_after_stop(claude))
             }
             HookKind::Interrupt if !claude => {
@@ -463,6 +468,14 @@ impl Machine {
         };
         self.last_event = Some(mapped);
         self.clear_watch();
+        if watch_queued_turn {
+            // The queued mark kept `working`, but it is not sure that a queued turn runs: Claude
+            // sends the same `UserPromptSubmit` for a prompt that it put into the turn that just
+            // ended. A turn that runs writes output all the time. So if the output stays quiet,
+            // no turn runs, and the quiet watch gives `idle`. Without this, the status stays
+            // `working` with no end and the app never pastes the waiting messages.
+            self.quiet_watch = Some(now);
+        }
         self.startup_question = false;
         if status == Status::Idle && mapped != MappedEvent::Stop {
             self.queued_turn = false;
@@ -803,6 +816,61 @@ mod tests {
         assert!(!rig.machine.queued_turn());
         // Second Stop: idle.
         assert_eq!(rig.hook(HookKind::Stop), Some(Status::Idle));
+    }
+
+    /// The defect of 2026-11-23: Claude put a prompt (the report of a subagent) into the turn
+    /// that ran. The queued mark was set, the Stop kept `working`, no queued turn came, and the
+    /// status stayed `working` with no end.
+    #[test]
+    fn claude_queued_mark_with_no_queued_turn_gives_idle_after_quiet() {
+        let mut rig = Rig::claude();
+        rig.hook(HookKind::SessionStart);
+        rig.hook(HookKind::UserPromptSubmit);
+        rig.hook(HookKind::UserPromptSubmit); // put into the turn that runs
+        assert_eq!(rig.hook(HookKind::Stop), None);
+        assert_eq!(rig.status(), Status::Working);
+        // The last output of the turn. Then the CLI is quiet.
+        rig.after(50, Input::PtyOutput);
+        let last = rig.now;
+        assert_eq!(rig.machine.next_deadline(), Some(Millis(last + QUIET_MS)));
+        assert_eq!(rig.at(last + QUIET_MS - 1, Input::Tick), None);
+        assert_eq!(rig.at(last + QUIET_MS, Input::Tick), Some(Status::Idle));
+        assert!(rig.machine.paste_allowed());
+        assert_eq!(rig.machine.next_deadline(), None);
+    }
+
+    #[test]
+    fn claude_queued_turn_that_runs_stays_working_while_output_comes() {
+        let mut rig = Rig::claude();
+        rig.hook(HookKind::SessionStart);
+        rig.hook(HookKind::UserPromptSubmit);
+        rig.hook(HookKind::UserPromptSubmit);
+        assert_eq!(rig.hook(HookKind::Stop), None);
+        // The queued turn runs for 10 s with no hook event. Its output comes each 500 ms.
+        for _ in 0..20 {
+            assert_eq!(rig.after(500, Input::PtyOutput), None);
+        }
+        assert_eq!(rig.status(), Status::Working);
+        // A tool of the queued turn ends the watch. A long quiet tool does not give idle.
+        rig.hook(HookKind::PreToolUse);
+        assert_eq!(rig.after(60_000, Input::Tick), None);
+        assert_eq!(rig.status(), Status::Working);
+        assert_eq!(rig.hook(HookKind::Stop), Some(Status::Idle));
+    }
+
+    #[test]
+    fn a_stop_that_the_app_blocked_starts_no_quiet_watch() {
+        let mut rig = Rig::claude();
+        rig.hook(HookKind::SessionStart);
+        rig.hook(HookKind::UserPromptSubmit);
+        rig.hook(HookKind::UserPromptSubmit); // queued mark
+        rig.after(10, Input::StopBlockedByApp);
+        assert_eq!(rig.hook(HookKind::Stop), None);
+        assert_eq!(rig.machine.next_deadline(), None);
+        assert_eq!(rig.after(60_000, Input::Tick), None);
+        // The stop after the block uses the mark and starts the watch.
+        assert_eq!(rig.hook(HookKind::Stop), None);
+        assert_eq!(rig.after(QUIET_MS, Input::Tick), Some(Status::Idle));
     }
 
     #[test]
